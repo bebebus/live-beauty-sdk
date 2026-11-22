@@ -89,51 +89,58 @@ internal class FaceRetouchMeshPass {
         vertexBuffer.clear()
         vertexBuffer.put(vertexArray)
 
-        glBindFramebuffer(GL_FRAMEBUFFER, targetFbo)
-        glViewport(0, 0, width, height)
-        glDisable(GL_DEPTH_TEST)
-        glDisable(GL_SCISSOR_TEST)
-        glEnable(GL_BLEND)
-        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE)
-        glEnable(GL_CULL_FACE)
-        glFrontFace(if (frontFaceCw) GL_CW else GL_CCW)
-        glCullFace(GL_BACK)
-        glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, sourceTexture)
+        // 任何一步抛异常都要把共享 GL 状态还原：残留启用的顶点属性数组仍指向 468 顶点的客户端缓冲，
+        // 回退路径随后画 548 顶点网格时驱动可能越界读取（部分 Mali/Adreno 直接 SIGSEGV）。
+        try {
+            glBindFramebuffer(GL_FRAMEBUFFER, targetFbo)
+            glViewport(0, 0, width, height)
+            glDisable(GL_DEPTH_TEST)
+            glDisable(GL_SCISSOR_TEST)
+            glEnable(GL_BLEND)
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE)
+            glEnable(GL_CULL_FACE)
+            glFrontFace(if (frontFaceCw) GL_CW else GL_CCW)
+            glCullFace(GL_BACK)
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, sourceTexture)
 
-        val byteStride = STRIDE_FLOATS * 4
-        if (dc > 1e-4f || nf > 1e-4f) {
-            glUseProgram(skinProg)
-            bindAttribs(skinPos, skinSrc, skinAttr, byteStride)
-            glUniform1i(skinSampler, 0)
-            glUniform4f(skinStrength, dc, nf, 0f, 0f)
-            skinRetouchIndexBuf.position(0)
-            glDrawElements(GL_TRIANGLES, SKIN_RETOUCH_INDICES.size, GL_UNSIGNED_SHORT, skinRetouchIndexBuf)
+            val byteStride = STRIDE_FLOATS * 4
+            if (dc > 1e-4f || nf > 1e-4f) {
+                glUseProgram(skinProg)
+                bindAttribs(skinPos, skinSrc, skinAttr, byteStride)
+                glUniform1i(skinSampler, 0)
+                glUniform4f(skinStrength, dc, nf, 0f, 0f)
+                skinRetouchIndexBuf.position(0)
+                glDrawElements(GL_TRIANGLES, SKIN_RETOUCH_INDICES.size, GL_UNSIGNED_SHORT, skinRetouchIndexBuf)
+                unbindAttribs(skinPos, skinSrc, skinAttr)
+            }
+
+            if (be > 1e-4f || tw > 1e-4f) {
+                // 眼裂（28 三角形）与内唇口腔（18 三角形）子网格本身已是精确解剖边界，直接复用已上传的 vertexBuffer，省去二次 15 KB 拷贝。
+                glUseProgram(eyeTeethProg)
+                bindAttribs(etPos, etSrc, etAttr, byteStride)
+                glUniform1i(etSampler, 0)
+                if (be > 1e-4f) {
+                    glUniform4f(etMode, be, 0f, 0f, 0f)
+                    eyeOpeningIndexBuf.position(0)
+                    glDrawElements(GL_TRIANGLES, FaceMakeupUv.EYE_OPENING_INDICES.size, GL_UNSIGNED_SHORT, eyeOpeningIndexBuf)
+                }
+                if (tw > 1e-4f) {
+                    glUniform4f(etMode, tw, 1f, 0f, 0f)
+                    innerMouthIndexBuf.position(0)
+                    glDrawElements(GL_TRIANGLES, FaceMakeupUv.INNER_MOUTH_INDICES.size, GL_UNSIGNED_SHORT, innerMouthIndexBuf)
+                }
+                unbindAttribs(etPos, etSrc, etAttr)
+            }
+
+        } finally {
             unbindAttribs(skinPos, skinSrc, skinAttr)
-        }
-
-        if (be > 1e-4f || tw > 1e-4f) {
-            // 眼裂（28 三角形）与内唇口腔（18 三角形）子网格本身已是精确解剖边界，直接复用已上传的 vertexBuffer，省去二次 15 KB 拷贝。
-            glUseProgram(eyeTeethProg)
-            bindAttribs(etPos, etSrc, etAttr, byteStride)
-            glUniform1i(etSampler, 0)
-            if (be > 1e-4f) {
-                glUniform4f(etMode, be, 0f, 0f, 0f)
-                eyeOpeningIndexBuf.position(0)
-                glDrawElements(GL_TRIANGLES, FaceMakeupUv.EYE_OPENING_INDICES.size, GL_UNSIGNED_SHORT, eyeOpeningIndexBuf)
-            }
-            if (tw > 1e-4f) {
-                glUniform4f(etMode, tw, 1f, 0f, 0f)
-                innerMouthIndexBuf.position(0)
-                glDrawElements(GL_TRIANGLES, FaceMakeupUv.INNER_MOUTH_INDICES.size, GL_UNSIGNED_SHORT, innerMouthIndexBuf)
-            }
             unbindAttribs(etPos, etSrc, etAttr)
+            glDisable(GL_CULL_FACE)
+            glFrontFace(GL_CCW)
+            glDisable(GL_BLEND)
+            glBindTexture(GL_TEXTURE_2D, 0)
         }
-
-        glDisable(GL_CULL_FACE)
-        glFrontFace(GL_CCW)
-        glDisable(GL_BLEND)
-        glBindTexture(GL_TEXTURE_2D, 0)
         if (fresh) check(glGetError() == GL_NO_ERROR)
         return true
     }

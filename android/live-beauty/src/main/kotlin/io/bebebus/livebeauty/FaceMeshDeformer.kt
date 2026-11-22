@@ -574,7 +574,10 @@ internal class FaceMeshDeformer {
                 dispMy[mi] = mdy
             }
 
-            val padOuter = padOuterBase + silExcess * 0.85f + outwardDisp * 1.50f + sCranial * 0.185f * fh
+            // cranialTop = 0 时与 1.31.3 已真机验收的外环公式逐位一致（外环至少比内环再外扩 0.115·fw）；
+            // 高颅顶只按 crownW 在颅顶/上颞局部追加外扩，下颌与脸侧的零位移锚环位置不变，瘦脸时脸旁背景受影响范围不扩大。
+            val padOuter = max(padOuterBase + silExcess * 0.85f + outwardDisp * 1.50f, padMid - cranialSpan + 0.115f * fw) +
+                sCranial * crownW * CRANIAL_OUTER_PAD * fh
             val bx = ox + rx * padOuter
             val by = oy + ry * padOuter
             val bi = FaceMeshTopology.BUFFER_OFFSET + k
@@ -867,6 +870,8 @@ internal class FaceMeshDeformer {
         const val RHO_FADE = 0.15f
         /** 内层随动缓冲环承接下巴/发际线等纵向五官微整的平滑比例（横向轮廓微整直接由同一 2D 连续场求值）。 */
         const val MID_INTERIOR_CARRY = 0.55f
+        /** 高颅顶外锚环的局部外扩量（× fh × crownW）：须大于内环外蓬总量 0.095 + 0.072，留出缓冲带不被压扁。 */
+        const val CRANIAL_OUTER_PAD = 0.185f
         /** 规范脸高 / 脸宽（姿态拟合失败时的回退投影尺度用）。 */
         const val CANON_FH_OVER_FW = 1.153f
         /** 可见度时间平滑：下降、上升的时间常数。 */

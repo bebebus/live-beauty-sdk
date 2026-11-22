@@ -1167,6 +1167,19 @@ class FaceMeshDeformerTest {
                 assertEquals(cranialDeformer.vertexData[k + 2] * 2f - 1f, cranialDeformer.vertexData[k], 1e-5f)
                 assertEquals(cranialDeformer.vertexData[k + 3] * 2f - 1f, cranialDeformer.vertexData[k + 1], 1e-5f)
             }
+
+            // 4. 下颌/下巴段（FACE_OVAL[12..24]）的零位移锚环与不开高颅顶时逐位一致：瘦脸时脸旁背景受影响范围不随高颅顶扩大；
+            //    颅顶正中锚点则必须外扩，给外蓬的发冠留出缓冲带。
+            for (k in 12..24) {
+                val b = (FaceMeshTopology.BUFFER_OFFSET + k) * 4
+                assertEquals("yaw=$yawDeg 下颌锚点 oval[$k] x", baseDeformer.vertexData[b + 2], cranialDeformer.vertexData[b + 2], 1e-6f)
+                assertEquals("yaw=$yawDeg 下颌锚点 oval[$k] y", baseDeformer.vertexData[b + 3], cranialDeformer.vertexData[b + 3], 1e-6f)
+            }
+            val crownOuter = FaceMeshTopology.BUFFER_OFFSET * 4
+            assertTrue(
+                "yaw=$yawDeg 颅顶锚点应外扩",
+                cranialDeformer.vertexData[crownOuter + 3] > baseDeformer.vertexData[crownOuter + 3] + 0.01f,
+            )
         }
     }
 

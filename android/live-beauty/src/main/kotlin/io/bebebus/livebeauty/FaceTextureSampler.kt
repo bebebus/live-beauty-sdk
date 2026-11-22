@@ -37,6 +37,10 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     private val pboIds = IntArray(2)
     private var pboChecked = false
     private var pboAvailable = false
+    /** 当前上下文是 ES 3.0+（与 PBO 是否可用无关：PBO 被停用后仍要保护 GL_PACK_ROW_LENGTH 等 ES3 状态）。 */
+    private var es3Context = false
+    private val packSaved = IntArray(5)
+    private val packTmp = IntArray(1) // 每帧回读都要查询，复用避免分配。
     private var pboPrimedSlot = -1
     private var w = 0
     private var h = 0
@@ -117,6 +121,8 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
                 drawQuad(roiFrames[slot], FaceRoiSelector.ROI_SIDE_PX, FaceRoiSelector.ROI_SIDE_PX, source, roiVertices)
             }
 
+            // 新建路径的错误检查须在发起 PBO 回读之前：enqueuePboRead 会读走错误标志用于判断 PBO 是否可用。
+            if (created) check(glGetError() == GL_NO_ERROR)
             if (deferred && !sync) {
                 pendingSlot = slot
                 pendingRoiCrop = if (wantRoi) faceCrop else FaceRoiSelector.CropRect.FULL
@@ -231,28 +237,49 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
         roiVertices.position(0)
     }
 
-    private fun resetPackState() {
-        glPixelStorei(GL_PACK_ALIGNMENT, 4)
-        if (pboAvailable) {
+    /**
+     * 回读前把 PACK 状态设成紧密排布、回读后原样还原：宿主（RTC / 相机 SDK）共享同一上下文，可能改过
+     * GL_PACK_ALIGNMENT 或 ES3 的 GL_PACK_ROW_LENGTH / SKIP_*，非零 ROW_LENGTH 会让 glReadPixels 写穿缓冲区；
+     * 但只设不还原又会反过来破坏宿主自己的回读，所以必须成对调用 [beginPack] / [endPack]。
+     */
+    private fun beginPack() {
+        val tmp = packTmp
+        glGetIntegerv(GL_PACK_ALIGNMENT, tmp, 0); packSaved[0] = tmp[0]
+        if (packSaved[0] != 4) glPixelStorei(GL_PACK_ALIGNMENT, 4)
+        if (es3Context) {
             try {
-                GLES30.glPixelStorei(GLES30.GL_PACK_ROW_LENGTH, 0)
-                GLES30.glPixelStorei(GLES30.GL_PACK_SKIP_PIXELS, 0)
-                GLES30.glPixelStorei(GLES30.GL_PACK_SKIP_ROWS, 0)
-            } catch (_: Throwable) {}
+                glGetIntegerv(GLES30.GL_PACK_ROW_LENGTH, tmp, 0); packSaved[1] = tmp[0]
+                glGetIntegerv(GLES30.GL_PACK_SKIP_PIXELS, tmp, 0); packSaved[2] = tmp[0]
+                glGetIntegerv(GLES30.GL_PACK_SKIP_ROWS, tmp, 0); packSaved[3] = tmp[0]
+                if (packSaved[1] != 0) glPixelStorei(GLES30.GL_PACK_ROW_LENGTH, 0)
+                if (packSaved[2] != 0) glPixelStorei(GLES30.GL_PACK_SKIP_PIXELS, 0)
+                if (packSaved[3] != 0) glPixelStorei(GLES30.GL_PACK_SKIP_ROWS, 0)
+                // 宿主可能绑着自己的 PACK PBO：同步 glReadPixels(Buffer) 会被当成偏移而报错，我们解绑后也必须还原。
+                glGetIntegerv(GLES30.GL_PIXEL_PACK_BUFFER_BINDING, tmp, 0); packSaved[4] = tmp[0]
+                if (packSaved[4] != 0) GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
+            } catch (_: Throwable) {
+                packSaved[1] = 0; packSaved[2] = 0; packSaved[3] = 0; packSaved[4] = 0
+            }
         }
     }
 
-    private fun drainGlErrors() {
-        for (i in 0 until 8) {
-            if (glGetError() == GL_NO_ERROR) break
+    private fun endPack() {
+        if (packSaved[0] != 4) glPixelStorei(GL_PACK_ALIGNMENT, packSaved[0])
+        if (es3Context) {
+            try {
+                if (packSaved[1] != 0) glPixelStorei(GLES30.GL_PACK_ROW_LENGTH, packSaved[1])
+                if (packSaved[2] != 0) glPixelStorei(GLES30.GL_PACK_SKIP_PIXELS, packSaved[2])
+                if (packSaved[3] != 0) glPixelStorei(GLES30.GL_PACK_SKIP_ROWS, packSaved[3])
+                if (packSaved[4] != 0) GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, packSaved[4])
+            } catch (_: Throwable) {}
         }
     }
 
     /** 同步读回当前绑定的 FBO 到目标缓冲区。 */
     private fun readSync(buffer: ByteBuffer, rw: Int, rh: Int, statMode: Int) {
         buffer.position(0)
-        resetPackState()
         Trace.beginSection("beauty.readback")
+        beginPack()
         try {
             val start = System.nanoTime()
             glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, buffer)
@@ -267,6 +294,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
                 unreadStall = (if (unreadStall >= 0L) unreadStall else 0L) + elapsed
             }
         } finally {
+            endPack()
             Trace.endSection()
         }
         buffer.position(0)
@@ -274,9 +302,8 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
 
     private fun enqueuePboRead(fbo: Int, pbo: Int, rw: Int, rh: Int): Boolean {
         if (pbo == 0) return false
+        beginPack()
         return try {
-            drainGlErrors()
-            resetPackState()
             glBindFramebuffer(GL_FRAMEBUFFER, fbo)
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbo)
             GLES30.glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, 0)
@@ -285,12 +312,15 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
         } catch (_: Throwable) {
             try { GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0) } catch (_: Throwable) {}
             false
+        } finally {
+            endPack()
         }
     }
 
     private fun mapPboInto(pbo: Int, target: ByteBuffer, byteCount: Int, statMode: Int): Boolean {
         if (pbo == 0) return false
         Trace.beginSection("beauty.pboMap")
+        beginPack()
         var mappedOk = false
         return try {
             val start = System.nanoTime()
@@ -325,6 +355,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
             try { GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0) } catch (_: Throwable) {}
             false
         } finally {
+            endPack()
             Trace.endSection()
         }
     }
@@ -332,11 +363,12 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     private fun checkPboSupport() {
         if (pboChecked) return
         pboChecked = true
-        pboAvailable = try {
+        es3Context = try {
             PboSupport.isEs3Version(glGetString(GL_VERSION))
         } catch (_: Throwable) {
             false
         }
+        pboAvailable = es3Context
     }
 
     private fun disablePbo() {
@@ -449,8 +481,9 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     }
 
     private fun allocatePbos(ids: IntArray, byteCount: Int) {
+        // allocate() 只在新建路径调用：先把纹理 / FBO 分配阶段的错误按原语义抛出，不能被这里吞掉，再单独判断 PBO 是否可用。
+        check(glGetError() == GL_NO_ERROR)
         try {
-            drainGlErrors()
             GLES30.glGenBuffers(2, ids, 0)
             for (i in 0..1) {
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, ids[i])
@@ -508,7 +541,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     /** 上下文已销毁（GL 线程在新上下文里调用）：只忘记 id，GL 对象随旧上下文销毁。 */
     fun release() {
         forget(); program = 0; deferred = false; lastStallNs = -1L
-        pboChecked = false; pboAvailable = false
+        pboChecked = false; pboAvailable = false; es3Context = false
         for (pair in consumers) pair.fill(null)
         turns.fill(0)
     }
