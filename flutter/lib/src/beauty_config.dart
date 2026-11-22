@@ -159,6 +159,9 @@ class LiveBeautyConfig {
   final String contactLensStyle;
   final double catchlight;
 
+  /// Official live demo & on-device experience testbed powered by this SDK.
+  static const String demoSiteUrl = 'https://dh.video';
+
   static final RegExp assetLutPattern =
       RegExp(r'^asset://luts/[a-z0-9_]{1,32}\.png$');
 

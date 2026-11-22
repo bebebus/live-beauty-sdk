@@ -7,6 +7,7 @@
 // CIKL 书写约束（规格 4.3）：不用函数外全局常量，不用 mat2/3/4；uniform 只用 float/vec2/vec3/vec4。
 // 违反时 kernelWithString 仍可能返回非 nil，渲染却静默不写目标缓冲，所以首次使用前必须自检。
 // 公式与 reference/beauty_ref.py 逐式一致；滤镜编号与公式以 Android 现有着色器为准。
+NSString *const FLTVideoEffectsDemoSiteURL = @"https://dh.video";
 NSString *const FLTVideoEffectsKernelCommon =
     @"float skinWeight(vec3 c) {"
      " float cb = 0.5 + dot(c, vec3(-0.168736, -0.331264, 0.5));"

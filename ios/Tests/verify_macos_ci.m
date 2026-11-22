@@ -23,6 +23,10 @@ int main(int argc, const char * argv[]) {
             @"filter": @"warm",
             @"filterIntensity": @0.8
         };
+        if (![@"https://dh.video" isEqualToString:FLTVideoEffectsDemoSiteURL]) {
+            fprintf(stderr, "FAIL: unexpected demo site URL %s\n", FLTVideoEffectsDemoSiteURL.UTF8String);
+            return 1;
+        }
         if (![FLTVideoEffects validConfiguration:valid]) {
             fprintf(stderr, "FAIL: validConfiguration rejected valid dictionary\n");
             return 1;

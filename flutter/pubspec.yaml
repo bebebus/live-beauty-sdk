@@ -4,8 +4,9 @@ description: >-
   reshape, 1080p guided skin smoothing, 6-layer makeup, 64^3 3D LUT color
   grading, body reshape, and portrait bokeh for Android, iOS, and Flutter.
 version: 1.0.0
-homepage: https://github.com/bebebus/live-beauty-sdk
+homepage: https://dh.video
 repository: https://github.com/bebebus/live-beauty-sdk
+documentation: https://github.com/bebebus/live-beauty-sdk#readme
 issue_tracker: https://github.com/bebebus/live-beauty-sdk/issues
 
 environment:

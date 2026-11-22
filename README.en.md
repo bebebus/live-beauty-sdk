@@ -3,6 +3,7 @@
 > [中文](./README.md) | English
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Live Demo: dh.video](https://img.shields.io/badge/Live_Demo-dh.video-FF4D6D?logo=googlechrome&logoColor=white)](https://dh.video)
 [![Android API](https://img.shields.io/badge/Android-API_24%2B-3DDC84?logo=android&logoColor=white)](./android)
 [![iOS](https://img.shields.io/badge/iOS-15.0%2B-000000?logo=apple&logoColor=white)](./ios)
 [![Flutter](https://img.shields.io/badge/Flutter-3.22%2B-02569B?logo=flutter&logoColor=white)](./flutter)
@@ -10,6 +11,11 @@
 **Bebebus Live Beauty SDK** is a production-grade, royalty-free, real-time on-device GPU beauty and face/body retouching engine for **Android (OpenGL ES 2.0)**, **iOS (CoreImage + Metal)**, and **Flutter**.
 
 Designed to be **100% transport- and RTC-agnostic**, it requires zero license servers or online activation, bundles all offline MediaPipe vision models, 10 studio `64³` 3D LUTs, and 5 high-precision UV makeup atlases out of the box, and plugs cleanly into **WebRTC, Agora, Zego, Tencent TRTC, CameraX, MediaCodec, or `AVCaptureSession`** pipelines.
+
+### Live Demo & Experience Testbed
+
+- **Official Live Demo Site**: [https://dh.video](https://dh.video)
+- Powered in production by **Bebebus Live Beauty SDK** — visit to preview real-time live broadcast beauty rendering or download the client app for hands-on testing of **478-pt diffeomorphic reshape, 1080p guided skin smoothing, beard hair edge preservation, 6-layer UV makeup, and `64³` 3D LUTs**.
 
 ---
 

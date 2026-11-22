@@ -23,5 +23,6 @@ class LiveBeautyPresetsTest {
         assertTrue(LiveBeautyPresets.koreanWaterGlow.hasMakeup())
         assertTrue(LiveBeautyPresets.clearColdWhite.hasFaceReshape())
         assertEquals("asset://luts/natural_studio.png", LiveBeautyPresets.mensClean.lutUrl)
+        assertEquals("https://dh.video", LiveBeautyPresets.DEMO_SITE_URL)
     }
 }

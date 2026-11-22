@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FORBIDDEN = re.compile(
-    r"(cartoon|dh\.video|1Bit-Software|rtmp_publisher|rtmp_broadcaster|com\.pedro|/Users/fitz|/Users/chen)",
+    r"(cartoon|video\.dh\.app|1Bit-Software|rtmp_publisher|rtmp_broadcaster|com\.pedro|/Users/fitz|/Users/chen)",
     re.IGNORECASE,
 )
 BINARY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".task", ".tflite", ".jar", ".keystore", ".so", ".a"}

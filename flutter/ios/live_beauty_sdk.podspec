@@ -3,9 +3,9 @@ Pod::Spec.new do |s|
   s.version          = '1.0.0'
   s.summary          = 'Real-time GPU live beauty SDK for Flutter (iOS CoreImage + MediaPipe 478-pt).'
   s.description      = <<-DESC
-    Flutter wrapper for Bebebus Live Beauty SDK on iOS (CoreImage + MediaPipe 478-pt face geometry).
+    Flutter wrapper for Bebebus Live Beauty SDK on iOS (CoreImage + MediaPipe 478-pt face geometry). Live demo & experience testbed: https://dh.video
   DESC
-  s.homepage         = 'https://github.com/bebebus/live-beauty-sdk'
+  s.homepage         = 'https://dh.video'
   s.license          = { :type => 'Apache-2.0', :file => '../../LICENSE' }
   s.author           = { 'Bebebus Open Source' => 'opensource@bebebus.io' }
   s.source           = { :path => '.' }

@@ -7,6 +7,8 @@
 /// COMMON：skinWeight、lift、ellipseE；WARP：cheek、eye；MASKS：maskParts、faceMasks → (face, excl)；
 /// COMPOSITE：beautyColor(I, mean, var, avg4, face, excl, p0, p1, style)。
 /// 几何一律用像素空间（度量空间 × w，各向同性，y 向上，与 destCoord() 一致）。
+/// 官方在线体验与实机测试站点地址。
+FOUNDATION_EXPORT NSString *const FLTVideoEffectsDemoSiteURL;
 FOUNDATION_EXPORT NSString *const FLTVideoEffectsKernelCommon;
 FOUNDATION_EXPORT NSString *const FLTVideoEffectsKernelWarp;
 FOUNDATION_EXPORT NSString *const FLTVideoEffectsKernelMasks;

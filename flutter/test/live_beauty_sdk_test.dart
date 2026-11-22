@@ -34,6 +34,7 @@ void main() {
         expect(decoded, equals(preset));
         expect(decoded.hashCode, equals(preset.hashCode));
       }
+      expect(LiveBeautyConfig.demoSiteUrl, equals('https://dh.video'));
       expect(LiveBeautyConfig.original.enabled, isFalse);
       expect(LiveBeautyConfig.original.hasFaceReshape, isFalse);
       expect(LiveBeautyConfig.original.hasMakeup, isFalse);

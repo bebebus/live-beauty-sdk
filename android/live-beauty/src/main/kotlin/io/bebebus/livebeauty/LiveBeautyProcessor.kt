@@ -67,6 +67,9 @@ class LiveBeautyProcessor(
 
 /** 开箱即用的秀场级预设参数模板。 */
 object LiveBeautyPresets {
+    /** 官方在线体验与实机测试站点地址。 */
+    const val DEMO_SITE_URL: String = "https://dh.video"
+
     /** 原画直通（零效果）。 */
     val original: VideoEffectsConfig = VideoEffectsConfig.original
 

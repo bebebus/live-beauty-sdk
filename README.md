@@ -3,6 +3,7 @@
 > 中文 | [English](./README.en.md)
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Live Demo: dh.video](https://img.shields.io/badge/在线体验-dh.video-FF4D6D?logo=googlechrome&logoColor=white)](https://dh.video)
 [![Android API](https://img.shields.io/badge/Android-API_24%2B-3DDC84?logo=android&logoColor=white)](./android)
 [![iOS](https://img.shields.io/badge/iOS-15.0%2B-000000?logo=apple&logoColor=white)](./ios)
 [![Flutter](https://img.shields.io/badge/Flutter-3.22%2B-02569B?logo=flutter&logoColor=white)](./flutter)
@@ -10,6 +11,11 @@
 **Bebebus Live Beauty SDK** 是一套面向实时互动直播、连麦、音视频通话与相机拍摄场景的高性能开源端侧 GPU 美颜引擎，覆盖 **Android 原生（OpenGL ES 2.0）**、**iOS 原生（CoreImage + Metal）** 与 **Flutter 跨端插件**。
 
 SDK 与推流 / RTC 传输层**彻底解耦**——不绑定任何特定推流器或私有云鉴权，无需联网申请 License，开箱内置离线 MediaPipe 视觉模型、10 款电影级 `64³` 3D LUT 与 5 套高精度 UV 美妆贴图，可直接嵌入 **WebRTC、Agora（声网）、Zego（即构）、Tencent TRTC、CameraX、MediaCodec、AVCaptureSession** 等任意音视频管线。
+
+### 在线体验与实机测试站点
+
+- **官方体验测试站点**：[https://dh.video](https://dh.video)
+- 该站点已完整接入 **Bebebus Live Beauty SDK** 生产管线，可直接在线查看真实直播间美颜画质，或通过站点获取客户端进行 **478 点微分同胚微整、1080p 导向滤波磨皮、胡须边界毛流保护、6 层 UV 美妆与 3D LUT** 真机开播体验。
 
 ---
 
