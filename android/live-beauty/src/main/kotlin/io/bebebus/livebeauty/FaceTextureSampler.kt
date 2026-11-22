@@ -133,10 +133,10 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
                 hasRoiStaging = false
                 roiCropStaging = FaceRoiSelector.CropRect.FULL
                 glBindFramebuffer(GL_FRAMEBUFFER, frames[slot])
-                readSync(checkNotNull(stagingBuffer), w, h, recordStats = true)
+                readSync(checkNotNull(stagingBuffer), w, h, statMode = STAT_MAIN)
                 if (wantRoi) {
                     glBindFramebuffer(GL_FRAMEBUFFER, roiFrames[slot])
-                    readSync(checkNotNull(roiStagingBuffer), FaceRoiSelector.ROI_SIDE_PX, FaceRoiSelector.ROI_SIDE_PX, recordStats = false)
+                    readSync(checkNotNull(roiStagingBuffer), FaceRoiSelector.ROI_SIDE_PX, FaceRoiSelector.ROI_SIDE_PX, statMode = STAT_ADD_ROI)
                     roiCropStaging = faceCrop
                     hasRoiStaging = true
                 }
@@ -160,10 +160,10 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
         roiCropStaging = FaceRoiSelector.CropRect.FULL
         try {
             if (usePbo) {
-                val mainOk = mapPboInto(pboIds[slot], checkNotNull(stagingBuffer), w * h * 4, recordStats = true)
+                val mainOk = mapPboInto(pboIds[slot], checkNotNull(stagingBuffer), w * h * 4, statMode = STAT_MAIN)
                 val roiOk = if (!crop.isFullFrame && roiAllocated) {
                     val side = FaceRoiSelector.ROI_SIDE_PX
-                    mapPboInto(roiPboIds[slot], checkNotNull(roiStagingBuffer), side * side * 4, recordStats = false)
+                    mapPboInto(roiPboIds[slot], checkNotNull(roiStagingBuffer), side * side * 4, statMode = STAT_ADD_ROI)
                 } else true
                 if (mainOk && roiOk) {
                     hasStaging = true
@@ -177,11 +177,11 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
                 disablePbo()
             }
             glBindFramebuffer(GL_FRAMEBUFFER, frames[slot])
-            readSync(checkNotNull(stagingBuffer), w, h, recordStats = true)
+            readSync(checkNotNull(stagingBuffer), w, h, statMode = STAT_MAIN)
             if (!crop.isFullFrame && roiAllocated) {
                 val side = FaceRoiSelector.ROI_SIDE_PX
                 glBindFramebuffer(GL_FRAMEBUFFER, roiFrames[slot])
-                readSync(checkNotNull(roiStagingBuffer), side, side, recordStats = false)
+                readSync(checkNotNull(roiStagingBuffer), side, side, statMode = STAT_ADD_ROI)
                 roiCropStaging = crop
                 hasRoiStaging = true
             }
@@ -249,18 +249,22 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     }
 
     /** 同步读回当前绑定的 FBO 到目标缓冲区。 */
-    private fun readSync(buffer: ByteBuffer, rw: Int, rh: Int, recordStats: Boolean) {
+    private fun readSync(buffer: ByteBuffer, rw: Int, rh: Int, statMode: Int) {
         buffer.position(0)
         resetPackState()
         Trace.beginSection("beauty.readback")
         try {
             val start = System.nanoTime()
             glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, buffer)
-            if (recordStats) {
-                lastStallNs = System.nanoTime() - start
-                unreadStall = lastStallNs
+            val elapsed = System.nanoTime() - start
+            if (statMode == STAT_MAIN) {
+                lastStallNs = elapsed
+                unreadStall = elapsed
                 hasStaging = true
                 reads++
+            } else if (statMode == STAT_ADD_ROI) {
+                lastStallNs = (if (lastStallNs >= 0L) lastStallNs else 0L) + elapsed
+                unreadStall = (if (unreadStall >= 0L) unreadStall else 0L) + elapsed
             }
         } finally {
             Trace.endSection()
@@ -284,7 +288,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
         }
     }
 
-    private fun mapPboInto(pbo: Int, target: ByteBuffer, byteCount: Int, recordStats: Boolean): Boolean {
+    private fun mapPboInto(pbo: Int, target: ByteBuffer, byteCount: Int, statMode: Int): Boolean {
         if (pbo == 0) return false
         Trace.beginSection("beauty.pboMap")
         var mappedOk = false
@@ -305,9 +309,13 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
             GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
             mappedOk = false
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
-            if (recordStats) {
-                lastStallNs = System.nanoTime() - start
-                unreadStall = lastStallNs
+            val elapsed = System.nanoTime() - start
+            if (statMode == STAT_MAIN) {
+                lastStallNs = elapsed
+                unreadStall = elapsed
+            } else if (statMode == STAT_ADD_ROI) {
+                lastStallNs = (if (lastStallNs >= 0L) lastStallNs else 0L) + elapsed
+                unreadStall = (if (unreadStall >= 0L) unreadStall else 0L) + elapsed
             }
             true
         } catch (_: Throwable) {
@@ -520,5 +528,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
         /** 头发分割（HairSegmenter，约 10 Hz）：独立一对缓冲，与人像分割各用各的 worker。 */
         const val HAIR = 3
         private const val CONSUMERS = 4
+        private const val STAT_MAIN = 1
+        private const val STAT_ADD_ROI = 2
     }
 }

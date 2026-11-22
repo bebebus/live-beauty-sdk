@@ -380,7 +380,7 @@ uniform vec4 uRetouchMode;
 varying vec2 vSrcCoord;
 varying vec4 vRetouchAttr;
 void main() {
-    float strength = uRetouchMode.x * vRetouchAttr.x;
+    float strength = clamp(uRetouchMode.x, 0.0, 1.0);
     if (strength <= 0.002) { discard; }
     vec3 c = texture2D(uSampler, vSrcCoord).rgb;
     float y = dot(c, vec3(0.299, 0.587, 0.114));

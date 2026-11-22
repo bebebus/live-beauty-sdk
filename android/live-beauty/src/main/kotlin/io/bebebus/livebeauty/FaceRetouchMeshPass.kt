@@ -113,13 +113,7 @@ internal class FaceRetouchMeshPass {
         }
 
         if (be > 1e-4f || tw > 1e-4f) {
-            // 切到眼裂 / 内唇模式：attr.x 恒置 1.0（子网格边界本身已是精确解剖眼睑缘与内唇缘）。
-            for (i in 0 until FaceMeshTopology.FACE_VERTEX_COUNT) {
-                vertexArray[i * STRIDE_FLOATS + 4] = 1f
-            }
-            vertexBuffer.clear()
-            vertexBuffer.put(vertexArray)
-
+            // 眼裂（28 三角形）与内唇口腔（18 三角形）子网格本身已是精确解剖边界，直接复用已上传的 vertexBuffer，省去二次 15 KB 拷贝。
             glUseProgram(eyeTeethProg)
             bindAttribs(etPos, etSrc, etAttr, byteStride)
             glUniform1i(etSampler, 0)
@@ -144,7 +138,9 @@ internal class FaceRetouchMeshPass {
         return true
     }
 
-    private fun packVertices(
+    internal val packedVerticesForTest: FloatArray get() = vertexArray
+
+    internal fun packVertices(
         landmarks: FloatArray,
         meshVertices: FloatArray?,
         ux: Float,

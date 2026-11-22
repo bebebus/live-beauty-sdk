@@ -1005,12 +1005,13 @@ class VideoEffectsFilter(
         // 2a'''. 468 点解剖子网格局部修饰（去黑眼圈留卧蚕、弧形法令纹、眼裂亮眼、内唇防染唇白牙）：直接原位叠加在 faceMeshPass FBO 上，
         // 省去整张 1080p FBO；异常或无网格时自动回退 FaceShapePass。
         var retouchApplied = false
-        if (processing && healthy && retouchMeshOn && mesh != null) {
+        if (processing && healthy && retouchMeshOn) {
+            val meshFrame = checkNotNull(mesh)
             try {
                 if (!meshRendered) {
                     source = faceMeshPass.renderBaseOnly(preMeshSource, width, height)
                 }
-                val retouchLandmarks = workingLandmarks ?: mesh.landmarks
+                val retouchLandmarks = workingLandmarks ?: meshFrame.landmarks
                 faceRetouchPass.renderInPlace(
                     targetFbo = faceMeshPass.outputFbo,
                     sourceTexture = preMeshSource,
@@ -1018,10 +1019,10 @@ class VideoEffectsFilter(
                     height = height,
                     landmarks = retouchLandmarks,
                     meshVertices = if (meshRendered) faceMeshDeformer.vertexData else null,
-                    axisX = mesh.axisX,
-                    axisY = mesh.axisY,
-                    faceWidth = mesh.faceWidth,
-                    faceHeight = mesh.faceHeight,
+                    axisX = meshFrame.axisX,
+                    axisY = meshFrame.axisY,
+                    faceWidth = meshFrame.faceWidth,
+                    faceHeight = meshFrame.faceHeight,
                     frontFaceCw = if (meshRendered) faceMeshDeformer.frontFaceCw else FaceMeshFrame.isFrontFaceCw(retouchLandmarks),
                     darkCircles = value.darkCircles * presence * steadyEye,
                     brightEyes = value.brightEyes * presence * steadyEye,
@@ -1034,6 +1035,15 @@ class VideoEffectsFilter(
                 glFrontFace(GL_CCW)
                 glDisable(GL_BLEND)
                 if (!stale) faceRetouchHealthy = false
+                if (!meshRendered) {
+                    source = preMeshSource
+                } else {
+                    try {
+                        source = faceMeshPass.render(preMeshSource, width, height, faceMeshDeformer.vertexData, faceMeshDeformer.frontFaceCw)
+                    } catch (_: Exception) {
+                        source = preMeshSource
+                    }
+                }
             }
         }
         if (!retouchApplied && processing && healthy && faceShapeHealthy && presence > 0f && (faceShapeOn || retouchAny)) {

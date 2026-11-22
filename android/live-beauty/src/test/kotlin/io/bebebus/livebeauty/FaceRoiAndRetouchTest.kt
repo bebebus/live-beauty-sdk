@@ -47,11 +47,14 @@ class FaceRoiAndRetouchTest {
         assertFalse(far.isActive)
         assertTrue(far.select(720, 1280, 280L).isFullFrame)
 
-        // 超时（> STALE_MS）同样自动退回全画幅。
+        // 超时（> STALE_MS）或乱序回退时间戳（nowMs < lastSeenMs）同样自动退回全画幅。
         far.onFace(0.10f, 0.92f, 0.16f, 300L)
         val corner = far.select(720, 1280, 310L)
         assertEquals(0f, corner.left, 1e-6f)
         assertEquals(0f, corner.top, 1e-6f)
+        assertTrue(far.select(720, 1280, 290L).isFullFrame)
+        assertFalse(far.isActive)
+        far.onFace(0.10f, 0.92f, 0.16f, 300L)
         assertTrue(far.select(720, 1280, 300L + FaceRoiSelector.STALE_MS + 10L).isFullFrame)
     }
 
@@ -123,7 +126,25 @@ class FaceRoiAndRetouchTest {
         assertEquals(28 * 3, FaceMakeupUv.EYE_OPENING_INDICES.size)
         assertTrue(FaceRetouchMeshPass.SKIN_RETOUCH_INDICES.size in (60 * 3)..(220 * 3))
 
-        // 4. 双频奶油肌匀光曲线边界校验。
+        // 4. 动态有效权重选向校验：仅开法令纹 (dc=0, nf=1) 时必须取横向跨沟偏移，仅开黑眼圈 (dc=1, nf=0) 时必须取纵向泪沟偏移。
+        val pass = FaceRetouchMeshPass()
+        val dummyLm = FloatArray(FaceMeshTopology.FACE_VERTEX_COUNT * 2) { 0.5f }
+        pass.packVertices(dummyLm, null, 1f, 0f, 0f, 1f, 0.40f, 0.50f, 9f / 16f, 1f, dc = 0f, nf = 1f)
+        val foldOffX = pass.packedVerticesForTest[206 * 8 + 6]
+        val tearUnusedX = pass.packedVerticesForTest[229 * 8 + 6]
+        val tearUnusedY = pass.packedVerticesForTest[229 * 8 + 7]
+        assertTrue("仅开法令纹时法令纹核心点 206 应取非零横向跨沟偏移", kotlin.math.abs(foldOffX) > 0.005f)
+        assertEquals("仅开法令纹时纯泪沟点 229 偏移必须归零", 0f, hypot(tearUnusedX, tearUnusedY), 1e-6f)
+
+        pass.packVertices(dummyLm, null, 1f, 0f, 0f, 1f, 0.40f, 0.50f, 9f / 16f, 1f, dc = 1f, nf = 0f)
+        val tearOffX = pass.packedVerticesForTest[229 * 8 + 6]
+        val tearOffY = pass.packedVerticesForTest[229 * 8 + 7]
+        val foldUnusedX = pass.packedVerticesForTest[206 * 8 + 6]
+        assertEquals(0f, tearOffX, 1e-6f)
+        assertTrue("仅开黑眼圈时泪沟点 229 应向下 (-v) 采样苹果肌干净肤色", tearOffY < -0.008f)
+        assertEquals("仅开黑眼圈时纯法令纹点 206 偏移必须归零", 0f, foldUnusedX, 1e-6f)
+
+        // 5. 双频奶油肌匀光曲线边界校验。
         assertEquals(0f, BeautyQualityTuning.macroEvenness(0f), 0f)
         assertEquals(0f, BeautyQualityTuning.macroEvenness(-0.2f), 0f)
         assertEquals(0f, BeautyQualityTuning.macroEvenness(Float.NaN), 0f)

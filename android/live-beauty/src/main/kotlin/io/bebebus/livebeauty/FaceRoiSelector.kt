@@ -58,7 +58,7 @@ internal class FaceRoiSelector {
         }
         val mpCx = glCenterX.coerceIn(0f, 1f)
         val mpCy = (1f - glCenterY).coerceIn(0f, 1f)
-        if (lastSeenMs == Long.MIN_VALUE || nowMs - lastSeenMs > STALE_MS) {
+        if (lastSeenMs == Long.MIN_VALUE || nowMs < lastSeenMs || nowMs - lastSeenMs > STALE_MS) {
             smoothCx = mpCx
             smoothCy = mpCy
             smoothFaceWidth = faceWidth
@@ -83,7 +83,7 @@ internal class FaceRoiSelector {
 
     /** 计算本帧采样使用的人脸裁剪框；近景或状态过期时返回 [CropRect.FULL]。 */
     fun select(width: Int, height: Int, nowMs: Long): CropRect {
-        if (!active || width <= 0 || height <= 0 || lastSeenMs == Long.MIN_VALUE || nowMs - lastSeenMs > STALE_MS) {
+        if (!active || width <= 0 || height <= 0 || lastSeenMs == Long.MIN_VALUE || nowMs < lastSeenMs || nowMs - lastSeenMs > STALE_MS) {
             active = false
             return CropRect.FULL
         }
