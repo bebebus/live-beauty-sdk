@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [1.1.2] - 2026-11-23
+
+### Improved
+- **Physically-Based Soft-Blur Lip Realism (`MAKEUP_LIP_FRAGMENT`, `MakeupPass`, `contour_highlight.png`)**:
+  - Replaced the fixed `0.745` brightness floor (`normY`) with proportional scene-illumination shading (`0 → 0` in shadows) + midtone-only dark-lip de-dulling + multiply/pigment fusion, preserving natural 3D upper/lower lip shading contrast (`ΔY ≥ 0.12`), closed-mouth parting seams (`ΔY ≈ +0.001`), oral cavity shadows (`ΔY = 0.000`), room white balance, and fine vertical lip creases.
+  - Replaced the wide pink-tinted static gloss band (`+ vec3(0.42, 0.38, 0.40)`) with a wet-clearcoat optical model (deeper wet pigment + tight neutral warm-white Fresnel catchlight centered on the true lower-lip belly `v = 0.714` and cupid-bow crest `v = 0.673`, modulated by real surface brightness and micro-creases).
+  - Added zero-extra-uniform anatomical pixel gates: `darkGate` (keeps parting seam / cavity / beard dark), `teethGate` (100% guards exposed bright teeth against pink staining), and `skinRimGate` (selectively attenuates yellowish perioral skin bleed in the outer feather zone by `> 5×`).
+  - Widened `contour_highlight.png` lip feathering (`0.018` upper / `0.015` lower outer blur, `0.008..0.044` mouth-corner taper, inner-belly-to-rim gradient) to eliminate hard sticker/tape edges.
+  - Recalibrated all 6 lipstick shades (`rose_bean`, `coral_peach`, `cherry_red`, `milk_tea`, `berry_plum`, `orange_soda`) for rich, distinct true-to-swatch hue separation across both velvet and glossy finishes.
+- **Anti-Lag Speech Lip Tracking (`FaceMeshFilter`)**:
+  - Added a 40-point `LIP_RING` speed boost to the lower-face filter region (matching `LID_RING` for blinks), keeping stationary jitter `≤ 0.8 px@720` while preventing lip makeup lag during rapid speech/smiling.
+- **GPU Regression Probes `L1–L5` (`_tooling/glsl/`)**:
+  - Added 5 WebGL shader probes locking dark-seam/cavity neutrality (`L1`), zero teeth staining (`L2`), outer-rim perioral skin rejection (`L3`), glossy multi-shade hue separation (`L4`), and upper/lower 3D lip shading contrast (`L5`).
+
 ## [1.1.1] - 2026-11-22
 
 ### Fixed

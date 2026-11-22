@@ -848,17 +848,73 @@ void main() {
     gl.uniform4f(at('uMode'), 2, 0, 0, 0);
   });
   out.results.makeupLipVelvet = runMakeup(P.makeupLip, skinBaseTex, lipMaskTex, (at) => {
-    gl.uniform4f(at('uLipColor'), 0.82, 0.34, 0.42, 0.72);
+    gl.uniform4f(at('uLipColor'), 0.73, 0.32, 0.33, 0.72);
     gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
   });
   out.results.makeupLipGlossy = runMakeup(P.makeupLip, skinBaseTex, lipMaskTex, (at) => {
-    gl.uniform4f(at('uLipColor'), 0.82, 0.34, 0.42, 0.72);
+    gl.uniform4f(at('uLipColor'), 0.73, 0.32, 0.33, 0.72);
     gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
   });
-  // 深紫暗沉裸唇去乌显色验证 + 上下分屏局部放大高清眉眼 UV 验证。
+  // 深紫暗沉裸唇去乌显色验证 + L1–L5 物理透色柔焦唇防胶布/防发粉探针。
   const darkLipBaseTex = solidTex([105, 68, 72, 255]);
   out.results.makeupLipDarkBase = runMakeup(P.makeupLip, darkLipBaseTex, lipMaskTex, (at) => {
-    gl.uniform4f(at('uLipColor'), 0.95, 0.44, 0.38, 0.85);
+    gl.uniform4f(at('uLipColor'), 0.86, 0.36, 0.27, 0.85);
+    gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
+  });
+  // L1: 闭合唇缝暗影 (45,25,27) 与口腔暗腔 (22,14,15) 在高强度水光下绝不抬亮发粉。
+  const seamBaseTex = solidTex([45, 25, 27, 255]);
+  const cavityBaseTex = solidTex([22, 14, 15, 255]);
+  out.results.makeupLipSeamGlossy = runMakeup(P.makeupLip, seamBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.86, 0.36, 0.27, 0.85);
+    gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
+  });
+  out.results.makeupLipCavityGlossy = runMakeup(P.makeupLip, cavityBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.73, 0.32, 0.33, 0.85);
+    gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
+  });
+  // L2: 白色露齿边缘 (222,216,206) 涂车厘子红绝不染粉。
+  const teethBaseTex = solidTex([222, 216, 206, 255]);
+  out.results.makeupLipTeethGuard = runMakeup(P.makeupLip, teethBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.70, 0.09, 0.11, 0.85);
+    gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
+  });
+  // L3: 外缘羽化区 (feather≈0.45) 嘴周暖黄肤 (195,156,120) vs 真实裸唇 (145,96,95) 自适应门控对比。
+  const rimMaskTex = solidTex([0, 0, 115, 255]);
+  const warmSkinBaseTex = solidTex([195, 156, 120, 255]);
+  const bareLipBaseTex = solidTex([145, 96, 95, 255]);
+  out.results.makeupLipRimSkin = runMakeup(P.makeupLip, warmSkinBaseTex, rimMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.70, 0.09, 0.11, 0.75);
+    gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
+  });
+  out.results.makeupLipRimLip = runMakeup(P.makeupLip, bareLipBaseTex, rimMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.70, 0.09, 0.11, 0.75);
+    gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
+  });
+  // L4: 水光模式下 4 款代表色号（正红/橘汽/奶茶/梅子）色相区分度验证（杜绝全部发粉）。
+  out.results.makeupLipGlossyCherry = runMakeup(P.makeupLip, bareLipBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.70, 0.09, 0.11, 0.65);
+    gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
+  });
+  out.results.makeupLipGlossyOrange = runMakeup(P.makeupLip, bareLipBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.88, 0.30, 0.10, 0.65);
+    gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
+  });
+  out.results.makeupLipGlossyMilkTea = runMakeup(P.makeupLip, bareLipBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.64, 0.39, 0.27, 0.65);
+    gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
+  });
+  out.results.makeupLipGlossyBerry = runMakeup(P.makeupLip, bareLipBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.54, 0.12, 0.26, 0.65);
+    gl.uniform4f(at('uLipStyle'), 1.0, 1 / W, 1 / H, 0);
+  });
+  // L5: 上唇背光暗面 (105,66,68) vs 下唇受光腹面 (145,96,95) 3D 立体明暗差保留。
+  const upperLipBaseTex = solidTex([105, 66, 68, 255]);
+  out.results.makeupLipUpperShadow = runMakeup(P.makeupLip, upperLipBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.73, 0.32, 0.33, 0.65);
+    gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
+  });
+  out.results.makeupLipLowerLit = runMakeup(P.makeupLip, bareLipBaseTex, lipMaskTex, (at) => {
+    gl.uniform4f(at('uLipColor'), 0.73, 0.32, 0.33, 0.65);
     gl.uniform4f(at('uLipStyle'), 0.0, 1 / W, 1 / H, 0);
   });
   const splitAtlasData = new Uint8Array(64 * 64 * 4);

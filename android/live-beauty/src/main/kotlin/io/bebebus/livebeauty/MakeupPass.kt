@@ -223,7 +223,7 @@ internal class MakeupPass(private val assets: AssetManager?) {
             unbindMakeupAttributes(layerPos, layerScreenUv, layerMakeupUv)
         }
 
-        // 2b. 口红 / 唇釉（120 纯唇带三角形，口腔零三角形物理不涂牙；传入像素步长用于分离高频唇纹与去乌底色）。
+        // 2b. 口红 / 唇釉（120 纯唇带三角形，口腔零三角形物理不涂牙；传入像素步长用于分离高频唇纹与透色阴影保留）。
         if (config.lipstick > 0f && lipGain > 0f && contourTex != 0) {
             val rgb = FaceMakeupUv.lipstickRgb(config.lipstickColor)
             val glossy = if (config.lipstickFinish == "glossy") 1f else 0f
@@ -233,7 +233,7 @@ internal class MakeupPass(private val assets: AssetManager?) {
             glUniform1i(lipBase, 0)
             glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, contourTex)
             glUniform1i(lipAtlas, 1)
-            glUniform4f(lipColor, rgb[0], rgb[1], rgb[2], config.lipstick * 0.92f * lipGain)
+            glUniform4f(lipColor, rgb[0], rgb[1], rgb[2], config.lipstick * 0.85f * lipGain)
             glUniform4f(lipStyle, glossy, 1f / width, 1f / height, 0f)
             lipIndexBuf.position(0)
             glDrawElements(GL_TRIANGLES, FaceMeshTopology.LIP_BAND_INDICES.size, GL_UNSIGNED_SHORT, lipIndexBuf)

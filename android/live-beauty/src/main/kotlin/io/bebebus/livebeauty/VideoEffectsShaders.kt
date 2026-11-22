@@ -123,7 +123,10 @@ void main() {
 
     /**
      * 实时口红 / 唇釉片元着色器（仅在 120 个纯唇带三角形上光栅化，内唇口腔零三角形物理防涂牙）。
-     * 采用商业级「唇底去乌归一化重映射 + 真实唇纹高频回填 + 双叶水光镜面高光」，深唇/暗光也能纯净显色。
+     * 采用物理透色柔焦唇模型：
+     * 1. 三级像素保护门控：暗缝/口腔/胡茬保护（darkGate）、露齿防染（teethGate）、外缘嘴周黄肤自适应柔化（skinRimGate）；
+     * 2. 等比光照透色着色：去除固定亮底，按真实局部明暗 smoothY 等比驱动并保留环境色温与高频唇纹，立体暗面与闭合唇缝自然清晰；
+     * 3. 真实镜面水光：湿润基底加深显色 + 紧致中性暖白高光（随真实亮面与唇腹曲率触发，杜绝大面积粉白带）。
      * uLipStyle = (isGlossy, texelX, texelY, 0).
      */
     const val MAKEUP_LIP_FRAGMENT = """$PRECISION
@@ -133,14 +136,25 @@ uniform vec4 uLipColor;
 uniform vec4 uLipStyle;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
-// Lip-base de-darkening color remap with high-frequency lip-crease preservation and ring-light gloss.
+// Physically-based translucent lip shading with shadow/teeth/skin-rim gates and crisp neutral-white gloss.
 void main() {
     float feather = texture2D(uAtlas, vMakeupUv).b;
-    float alpha = clamp(feather * uLipColor.a, 0.0, 1.0);
-    if (alpha <= 0.001) { discard; }
+    if (feather * uLipColor.a <= 0.001) { discard; }
     vec2 uv = clamp(vScreenUv, 0.0, 1.0);
     vec3 base = texture2D(uBase, uv).rgb;
     float baseY = dot(base, vec3(0.299, 0.587, 0.114));
+    // 1. Adaptive anatomical gates: keep dark lip parting seam / cavity / beard dark, teeth white, and perioral skin clean.
+    float darkGate = smoothstep(0.06, 0.20, baseY);
+    float redExcess = base.r - max(base.g, base.b);
+    float teethLike = smoothstep(0.52, 0.74, baseY) * (1.0 - smoothstep(0.035, 0.115, redExcess));
+    float teethGate = 1.0 - teethLike;
+    float lipHue = (base.r - base.g) - 0.75 * max(base.g - base.b, 0.0);
+    float rimZone = 1.0 - smoothstep(0.35, 0.92, feather);
+    float skinRimGate = mix(1.0, smoothstep(0.045, 0.155, lipHue), rimZone * 0.92);
+    float effFeather = feather * darkGate * teethGate * skinRimGate;
+    float alpha = clamp(effFeather * uLipColor.a, 0.0, 0.90);
+    if (alpha <= 0.001) { discard; }
+    // 2. Local 4-tap smooth luma to isolate real vertical lip creases without washing out 3D curvature.
     float smoothY = baseY;
     if (uLipStyle.y > 0.0 && uLipStyle.z > 0.0) {
         vec2 stepUv = uLipStyle.yz * 2.0;
@@ -152,18 +166,32 @@ void main() {
         );
         smoothY = dot(avg, vec3(0.299, 0.587, 0.114));
     }
-    float lipDetail = clamp(baseY - smoothY, -0.10, 0.10);
-    // De-darken dull/purplish bare lip base into clean studio tonal range while keeping 3D lip volume.
-    float normY = mix(0.88, clamp(smoothY * 1.55 + 0.30, 0.62, 1.12), 0.52);
-    vec3 pureLip = clamp(uLipColor.rgb * normY + vec3(lipDetail * 1.25), 0.0, 1.0);
-    vec3 result = mix(base * mix(vec3(1.0), uLipColor.rgb * 1.30, 0.74), pureLip, 0.84);
-    if (uLipStyle.x >= 0.5) {
-        float centerBelly = 1.0 - smoothstep(0.03, 0.11, abs(vMakeupUv.x - 0.5));
-        float lowerBand = exp(-((vMakeupUv.y - 0.728) * (vMakeupUv.y - 0.728)) / 0.00028);
-        float upperBand = exp(-((vMakeupUv.y - 0.672) * (vMakeupUv.y - 0.672)) / 0.00018) * 0.55;
-        float lumaSpec = smoothstep(0.32, 0.74, baseY) * smoothstep(0.68, 0.72, vMakeupUv.y) * 0.55;
-        float gloss = clamp((lowerBand + upperBand) * centerBelly * 0.75 + lumaSpec, 0.0, 1.0);
-        result = clamp(result + vec3(0.42, 0.38, 0.40) * gloss * feather, 0.0, 1.0);
+    float lipDetail = clamp(baseY - smoothY, -0.09, 0.09);
+    // 3. Proportional illumination shading (zero flat shadow floor) + midtone-only bare-lip de-dulling.
+    float midLift = 1.0 + 0.22 * smoothstep(0.16, 0.30, smoothY) * (1.0 - smoothstep(0.42, 0.66, smoothY));
+    float illum = (smoothY / 0.44) * midLift;
+    float illumSoft = illum / (1.0 + 0.24 * max(illum - 0.85, 0.0));
+    float cY = max(dot(uLipColor.rgb, vec3(0.299, 0.587, 0.114)), 0.15);
+    vec3 normC = clamp(uLipColor.rgb / max(cY * 1.12, 0.34), 0.12, 1.45);
+    vec3 multLip = clamp(base * mix(vec3(1.0), normC, 0.88), 0.0, 1.0);
+    float isGlossy = step(0.5, uLipStyle.x);
+    vec3 pigmentLip = clamp(uLipColor.rgb * illumSoft * mix(1.0, 0.90, isGlossy), 0.0, 1.0);
+    float coverage = mix(0.48, 0.74, clamp(uLipColor.a, 0.0, 1.0));
+    vec3 result = mix(multLip, pigmentLip, coverage);
+    result = clamp(result + vec3(lipDetail * mix(1.15, 0.75, isGlossy)), 0.0, 1.0);
+    // 4. Wet clearcoat specular: tight neutral warm-white reflection driven by real surface brightness and lip creases.
+    if (isGlossy > 0.5) {
+        float lumaDrive = smoothstep(0.24, 0.58, baseY);
+        float centerBelly = 1.0 - smoothstep(0.02, 0.095, abs(vMakeupUv.x - 0.5));
+        float ridgeMask = clamp(0.80 + lipDetail * 5.0, 0.20, 1.40);
+        float dyLo = (vMakeupUv.y - 0.714) * 100.0;
+        float dyHi = (vMakeupUv.y - 0.673) * 120.0;
+        float lowerBand = exp(-(dyLo * dyLo));
+        float upperBand = exp(-(dyHi * dyHi)) * 0.42;
+        float naturalHot = smoothstep(0.48, 0.80, baseY) * 0.42;
+        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.78 + naturalHot) * ridgeMask * effFeather, 0.0, 0.78);
+        vec3 specCol = vec3(1.0, 0.99, 0.97);
+        result = clamp(result + (specCol - result) * (spec * 0.65), 0.0, 1.0);
     }
     gl_FragColor = vec4(clamp(result, 0.0, 1.0), alpha);
 }

@@ -223,14 +223,17 @@ internal class FaceMeshFilter {
                 val p = drX[i] * drX[i] + drY[i] * drY[i]
                 for (g in 0 until REGIONS) regionRms[g] += REG[i * REGIONS + g] * p
             }
-            // 眨眼时只有眼睑环在动，按整个眼区平均会被周围皮肤稀释、眼睑滞后 1–2 个样本：眼区速度取眼区与眼睑环的较大者
-            // （静止时两者都是同一噪声水平，截止频率不变；整个眼区一起提速，不剪切眼睑与上方皮肤之间的三角形）。
+            // 眨眼时只有眼睑环在动，说话/张嘴时只有唇环在动，按整个眼区/下半脸平均会被周围皮肤稀释、滞后 1–2 个样本：
+            // 眼区与下半脸速度分别取区域与眼睑环/唇环的较大者（静止时同一噪声水平，截止频率不变；整区一起提速不剪切三角形）。
             var lidPower = 0f
             for (i in LID_RING) lidPower += drX[i] * drX[i] + drY[i] * drY[i]
+            var lipPower = 0f
+            for (i in LIP_RING) lipPower += drX[i] * drX[i] + drY[i] * drY[i]
             val resDead = K_RES * C_RES * (teMs / TE_REF_MS).pow(RES_TE_EXP) * floor
             for (g in 0 until REGIONS) {
                 regionRms[g] = sqrt(regionRms[g] / REG_SUM[g])
                 if (g == EYE_REGION) regionRms[g] = max(regionRms[g], sqrt(lidPower / LID_RING.size))
+                if (g == LOW_REGION) regionRms[g] = max(regionRms[g], sqrt(lipPower / LIP_RING.size))
                 val excess = max(0f, regionRms[g] - resDead)
                 resExcess = max(resExcess, excess)
                 regionAlpha[g] = alpha(RES_FC_MIN[g] * comp + RES_BETA[g] * excess, teMs)
@@ -356,10 +359,16 @@ internal class FaceMeshFilter {
         private const val IRIS_RIGHT = 468
         private const val IRIS_LEFT = 473
         private const val EYE_REGION = 1
+        private const val LOW_REGION = 2
         /** 两眼眼睑环（各 16 点）。 */
         private val LID_RING = intArrayOf(
             33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246,
             263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466,
+        )
+        /** 外唇环（20 点）与内唇环（20 点），用于说话/张嘴防稀释快速追踪，避免口红滞后飘出唇缘。 */
+        private val LIP_RING = intArrayOf(
+            61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291, 375, 321, 405, 314, 17, 84, 181, 91, 146,
+            78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95,
         )
         /** 睑裂中部 3 对上下睑点（上、下交替）：解剖右眼 160/144、159/145、158/153，左眼 387/373、386/374、385/380。 */
         private val RIGHT_LIDS = intArrayOf(160, 144, 159, 145, 158, 153)

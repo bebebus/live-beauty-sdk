@@ -1,5 +1,5 @@
 group = "io.bebebus.livebeauty.flutter"
-version = "1.1.1"
+version = "1.1.2"
 
 buildscript {
     ext.kotlin_version = "2.1.20"

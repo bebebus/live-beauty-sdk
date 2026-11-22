@@ -27,7 +27,7 @@ sys.dont_write_bytecode = True
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(ROOT, 'ios', 'Resources', 'face_landmarker.task')
-OUT_DIR = os.path.join(ROOT, 'android', 'src', 'main', 'assets', 'makeup')
+OUT_DIR = os.path.join(ROOT, 'android', 'live-beauty', 'src', 'main', 'assets', 'makeup')
 SIZE = 512
 MAX_TOTAL_BYTES = 800 * 1024
 
@@ -294,17 +294,23 @@ def build_contour_highlight_atlas(uvs):
             chin_hl = gauss2d(u, v, uvs[152][0], uvs[152][1] - 0.045, 0.042, 0.024) * 0.45
             highlight = clamp01(max(bridge_hl, cheek_hl, brow_hl, cupid_hl, chin_hl))
 
-            # B: 唇带边缘清晰羽化遮罩（仅用于 120 三角形唇带；收紧外缘过渡至 0.006 让薄唇也有清晰饱满唇线，内唇安全归零）。
+            # B: 柔焦唇带遮罩（仅用于 120 三角形唇带；宽外缘过渡 + 唇心到唇缘自然渐隐 + 宽嘴角柔化，杜绝硬边胶布感，内唇严格归零防涂牙）。
             in_outer = point_in_poly(u, v, outer_lip)
             in_inner = point_in_poly(u, v, inner_lip)
             if in_outer and not in_inner:
                 d_out = poly_edge_dist(u, v, outer_lip)
                 d_in = poly_edge_dist(u, v, inner_lip)
-                lip_feather = smoothstep(0.0, 0.006, d_out) * smoothstep(0.0, 0.004, d_in)
-                # 嘴角微柔化，避免张嘴拉伸出硬尖角，同时保留唇色完整延伸到嘴角。
+                # 上唇外缘略宽（0.018）防人中上溢，下唇外缘 0.015 自然柔焦；内唇湿线 0.0055 避免张嘴硬切边。
+                mid_lip_v = 0.5 * (uvs[13][1] + uvs[14][1])
+                outer_fade = smoothstep(0.001, 0.018 if v < mid_lip_v else 0.015, d_out)
+                inner_fade = smoothstep(0.0005, 0.0055, d_in)
+                # 唇心饱满、外唇线轻柔晕染（自然柔焦咬唇分布）。
+                belly_grad = 0.80 + 0.20 * (1.0 - smoothstep(0.005, 0.026, d_in))
+                # 嘴角宽幅渐隐，消除张嘴/微笑时的硬尖角。
                 corner_l = math.hypot(u - uvs[61][0], v - uvs[61][1])
                 corner_r = math.hypot(u - uvs[291][0], v - uvs[291][1])
-                lip_feather *= smoothstep(0.004, 0.018, min(corner_l, corner_r))
+                corner_fade = smoothstep(0.008, 0.044, min(corner_l, corner_r))
+                lip_feather = clamp01(outer_fade * inner_fade * belly_grad * corner_fade)
             else:
                 lip_feather = 0.0
 

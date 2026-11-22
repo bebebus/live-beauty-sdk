@@ -1476,8 +1476,8 @@ def check_makeup(vectors, result, report):
     # 唇带羽化贴图：左半 B=0（模拟非唇带/口腔），必须逐字节不变；右半 B=255 为纯唇带。
     left_untouched = all(velvet[r][x] == skin and glossy[r][x] == skin
                          for r in range(height) for x in range(width // 2 - 2))
-    # 第 0 行在画面顶部；探测右半纯唇带靠近唇腹中央 (x≈0.55*W, vMakeupUv.y≈0.728) 的下唇水光高光带。
-    probe_r, probe_x = int((1.0 - 0.728) * height), int(width * 0.55)
+    # 第 0 行在画面顶部；探测右半纯唇带靠近下唇腹中央 (x≈0.55*W, vMakeupUv.y≈0.714) 的下唇水光高光带。
+    probe_r, probe_x = int((1.0 - 0.714) * height), int(width * 0.55)
     v_lip = velvet[probe_r][probe_x]
     g_lip = glossy[probe_r][probe_x]
     lip_tinted = (v_lip[0] - v_lip[1]) > (skin[0] - skin[1]) + 25
@@ -1486,10 +1486,59 @@ def check_makeup(vectors, result, report):
                 'makeupLip 零羽化区不变=%s，丝绒=%s，水光=%s（水光更亮=%s）' % (
                     left_untouched, v_lip[:3], g_lip[:3], glossy_brighter))
 
-    # 深紫暗沉裸唇 (105,68,72) 去乌归一化显色：涂蜜桃珊瑚红后必须通透提亮而非暗黑发乌。
+    # 深紫暗沉裸唇 (105,68,72) 透色显色：涂珊瑚蜜桃后必须纯净显色而非暗黑发乌，同时保留自然立体明度。
     dark_lip = pixels(result['makeupLipDarkBase'], width, height)[probe_r][probe_x]
-    report.line(dark_lip[0] >= 165 and (dark_lip[0] - dark_lip[1]) >= 55,
-                'makeupLip 深唇去乌归一化纯净显色：(105,68,72) → %s' % (dark_lip[:3],))
+    report.line(dark_lip[0] >= 158 and (dark_lip[0] - dark_lip[1]) >= 65 and dark_lip[1] > dark_lip[2],
+                'makeupLip 深唇去乌纯净显色：(105,68,72) → %s' % (dark_lip[:3],))
+
+    def px_luma(px):
+        return (0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]) / 255.0
+
+    # L1: 闭合唇缝 (45,25,27) 与口腔暗腔 (22,14,15) 在高强度水光下绝不被抬亮成发光粉色块。
+    seam_px = pixels(result['makeupLipSeamGlossy'], width, height)[probe_r][probe_x]
+    cavity_px = pixels(result['makeupLipCavityGlossy'], width, height)[probe_r][probe_x]
+    seam_dy = px_luma(seam_px) - px_luma((45, 25, 27))
+    cavity_dy = px_luma(cavity_px) - px_luma((22, 14, 15))
+    report.line(abs(seam_dy) <= 0.025 and abs(cavity_dy) <= 0.010,
+                'makeupLip L1 暗缝/口腔保护：唇缝(45,25,27)→%s(ΔY=%+.3f)，口腔(22,14,15)→%s(ΔY=%+.3f)' % (
+                    seam_px[:3], seam_dy, cavity_px[:3], cavity_dy))
+
+    # L2: 白色露齿边缘 (222,216,206) 涂车厘子红后保持洁白（Δ(R-G) < 8），绝不染粉牙。
+    teeth_px = pixels(result['makeupLipTeethGuard'], width, height)[probe_r][probe_x]
+    teeth_rg_shift = (teeth_px[0] - teeth_px[1]) - (222 - 216)
+    report.line(teeth_rg_shift < 8 and teeth_px[1] >= 208 and teeth_px[2] >= 198,
+                'makeupLip L2 露齿防染保护：(222,216,206) → %s（Δ(R-G)=%+d）' % (teeth_px[:3], teeth_rg_shift))
+
+    # L3: 外缘羽化区 (feather≈0.45) 嘴周暖黄肤 (195,156,120) 受肤色门抑制，色偏显著弱于同羽化真实裸唇 (145,96,95)。
+    rim_skin = pixels(result['makeupLipRimSkin'], width, height)[probe_r][probe_x]
+    rim_lip = pixels(result['makeupLipRimLip'], width, height)[probe_r][probe_x]
+    skin_rg_delta = (rim_skin[0] - rim_skin[1]) - (195 - 156)
+    lip_rg_delta = (rim_lip[0] - rim_lip[1]) - (145 - 96)
+    report.line(skin_rg_delta < 14 and lip_rg_delta > skin_rg_delta * 1.8,
+                'makeupLip L3 唇缘外溢保护：暖肤Δ(R-G)=%+d %s vs 裸唇Δ(R-G)=%+d %s' % (
+                    skin_rg_delta, rim_skin[:3], lip_rg_delta, rim_lip[:3]))
+
+    # L4: 水光模式下 4 款代表色号（正红/橘汽/奶茶/梅子）保持鲜明色相区分，不再集体褪成芭比粉。
+    body_r = int((1.0 - 0.704) * height)  # 下唇受光体（非高光正心）检验真实体色区分
+    g_cherry = pixels(result['makeupLipGlossyCherry'], width, height)[body_r][probe_x]
+    g_orange = pixels(result['makeupLipGlossyOrange'], width, height)[body_r][probe_x]
+    g_milktea = pixels(result['makeupLipGlossyMilkTea'], width, height)[body_r][probe_x]
+    g_berry = pixels(result['makeupLipGlossyBerry'], width, height)[body_r][probe_x]
+    cherry_true_red = (g_cherry[0] - g_cherry[1]) >= 85 and (g_cherry[2] - g_cherry[1]) <= 8
+    orange_warm = (g_orange[1] - g_orange[2]) >= 14 and (g_orange[0] - g_orange[2]) >= 100
+    milktea_warm = (g_milktea[1] - g_milktea[2]) >= 8 and (g_milktea[0] - g_milktea[1]) <= 82
+    berry_plum_hue = (g_berry[2] - g_berry[1]) >= 12
+    report.line(cherry_true_red and orange_warm and milktea_warm and berry_plum_hue,
+                'makeupLip L4 水光多色号色相区分：正红=%s 橘汽=%s 奶茶=%s 梅子=%s' % (
+                    g_cherry[:3], g_orange[:3], g_milktea[:3], g_berry[:3]))
+
+    # L5: 上唇背光暗面 (105,66,68) 与下唇受光面 (145,96,95) 保持真实 3D 立体明暗差。
+    upper_px = pixels(result['makeupLipUpperShadow'], width, height)[probe_r][probe_x]
+    lower_px = pixels(result['makeupLipLowerLit'], width, height)[probe_r][probe_x]
+    depth_gap = px_luma(lower_px) - px_luma(upper_px)
+    report.line(depth_gap >= 0.08,
+                'makeupLip L5 上下唇 3D 立体明暗差：上唇=%s(Y=%.3f) 下唇=%s(Y=%.3f) 差=%.3f' % (
+                    upper_px[:3], px_luma(upper_px), lower_px[:3], px_luma(lower_px), depth_gap))
 
     # 上下分屏局部放大高清眉眼 UV (uMode.y = 1)：右眼框 (0.33, 0.33) 与左眼框 (0.67, 0.33) 分别命中上半 R 与下半 G，框外逐字节不变。
     split_eye = pixels(result['makeupSplitEye'], width, height)
