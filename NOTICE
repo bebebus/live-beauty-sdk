@@ -1,0 +1,22 @@
+Bebebus Live Beauty SDK
+Copyright 2026 Bebebus Open Source Contributors
+
+This product includes software developed at Bebebus (https://github.com/bebebus/live-beauty-sdk).
+
+================================================================================
+Third-Party Attributions (Apache License 2.0)
+================================================================================
+
+1. Google MediaPipe Tasks Vision & Bundled TFLite/Task Models
+   - Website: https://developers.google.com/mediapipe
+   - Repository: https://github.com/google-ai-edge/mediapipe
+   - License: Apache License 2.0 (see flutter/licenses/MediaPipe-LICENSE.txt)
+   - Bundled models:
+     * face_landmarker.task
+     * pose_landmarker_lite.task
+     * selfie_segmenter.tflite
+     * hair_segmenter.tflite
+
+2. PixPark GPUPixel (Canonical Face UV Topology Reference)
+   - Repository: https://github.com/pixpark/gpupixel
+   - License: Apache License 2.0 (see flutter/licenses/GPUPixel-LICENSE.txt)

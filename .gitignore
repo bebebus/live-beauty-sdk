@@ -1,0 +1,30 @@
+# OS & Editor
+.DS_Store
+Thumbs.db
+*.iml
+.idea/
+.vscode/
+
+# Gradle & Android
+.gradle/
+**/build/
+android/local.properties
+flutter/android/local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Flutter & Dart
+.dart_tool/
+.packages
+flutter/pubspec.lock
+**/Flutter/Generated.xcconfig
+**/Flutter/flutter_export_environment.sh
+**/Pods/
+*.xcworkspace/xcuserdata/
+
+# Python & Node tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/

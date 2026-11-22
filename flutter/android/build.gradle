@@ -1,0 +1,58 @@
+group = "io.bebebus.livebeauty.flutter"
+version = "1.0.0"
+
+buildscript {
+    ext.kotlin_version = "2.1.20"
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.9.1"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "kotlin-android"
+
+android {
+    namespace = "io.bebebus.livebeauty.flutter"
+    compileSdk = 35
+
+    defaultConfig {
+        minSdk = 24
+        consumerProguardFiles file("../../android/live-beauty/consumer-rules.pro")
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += ["src/main/kotlin", "../../android/live-beauty/src/main/kotlin"]
+            assets.srcDirs += ["../../android/live-beauty/src/main/assets"]
+        }
+    }
+
+    androidResources {
+        noCompress += ["task", "tflite"]
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    api "com.google.mediapipe:tasks-vision:0.10.35"
+}

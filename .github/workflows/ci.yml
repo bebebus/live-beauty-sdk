@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify-ubuntu:
+    name: Sanitize, Models, GLSL, Android AAR & Flutter (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Pillow for LUT verification
+        run: python -m pip install pillow
+
+      - name: Run sanitization, model SHA256, topology & LUT checks
+        run: |
+          python3 _tooling/sanitize-check.py
+          python3 _tooling/verify-models.py
+          python3 reference/gen_face_topology.py --verify
+          python3 reference/gen_builtin_luts.py --verify
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Run Android standalone unit tests & assemble Release AAR
+        working-directory: android
+        run: ./gradlew --no-daemon :live-beauty:testDebugUnitTest :live-beauty:testReleaseUnitTest :live-beauty:assembleRelease
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Run Flutter analyze & unit tests
+        working-directory: flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+
+  verify-macos:
+    name: iOS/macOS CoreImage & Headless WebGL1 GLSL Gate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 & Pillow
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pillow
+        run: python3 -m pip install pillow
+
+      - name: Compile & run Objective-C CoreImage beauty test
+        run: |
+          CI_BIN="$(mktemp -t livebeauty_ci).bin"
+          clang -fobjc-arc \
+            -framework Foundation \
+            -framework CoreImage \
+            -framework CoreGraphics \
+            -framework CoreMedia \
+            -framework CoreVideo \
+            -framework QuartzCore \
+            ios/Classes/FLTFaceGeometry.m \
+            ios/Classes/FLTFaceGeometrySmoother.m \
+            ios/Classes/FLTFaceLandmarkTracker.m \
+            ios/Classes/FLTVideoEffects.m \
+            ios/Tests/verify_macos_ci.m \
+            -o "$CI_BIN"
+          "$CI_BIN"
+          rm -f "$CI_BIN"
+
+      - name: Set up Chrome for WebGL1 GLSL shader gate
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Run 41-shader + 27-mutant WebGL1 GLSL gate
+        run: bash _tooling/verify-glsl.sh
