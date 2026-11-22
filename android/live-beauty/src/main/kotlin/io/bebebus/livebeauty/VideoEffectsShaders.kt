@@ -359,7 +359,8 @@ void main() {
         float yBase = dot(c, vec3(0.2126, 0.7152, 0.0722));
         float yRef = dot(cheekRef, vec3(0.2126, 0.7152, 0.0722));
         float deficit = clamp((yRef - yBase) * 2.4, 0.0, 0.22);
-        target = clamp(c + (cheekRef - c) * clamp(deficit * 3.8, 0.0, 0.75) + vec3(0.065, 0.052, 0.036) * (1.0 - yBase), 0.0, 1.0);
+        float liftMask = clamp(deficit * 3.8, 0.0, 0.75);
+        target = clamp(c + (cheekRef - c) * liftMask + vec3(0.058, 0.046, 0.032) * liftMask * (1.0 - yBase), 0.0, 1.0);
     } else {
         vec3 sideA = texture2D(uSampler, clamp(vSrcCoord + off, 0.0, 1.0)).rgb;
         vec3 sideB = texture2D(uSampler, clamp(vSrcCoord - off, 0.0, 1.0)).rgb;

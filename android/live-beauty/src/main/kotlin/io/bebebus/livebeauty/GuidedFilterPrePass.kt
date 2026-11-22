@@ -119,7 +119,7 @@ internal class GuidedFilterPrePass {
             glUniform2f(it.direction, 0f, dy)
             glUniform1i(it.original, 1)
         }
-        val macroTex = if (even > 0f) renderMacro(p, textures[2], w, h) else 0
+        val macroTex = if (even > 0f) renderMacro(p, textures[2], w, h) else macroTextures[0]
         // P4 H-VAR：T2 → T1（模糊 alpha 能量，保留 mean.rgb）。
         pass(p.blurAlpha, frames[1], textures[2]) { glUniform2f(it.direction, dx, 0f) }
         // P5 V-COEFF：T1 + macro → T0 = ((1 - a) * evenMean, a)。
@@ -172,7 +172,7 @@ internal class GuidedFilterPrePass {
                 glUniform2f(it.direction, 0f, dy)
                 glUniform1i(it.original, 1)
             }
-            val macroTex = if (even > 0f) renderMacro(p, textures[2], w, h) else 0
+            val macroTex = if (even > 0f) renderMacro(p, textures[2], w, h) else macroTextures[0]
             // P4 H-VAR：同原路径。
             pass(p.blurAlpha, frames[1], textures[2]) { glUniform2f(it.direction, dx, 0f) }
             // P5' V-COEFF：T1 + macro → T0，头发像素取恒等系数。

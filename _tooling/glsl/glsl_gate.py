@@ -3021,9 +3021,9 @@ def check_v11_upgrade(kotlin_dir, result, report):
                            v['evenZeroDiff'], v['blotchCloseRatio'] * 100.0, v['boneShiftAbs']))
 
     # R1：去黑眼圈留卧蚕（卧蚕区 Δ=0，泪沟暗带提亮 >= 10/255）。
-    r1_ok = v['aegyoMaxDiff'] == 0 and v['tearLift'] >= 10.0
-    report.line(r1_ok, 'R1 468 点去黑眼圈留卧蚕：卧蚕保护带最大像素差 %d/255（=0），泪沟凹陷带提亮 %+.1f/255（≥+10）' % (
-        v['aegyoMaxDiff'], v['tearLift']))
+    r1_ok = v['aegyoMaxDiff'] == 0 and v['tearLift'] >= 10.0 and v['evenDarkMaxDiff'] == 0
+    report.line(r1_ok, 'R1 468 点去黑眼圈留卧蚕且无色差暗肤不泛白：卧蚕最大差 %d/255（=0），均匀暗肤最大差 %d/255（=0），泪沟提亮 %+.1f/255（≥+10）' % (
+        v['aegyoMaxDiff'], v['evenDarkMaxDiff'], v['tearLift']))
 
     # R2：弧形鼻唇沟淡法令纹（暗沟提亮 >= 16/255，亮肤色不变 <= 1/255）。
     r2_ok = v['foldLift'] >= 16.0 and v['foldBrightMaxDiff'] <= 1

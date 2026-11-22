@@ -85,7 +85,7 @@ internal class FaceRetouchMeshPass {
         val mirrorSign = if (frontFaceCw) -1f else 1f
 
         val fresh = ensurePrograms()
-        packVertices(landmarks, meshVertices, ux, uy, vx, vy, faceWidth, faceHeight, aspect, mirrorSign, dc > 1e-4f || nf > 1e-4f)
+        packVertices(landmarks, meshVertices, ux, uy, vx, vy, faceWidth, faceHeight, aspect, mirrorSign, dc, nf)
         vertexBuffer.clear()
         vertexBuffer.put(vertexArray)
 
@@ -155,8 +155,10 @@ internal class FaceRetouchMeshPass {
         faceHeight: Float,
         aspect: Float,
         mirrorSign: Float,
-        needSkinOffsets: Boolean,
+        dc: Float,
+        nf: Float,
     ) {
+        val needSkinOffsets = dc > 1e-4f || nf > 1e-4f
         // 泪沟参考偏移：沿面轴向下 (-v) 跨过泪沟采样苹果肌上沿干净肤色（度量步长 0.042 * fh）。
         val tearStepM = 0.042f * faceHeight
         val tearOffU = -vx * tearStepM
@@ -183,10 +185,10 @@ internal class FaceRetouchMeshPass {
             val wFold = STATIC_FOLD_WEIGHTS[i]
             vertexArray[k + 4] = wTear
             vertexArray[k + 5] = wFold
-            if (!needSkinOffsets || (wTear <= 0f && wFold <= 0f)) {
+            if (!needSkinOffsets || (wTear * dc <= 0f && wFold * nf <= 0f)) {
                 vertexArray[k + 6] = 0f
                 vertexArray[k + 7] = 0f
-            } else if (wTear >= wFold) {
+            } else if (wTear * dc >= wFold * nf) {
                 vertexArray[k + 6] = tearOffU
                 vertexArray[k + 7] = tearOffV
             } else {

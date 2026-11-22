@@ -231,9 +231,27 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
         roiVertices.position(0)
     }
 
+    private fun resetPackState() {
+        glPixelStorei(GL_PACK_ALIGNMENT, 4)
+        if (pboAvailable) {
+            try {
+                GLES30.glPixelStorei(GLES30.GL_PACK_ROW_LENGTH, 0)
+                GLES30.glPixelStorei(GLES30.GL_PACK_SKIP_PIXELS, 0)
+                GLES30.glPixelStorei(GLES30.GL_PACK_SKIP_ROWS, 0)
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun drainGlErrors() {
+        for (i in 0 until 8) {
+            if (glGetError() == GL_NO_ERROR) break
+        }
+    }
+
     /** 同步读回当前绑定的 FBO 到目标缓冲区。 */
     private fun readSync(buffer: ByteBuffer, rw: Int, rh: Int, recordStats: Boolean) {
         buffer.position(0)
+        resetPackState()
         Trace.beginSection("beauty.readback")
         try {
             val start = System.nanoTime()
@@ -253,6 +271,8 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     private fun enqueuePboRead(fbo: Int, pbo: Int, rw: Int, rh: Int): Boolean {
         if (pbo == 0) return false
         return try {
+            drainGlErrors()
+            resetPackState()
             glBindFramebuffer(GL_FRAMEBUFFER, fbo)
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbo)
             GLES30.glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, 0)
@@ -267,6 +287,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
     private fun mapPboInto(pbo: Int, target: ByteBuffer, byteCount: Int, recordStats: Boolean): Boolean {
         if (pbo == 0) return false
         Trace.beginSection("beauty.pboMap")
+        var mappedOk = false
         return try {
             val start = System.nanoTime()
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pbo)
@@ -275,12 +296,14 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
                 return false
             }
+            mappedOk = true
             mapped.position(0)
             mapped.limit(byteCount)
             target.clear()
             target.put(mapped)
             target.position(0)
             GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+            mappedOk = false
             GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
             if (recordStats) {
                 lastStallNs = System.nanoTime() - start
@@ -288,6 +311,9 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
             }
             true
         } catch (_: Throwable) {
+            if (mappedOk) {
+                try { GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER) } catch (_: Throwable) {}
+            }
             try { GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0) } catch (_: Throwable) {}
             false
         } finally {
@@ -416,6 +442,7 @@ internal class FaceTextureSampler(private val maxSide: Int = 256) {
 
     private fun allocatePbos(ids: IntArray, byteCount: Int) {
         try {
+            drainGlErrors()
             GLES30.glGenBuffers(2, ids, 0)
             for (i in 0..1) {
                 GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, ids[i])

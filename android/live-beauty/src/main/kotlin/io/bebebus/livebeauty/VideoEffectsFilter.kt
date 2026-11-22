@@ -606,8 +606,8 @@ class VideoEffectsFilter(
                         lastGeometryAt = snapshot.sampleTimestamp
                         timeline.add(snapshot.sampleTimestamp, it.toState(), snapshot.mesh)
                         val m = snapshot.mesh
-                        if (m != null) faceRoi.onFace(m.centerX, m.centerY, m.faceWidth, now)
-                        else faceRoi.onFace(it.oval[0], it.oval[1], it.oval[2] * 1.78f, now)
+                        if (m != null) faceRoi.onFace(m.centerX, m.centerY, m.faceWidth, snapshot.sampleTimestamp)
+                        else faceRoi.onFace(it.oval[0], it.oval[1], it.oval[2] * 1.78f, snapshot.sampleTimestamp)
                     }
                 }
                 // 丢脸按采样时间记：本代际新完成的结果里没有脸（或有脸的那个已不新鲜），presence 据此在被画那一帧防抖后退出。
@@ -1004,6 +1004,7 @@ class VideoEffectsFilter(
         var workingLandmarks = if (meshRendered) faceMeshDeformer.warpedLandmarks else mesh?.landmarks
         // 2a'''. 468 点解剖子网格局部修饰（去黑眼圈留卧蚕、弧形法令纹、眼裂亮眼、内唇防染唇白牙）：直接原位叠加在 faceMeshPass FBO 上，
         // 省去整张 1080p FBO；异常或无网格时自动回退 FaceShapePass。
+        var retouchApplied = false
         if (processing && healthy && retouchMeshOn && mesh != null) {
             try {
                 if (!meshRendered) {
@@ -1027,15 +1028,30 @@ class VideoEffectsFilter(
                     teethWhiten = value.teethWhiten * presence * steadyEye,
                     nasolabial = value.nasolabial * presence * steadyEye,
                 )
+                retouchApplied = true
             } catch (_: Exception) {
                 glDisable(GL_CULL_FACE)
                 glFrontFace(GL_CCW)
                 glDisable(GL_BLEND)
                 if (!stale) faceRetouchHealthy = false
             }
-        } else if (processing && healthy && faceShapeOn) {
-            try { source = faceShapePass.render(source, width, height, faceShapeValues) }
-            catch (_: Exception) { if (!stale) faceShapeHealthy = false }
+        }
+        if (!retouchApplied && processing && healthy && faceShapeHealthy && presence > 0f && (faceShapeOn || retouchAny)) {
+            val ready = faceShapeOn || (mesh != null && workingLandmarksInitial != null && FaceShapePass.packRetouchFromMesh(
+                landmarks = workingLandmarksInitial,
+                axisX = mesh.axisX,
+                axisY = mesh.axisY,
+                aspect = aspect,
+                darkCircles = value.darkCircles * presence * steadyEye,
+                brightEyes = value.brightEyes * presence * steadyEye,
+                teeth = value.teethWhiten * presence * steadyEye,
+                folds = value.nasolabial * presence * steadyEye,
+                out = faceShapeValues,
+            ))
+            if (ready) {
+                try { source = faceShapePass.render(source, width, height, faceShapeValues) }
+                catch (_: Exception) { if (!stale) faceShapeHealthy = false }
+            }
         }
         // 2b. 美体：单独一道变形画进中间纹理，磨皮预处理与合成都读它；故障只停用美体，本帧沿用上一步的结果。
         var neckLifted = false

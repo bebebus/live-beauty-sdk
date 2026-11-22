@@ -1712,6 +1712,17 @@ void main() {
     const tearIdx = (26 * RW + 32) * 4;
     const tearLift = luma(r1Out[tearIdx], r1Out[tearIdx + 1], r1Out[tearIdx + 2]) - luma(r1Base[tearIdx], r1Base[tearIdx + 1], r1Base[tearIdx + 2]);
 
+    // R1b 暗肤色/暗光且无黑眼圈（泪沟与苹果肌同色 [68,48,38]）：禁止误涂亮橘色遮瑕条（"反向熊猫眼"）
+    const r1EvenDark = new Uint8Array(RW * RH * 4);
+    for (let i = 0; i < RW * RH; i++) {
+      r1EvenDark[i * 4] = 68; r1EvenDark[i * 4 + 1] = 48; r1EvenDark[i * 4 + 2] = 38; r1EvenDark[i * 4 + 3] = 255;
+    }
+    const r1EvenOut = runRetouchMesh(P.retouchSkin, r1EvenDark, r1Verts.slice(32), [0, 1, 2, 2, 1, 3], (at) => {
+      gl.uniform4f(at('uRetouchStrength'), 1.0, 0.0, 0.0, 0.0);
+    });
+    let evenDarkMaxDiff = 0;
+    for (let c = 0; c < 3; c++) evenDarkMaxDiff = Math.max(evenDarkMaxDiff, Math.abs(r1EvenOut[tearIdx + c] - r1EvenDark[tearIdx + c]));
+
     // R2 弧形法令纹：中心暗沟 x∈[29,35) 为 (148,110,92)，两侧皮肤为 (204,160,138)
     const r2Base = new Uint8Array(RW * RH * 4);
     for (let y = 0; y < RH; y++) {
@@ -1793,6 +1804,7 @@ void main() {
       boneShiftAbs,
       aegyoMaxDiff,
       tearLift,
+      evenDarkMaxDiff,
       foldLift,
       foldBrightMaxDiff,
       lipGlossMaxDiff,
