@@ -94,7 +94,7 @@ jobs:
           rm -f "$CI_BIN"
 
       - name: Set up Chrome for WebGL1 GLSL shader gate
-        uses: browser-actions/setup-chrome@v1
+        uses: browser-actions/setup-chrome@v2
 
       - name: Run 44-shader + 28-mutant WebGL1 GLSL gate
         run: bash _tooling/verify-glsl.sh

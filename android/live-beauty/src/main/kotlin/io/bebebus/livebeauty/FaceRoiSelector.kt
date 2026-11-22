@@ -37,7 +37,8 @@ internal class FaceRoiSelector {
     private var smoothCx = 0.5f
     private var smoothCy = 0.5f
     private var smoothFaceWidth = 0f
-    private var lastSeenMs = Long.MIN_VALUE
+    private var lastSampleMs = Long.MIN_VALUE
+    private var lastReceivedMs = Long.MIN_VALUE
 
     val isActive: Boolean get() = active
 
@@ -46,19 +47,36 @@ internal class FaceRoiSelector {
         smoothCx = 0.5f
         smoothCy = 0.5f
         smoothFaceWidth = 0f
-        lastSeenMs = Long.MIN_VALUE
+        lastSampleMs = Long.MIN_VALUE
+        lastReceivedMs = Long.MIN_VALUE
     }
 
     /**
      * 更新最新检出的人脸位置（[glCenterX]、[glCenterY] 为 GL 纹理坐标，`y` 向上；[faceWidth] 为度量脸宽）。
+     *
+     * @param sampleMs 该帧人脸样本的采集时刻
+     * @param receivedMs 该次推理结果到达渲染线程的时刻（慢机 CPU 推理延迟 120–200 ms 时，以到达时刻判 [STALE_MS] 避免 ROI 与全幅来回抖动，
+     *                   同时以 [MAX_SAMPLE_AGE_MS] 限制采样绝对年龄）
      */
-    fun onFace(glCenterX: Float, glCenterY: Float, faceWidth: Float, nowMs: Long) {
+    fun onFace(
+        glCenterX: Float,
+        glCenterY: Float,
+        faceWidth: Float,
+        sampleMs: Long,
+        receivedMs: Long = sampleMs,
+    ) {
         if (!glCenterX.isFinite() || !glCenterY.isFinite() || !faceWidth.isFinite() || faceWidth < MIN_FACE_WIDTH) {
+            return
+        }
+        if (receivedMs < sampleMs || receivedMs - sampleMs > MAX_SAMPLE_AGE_MS) {
+            return
+        }
+        if (lastSampleMs != Long.MIN_VALUE && sampleMs < lastSampleMs) {
             return
         }
         val mpCx = glCenterX.coerceIn(0f, 1f)
         val mpCy = (1f - glCenterY).coerceIn(0f, 1f)
-        if (lastSeenMs == Long.MIN_VALUE || nowMs < lastSeenMs || nowMs - lastSeenMs > STALE_MS) {
+        if (lastReceivedMs == Long.MIN_VALUE || receivedMs < lastReceivedMs || receivedMs - lastReceivedMs > STALE_MS) {
             smoothCx = mpCx
             smoothCy = mpCy
             smoothFaceWidth = faceWidth
@@ -67,7 +85,8 @@ internal class FaceRoiSelector {
             smoothCy += (mpCy - smoothCy) * EMA_ALPHA
             smoothFaceWidth += (faceWidth - smoothFaceWidth) * EMA_ALPHA
         }
-        lastSeenMs = nowMs
+        lastSampleMs = sampleMs
+        lastReceivedMs = receivedMs
         active = if (active) {
             smoothFaceWidth < EXIT_FACE_WIDTH
         } else {
@@ -78,12 +97,16 @@ internal class FaceRoiSelector {
     /** ROI 裁剪帧未检出人脸时立即退出 ROI，保证下一帧全画幅兜底重捕。 */
     fun onMiss() {
         active = false
-        lastSeenMs = Long.MIN_VALUE
+        lastSampleMs = Long.MIN_VALUE
+        lastReceivedMs = Long.MIN_VALUE
     }
 
     /** 计算本帧采样使用的人脸裁剪框；近景或状态过期时返回 [CropRect.FULL]。 */
     fun select(width: Int, height: Int, nowMs: Long): CropRect {
-        if (!active || width <= 0 || height <= 0 || lastSeenMs == Long.MIN_VALUE || nowMs < lastSeenMs || nowMs - lastSeenMs > STALE_MS) {
+        if (!active || width <= 0 || height <= 0 ||
+            lastReceivedMs == Long.MIN_VALUE || nowMs < lastReceivedMs || nowMs - lastReceivedMs > STALE_MS ||
+            lastSampleMs == Long.MIN_VALUE || nowMs < lastSampleMs || nowMs - lastSampleMs > MAX_SAMPLE_AGE_MS
+        ) {
             active = false
             return CropRect.FULL
         }
@@ -119,6 +142,7 @@ internal class FaceRoiSelector {
         const val MAX_CROP_SPAN = 0.85f
         const val ROI_SIDE_PX = 256
         const val STALE_MS = 350L
+        const val MAX_SAMPLE_AGE_MS = 650L
         private const val EMA_ALPHA = 0.45f
     }
 }

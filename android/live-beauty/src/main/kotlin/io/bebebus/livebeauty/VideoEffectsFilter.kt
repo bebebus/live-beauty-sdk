@@ -606,8 +606,8 @@ class VideoEffectsFilter(
                         lastGeometryAt = snapshot.sampleTimestamp
                         timeline.add(snapshot.sampleTimestamp, it.toState(), snapshot.mesh)
                         val m = snapshot.mesh
-                        if (m != null) faceRoi.onFace(m.centerX, m.centerY, m.faceWidth, snapshot.sampleTimestamp)
-                        else faceRoi.onFace(it.oval[0], it.oval[1], it.oval[2] * 1.78f, snapshot.sampleTimestamp)
+                        if (m != null) faceRoi.onFace(m.centerX, m.centerY, m.faceWidth, snapshot.sampleTimestamp, now)
+                        else faceRoi.onFace(it.oval[0], it.oval[1], it.oval[2] * 1.78f, snapshot.sampleTimestamp, now)
                     }
                 }
                 // 丢脸按采样时间记：本代际新完成的结果里没有脸（或有脸的那个已不新鲜），presence 据此在被画那一帧防抖后退出。
@@ -1065,7 +1065,7 @@ class VideoEffectsFilter(
         }
         // 2b. 美体：单独一道变形画进中间纹理，磨皮预处理与合成都读它；故障只停用美体，本帧沿用上一步的结果。
         var neckLifted = false
-        if (processing && healthy && bodyPassHealthy && bodyOn && body != null) {
+        if (processing && healthy && bodyPassHealthy && bodyOn) {
             try {
                 // 方向向量的长度携带长腿强度（1 + legs），见 BODY_FRAGMENT。
                 val scale = 1f + legs
@@ -1158,7 +1158,7 @@ class VideoEffectsFilter(
         val lutTexture = if (live) lutPass.select(
             if (processing && healthy && lutHealthy && lutWanted && lutUrl != lutFailed) lutUrl else "") else 0
         val lutActive = lutTexture != 0
-        if (processing && healthy && makeupWanted && finalLandmarks != null && mesh != null) {
+        if (processing && healthy && makeupWanted && finalLandmarks != null) {
             try {
                 output = makeupPass.target(width, height)
                 finalLandmarks.copyInto(makeupLandmarks, 0, 0, FaceMeshFrame.COORD_COUNT)

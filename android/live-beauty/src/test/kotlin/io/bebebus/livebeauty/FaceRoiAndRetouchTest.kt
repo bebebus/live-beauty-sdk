@@ -56,6 +56,24 @@ class FaceRoiAndRetouchTest {
         assertFalse(far.isActive)
         far.onFace(0.10f, 0.92f, 0.16f, 300L)
         assertTrue(far.select(720, 1280, 300L + FaceRoiSelector.STALE_MS + 10L).isFullFrame)
+
+        // 慢机 CPU 推理序列（采样间隔 160 ms + 推理延迟 180 ms）：推理正常推进期间不得因采样时间距当前超过 350 ms 而反复退出 ROI；
+        // 真正停摆超过 STALE_MS 或样本绝对年龄超过 MAX_SAMPLE_AGE_MS 时仍须回退全幅。
+        val slow = FaceRoiSelector()
+        var sampleTs = 1000L
+        for (cycle in 0 until 6) {
+            val receivedTs = sampleTs + 180L
+            slow.onFace(0.48f + cycle * 0.004f, 0.62f, 0.19f, sampleMs = sampleTs, receivedMs = receivedTs)
+            assertTrue("cycle=$cycle 慢机收到有效人脸应保持 ROI", slow.isActive)
+            // 下一次推理在途（距离本帧采样已 360 ms > STALE_MS，但距上次推理完成仅 180 ms <= STALE_MS）：不得抖动退回全幅。
+            val inFlightNow = sampleTs + 360L
+            assertFalse("cycle=$cycle 慢机推理在途不得交替退回全幅", slow.select(720, 1280, inFlightNow).isFullFrame)
+            sampleTs += 190L
+        }
+        // 推理停摆超过 STALE_MS：立即退回全幅。
+        val lastReceived = (sampleTs - 190L) + 180L
+        assertTrue(slow.select(720, 1280, lastReceived + FaceRoiSelector.STALE_MS + 10L).isFullFrame)
+        assertFalse(slow.isActive)
     }
 
     @Test

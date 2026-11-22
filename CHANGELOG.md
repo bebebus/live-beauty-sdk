@@ -4,6 +4,17 @@ All notable changes to **Bebebus Live Beauty SDK** will be documented in this fi
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Published release tags are immutable; any post-release fix is published as a new patch version.
+
+## [1.1.1] - 2026-11-22
+
+### Fixed
+- **Cranial Top Outer Anchor Ring Isolation (`FaceMeshDeformer`)**: Restored the `0.115 * fw` minimum outer-buffer clearance invariant for `cranialTop = 0` and localized `cranialTop` outer expansion strictly to the crown/upper-temple arc (`crownW * CRANIAL_OUTER_PAD * fh`) so jaw/cheek background anchors remain untouched when slimming.
+- **Even Dark-Skin Under-Eye Concealer Guard (`RETOUCH_SKIN_FRAGMENT` & `FaceRetouchMeshPass`)**: Gated the warm tear-trough neutralization offset by `liftMask = clamp(deficit * 3.8, 0.0, 0.75)` (guaranteed `0/255` change on uniform dark skin with zero under-eye shadow, enforced by GPU gate `R1`), selected vertex sample offsets using live `(dc, nf)` weights, eliminated the redundant 15 KB per-frame vertex buffer upload, and wrapped `renderInPlace` GL draws in `try/finally` to restore shared GL state on exceptions.
+- **Guided Filter FBO Feedback Loop Elimination (`GuidedFilterPrePass`)**: Bound pre-allocated `macroTextures[0]` whenever `uEvenness == 0f` instead of leaving `GL_TEXTURE1` bound to `textures[0]` while rendering into `frames[0]`.
+- **Shared-Context GLES 3.0 PACK State & Error Scoping (`FaceTextureSampler`)**: Paired `beginPack()` / `endPack()` to save and restore host `GL_PACK_ALIGNMENT`, `GL_PACK_ROW_LENGTH`, `GL_PACK_SKIP_PIXELS`, `GL_PACK_SKIP_ROWS`, and `GL_PIXEL_PACK_BUFFER_BINDING` across sync and PBO readbacks; preserved newly-created resource error checks prior to PBO enqueue; accumulated second-pass ROI readback latency into `lastStallNs` / `unreadStall`.
+- **Slow-Device Far-Field ROI Stability (`FaceRoiSelector` & `VideoEffectsFilter`)**: Evaluated `STALE_MS` (`350 ms`) from inference arrival time (`receivedMs`) bounded by absolute capture age (`MAX_SAMPLE_AGE_MS = 650 ms`), eliminating ROI ↔ full-frame oscillation on slow/CPU-throttled devices while preserving immediate miss fallback; added same-frame clean fallback if `FaceRetouchMeshPass` throws.
+- **CI & Compiler Cleanliness**: Upgraded GitHub Actions to `checkout@v5`, `setup-python@v6`, `setup-java@v5`, and `setup-chrome@v2`; removed redundant null checks in `VideoEffectsFilter`.
 
 ## [1.1.0] - 2026-11-22
 
