@@ -18,10 +18,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
 
       - name: Install Pillow for LUT verification
-        run: python -m pip install pillow
+        run: python3 -m pip install pillow
 
       - name: Run sanitization, model SHA256, topology & LUT checks
         run: |
@@ -36,6 +35,13 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
+
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -n "$SDK_ROOT" && -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          fi
 
       - name: Run Android standalone unit tests & assemble Release AAR
         working-directory: android
@@ -90,5 +96,5 @@ jobs:
       - name: Set up Chrome for WebGL1 GLSL shader gate
         uses: browser-actions/setup-chrome@v1
 
-      - name: Run 41-shader + 27-mutant WebGL1 GLSL gate
+      - name: Run 44-shader + 28-mutant WebGL1 GLSL gate
         run: bash _tooling/verify-glsl.sh
