@@ -24,17 +24,17 @@ Designed to be **100% transport- and RTC-agnostic**, it requires zero license se
 - **Zero Background Warp · Zero Contour Ghosting · Symmetric 478-pt $C^\infty$ Mesh Reshape**
   - Expands MediaPipe's 478 face landmarks with a dual-ring pinned outer boundary (`548` vertices / `1086` triangles) that locks background pixels to exact zero displacement.
   - Combines a **2D Pure-Shear Plateau contour field**, **Boltzmann-weighted `SoftMax` half-width estimation**, and **minimum-relax Jacobian safety equalization** to eliminate bent doorframes, yaw-induced left/right facial asymmetry, and grazing cheek double-contours.
-  - Covers **14 facial micro-reshape controls**: slim face, V-face, narrow face, small face, cheekbone slim, chin length, forehead height, eye enlarge, eye distance, eye corner, nose slim, nose length, mouth size, and smile lift.
-- **1080p Guided Skin Smoothing & Beard/Eyebrow Hair Preservation**
-  - Restores high-frequency pore micro-texture (`skinTexture`) and gates smoothing with `HairSegmenter` + `SelfieSegmenter` masks so eyebrows, eyelashes, and men's beard edges stay crisp without "skin-stuck-on-beard" artifacts.
-  - Includes blemish suppression, nasolabial fold softening, dark-circle removal, eye brightening, YCbCr lip-safe teeth whitening, and 3D soft-light `radiance`.
+  - Covers **15 facial & cranial micro-reshape controls**: slim face, V-face, narrow face, small face, cheekbone slim, **high cranial top (`cranialTop`)**, chin length, forehead height, eye enlarge, eye distance, eye corner, nose slim, nose length, mouth size, and smile lift.
+- **Dual-Band Creamy Skin Guided Smoothing & 468-pt Anatomical Sub-Mesh Retouching**
+  - Combines a `1/3` edge-preserving guided filter with a `1/9` wide-scale skin homogenizer and `2–4 px` pore micro-texture restoration — melting away tear-trough dullness and cheek blotches while keeping 3D bone shadows, eyebrows, and men's beard edges crisp.
+  - **In-Place 468-pt Sub-Mesh Retouching (Zero Extra 1080p FBO)**: Tear-trough concealer that preserves natural aegyo-sal fullness, curved nasolabial fold softening, 28-triangle eye brightening, and 18-triangle inner-mouth teeth whitening that physically never bleaches glossy lips.
 - **6-Layer UV Real-Time Makeup & `64³` 3D LUT Grading**
   - Velvet & water-glow specular lipsticks (6 shades), 3 blush styles, eyebrows, eyeshadow, eyeliner, aegyo-sal, 3D nose/cheek contour & highlight, iris-masked contact lenses, and dual catchlights.
   - Ships with **10 built-in `512×512` (`64³`) studio 3D LUTs** (`asset://luts/<id>.png`) plus disk-cached `https://` remote LUT loading.
 - **5-Axis Body Reshape & Portrait Bokeh**
   - Pose-driven waist slimming, bust enhancement, leg lengthening, shoulder slimming, neck lengthening, and real-time background blur.
 - **Live-Streaming Resilience**
-  - **`FrameDelayRing`** aligns camera frames with asynchronous MediaPipe inference to eliminate fast-motion landmark lag.
+  - **`FrameDelayRing` + Adaptive Far-Field Face ROI + GLES 3.0 Dual-PBO Readback**: Automatically zooms a `1:1` `256×256` ROI onto distant faces (`2.5–3.5×` higher effective DPI in half-body/dance streams) and uses asynchronous DMA `GL_PIXEL_PACK_BUFFER` readback on OpenGL ES 3.0+ contexts.
   - **`GpuDelegatePolicy`** detects native TFLite GPU driver crashes across process restarts and automatically falls back to CPU.
   - **`BeautyLoadGovernor` & `BitrateEffectsTuning`** step down GPU passes under thermal pressure and adaptively boost temporal denoising when encoder bitrate drops.
 

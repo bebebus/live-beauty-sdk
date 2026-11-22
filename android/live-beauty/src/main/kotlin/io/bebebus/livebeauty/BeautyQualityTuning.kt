@@ -35,6 +35,17 @@ internal object BeautyQualityTuning {
     /** 画面中部亮度高于它不算暗；低于 [DARK_LUMA] 视为全暗，二者之间线性。 */
     private const val BRIGHT_LUMA = 0.30f
     private const val DARK_LUMA = 0.10f
+    private const val MACRO_EVENNESS_MAX = 0.42f
+
+    /**
+     * 双频奶油肌宏尺度匀光强度（0..0.42）：磨皮 > 0 时将 1/3 局部肤色均值向 1/9 大核均值轻柔靠拢，
+     * 抚平泪沟暗沉、鼻翼/口周色块，同时经骨相光比门控保留鼻梁与下颌立体阴影。
+     */
+    fun macroEvenness(smoothing: Float): Float {
+        if (smoothing.isNaN() || smoothing <= 0f) return 0f
+        val t = smoothing.coerceIn(0f, 1f)
+        return MACRO_EVENNESS_MAX * kotlin.math.sqrt(t)
+    }
 
     /**
      * 导向滤波 eps：(ENERGY_SCALE·√3·σ0 / 255)²，σ0 = LO + (HI − LO)·clamp(smoothing)。

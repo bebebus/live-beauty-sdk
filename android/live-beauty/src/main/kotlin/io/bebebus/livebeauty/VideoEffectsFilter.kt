@@ -168,6 +168,9 @@ class VideoEffectsFilter(
     private val faceShapePass = FaceShapePass()
     private val faceShapeValues = FloatArray(FaceShapePass.VALUES)
     private var faceShapeHealthy = true // 局部修饰/回退脸型故障只停用该道。
+    private val faceRetouchPass = FaceRetouchMeshPass()
+    private var faceRetouchHealthy = true // 468 点解剖子网格局部精修故障只回退旧版 FaceShapePass。
+    private val faceRoi = FaceRoiSelector()
     private val faceMeshPass = FaceMeshWarpPass()
     private val faceMeshDeformer = FaceMeshDeformer()
     private var faceMeshHealthy = true // 478 点网格微整故障只停用网格微整，回退既有路径。
@@ -296,6 +299,7 @@ class VideoEffectsFilter(
         segmenter?.close(); segmenter = null
         hairSegmenter?.close(); hairSegmenter = null
         faceShapePass.release(); faceShapeHealthy = true; bodyPassHealthy = true; bgPassHealthy = true
+        faceRetouchPass.release(); faceRetouchHealthy = true
         faceMeshPass.release(); faceMeshHealthy = true
         bgPass.release(); maskPresence.reset(); segEpoch = Long.MIN_VALUE
         lastMaskStamp = Long.MIN_VALUE
@@ -366,7 +370,7 @@ class VideoEffectsFilter(
         GlUtil.createProgram(VideoEffectsShaders.VERTEX, fragment).also { check(it > 0) }
     } catch (_: Exception) { 0 }
     private fun resetFaceState() {
-        timeline.reset(); epoch = Long.MIN_VALUE; lastGeometry = null; lastGeometryAt = Long.MIN_VALUE
+        timeline.reset(); faceRoi.reset(); epoch = Long.MIN_VALUE; lastGeometry = null; lastGeometryAt = Long.MIN_VALUE
         lastCompletedSeen = Long.MIN_VALUE; meshFade.reset()
         lastFrameStamp = 0L; lastFrameTime = Long.MIN_VALUE; alignOffSince = Long.MIN_VALUE; videoDelayMs = 0L
     }
@@ -498,6 +502,7 @@ class VideoEffectsFilter(
                 3 -> bgPass.prepare()
                 // 头发遮罩的两个程序：A 通道（hairAlpha）与背景合并道（bgHair），各自失败互不影响。
                 4 -> { try { semanticPass.prepare() } catch (_: Exception) {}; bgPass.prepareHair() }
+                5 -> faceRetouchPass.prepare()
             }
         } catch (_: Exception) {}
         warmupIndex++
@@ -590,7 +595,7 @@ class VideoEffectsFilter(
                 val snapshot = detector.state.snapshot(now)
                 if (snapshot.epoch != epoch) {
                     epoch = snapshot.epoch
-                    timeline.reset()
+                    timeline.reset(); faceRoi.reset()
                     timeline.aspect = width.toFloat() / height.coerceAtLeast(1)
                     // 切镜头、尺寸变化等：人脸几何从头开始；画面延后缓冲不清空（FrameDelay 每场锁定，清空会让推流跳帧）。
                     lastCompletedSeen = Long.MIN_VALUE
@@ -600,12 +605,18 @@ class VideoEffectsFilter(
                         lastGeometry = it
                         lastGeometryAt = snapshot.sampleTimestamp
                         timeline.add(snapshot.sampleTimestamp, it.toState(), snapshot.mesh)
+                        val m = snapshot.mesh
+                        if (m != null) faceRoi.onFace(m.centerX, m.centerY, m.faceWidth, now)
+                        else faceRoi.onFace(it.oval[0], it.oval[1], it.oval[2] * 1.78f, now)
                     }
                 }
                 // 丢脸按采样时间记：本代际新完成的结果里没有脸（或有脸的那个已不新鲜），presence 据此在被画那一帧防抖后退出。
                 if (snapshot.completed != Long.MIN_VALUE && snapshot.completed > lastCompletedSeen) {
                     lastCompletedSeen = snapshot.completed
-                    if (snapshot.geometry == null || snapshot.sampleTimestamp < snapshot.completed) timeline.addMiss(snapshot.completed)
+                    if (snapshot.geometry == null || snapshot.sampleTimestamp < snapshot.completed) {
+                        timeline.addMiss(snapshot.completed)
+                        faceRoi.onMiss()
+                    }
                 }
                 // 丢脸时推理照样完成：按完成时间测延后，不因没有脸而中断。
                 faceCompleted = snapshot.completed
@@ -716,7 +727,9 @@ class VideoEffectsFilter(
             (stagedFace != null || stagedBody != null || stagedSeg != null || stagedHair != null)
         if (live && (faceTicket != null || bodyTicket != null || segTicket != null || hairTicket != null || staged)) {
             try {
-                faceSampler.capture(previousTexId, width, height, renderHandler.fboId[0])
+                val faceCrop = if (faceTicket != null || stagedFace != null) faceRoi.select(width, height, now)
+                else FaceRoiSelector.CropRect.FULL
+                faceSampler.capture(previousTexId, width, height, renderHandler.fboId[0], faceCrop = faceCrop)
                 if (faceSampler.deferred) {
                     stagedAt = now; stagedWidth = width; stagedHeight = height
                 } else {
@@ -857,6 +870,7 @@ class VideoEffectsFilter(
             cheekboneSlim = value.cheekboneSlim,
             chinShape = value.chinShape,
             foreheadShape = value.foreheadShape,
+            cranialTop = value.cranialTop,
             eyeEnlarge = value.eyeEnlarge,
             eyeDistance = value.eyeDistance,
             eyeCorner = value.eyeCorner,
@@ -900,8 +914,9 @@ class VideoEffectsFilter(
             mesh != null -> mesh.landmarks
             else -> null
         }
-        val faceShapeOn = active && faceShapeHealthy && presence > 0f && if (mesh != null && workingLandmarksInitial != null && faceMeshHealthy) {
-            // 网格通道健康：FaceShapePass 收敛为基于真实 478 点的纯局部修饰（黑眼圈、亮眼、白牙、法令纹）。
+        val retouchAny = value.darkCircles > 0f || value.brightEyes > 0f || value.teethWhiten > 0f || value.nasolabial > 0f
+        val retouchMeshOn = active && faceRetouchHealthy && faceMeshHealthy && mesh != null && presence > 0f && retouchAny
+        val faceShapeOn = active && faceShapeHealthy && presence > 0f && !retouchMeshOn && if (mesh != null && workingLandmarksInitial != null && faceMeshHealthy) {
             FaceShapePass.packRetouchFromMesh(
                 landmarks = workingLandmarksInitial,
                 axisX = mesh.axisX,
@@ -925,7 +940,7 @@ class VideoEffectsFilter(
         } else false
         val makeupWanted = active && makeupHealthy && mesh != null && presence > 0f && value.hasMakeup()
         val lutWanted = value.lutUrl.isNotEmpty() && value.lutIntensity > 0f
-        val processing = active && (bodyOn || lutWanted || makeupWanted || background > 0f || meshDeformed || faceShapeOn ||
+        val processing = active && (bodyOn || lutWanted || makeupWanted || background > 0f || meshDeformed || retouchMeshOn || faceShapeOn ||
             legacySlim > 0f || legacyEye > 0f || value.smoothing > 0f || value.brightness > 0f ||
             value.sharpness > 0f || value.whiten > 0f || value.rosy > 0f || value.radiance > 0f || value.saturation != 1f ||
             value.filter != "none" && value.filterIntensity > 0f)
@@ -969,11 +984,12 @@ class VideoEffectsFilter(
                 if (bgPass.hasMask) source = bgPass.render(source, width, height, background, hair, face, hairGate.faceKeep)
             } catch (_: Exception) { if (!stale) bgPassHealthy = false }
         }
-        // 2a''. 478 点 2D 三角网格精细微整（14 项微整，双环 C1 柔化缓冲环；在局部修饰与美体之前执行）。
+        // 2a''. 478 点 2D 三角网格精细微整（15 项微整，双环 C1 柔化缓冲环；在局部修饰与美体之前执行）。
+        val preMeshSource = source
         var meshRendered = false
         if (processing && healthy && meshDeformed) {
             try {
-                source = faceMeshPass.render(source, width, height, faceMeshDeformer.vertexData, faceMeshDeformer.frontFaceCw)
+                source = faceMeshPass.render(preMeshSource, width, height, faceMeshDeformer.vertexData, faceMeshDeformer.frontFaceCw)
                 meshRendered = true
             } catch (_: Exception) {
                 glDisable(GL_CULL_FACE)
@@ -986,8 +1002,38 @@ class VideoEffectsFilter(
             FaceMeshFrame.fillGeometryState(faceMeshDeformer.warpedLandmarks, mesh.axisX, mesh.axisY, aspect, 0f, warpedGeometry)
         ) warpedGeometry else rawGeometry
         var workingLandmarks = if (meshRendered) faceMeshDeformer.warpedLandmarks else mesh?.landmarks
-        // 2a'''. 局部修饰（黑眼圈、亮眼、白牙、法令纹，或网格故障时的旧版下巴/额头/瘦鼻回退）：须在美体（天鹅颈会移动头部）之前。
-        if (processing && healthy && faceShapeOn) {
+        // 2a'''. 468 点解剖子网格局部修饰（去黑眼圈留卧蚕、弧形法令纹、眼裂亮眼、内唇防染唇白牙）：直接原位叠加在 faceMeshPass FBO 上，
+        // 省去整张 1080p FBO；异常或无网格时自动回退 FaceShapePass。
+        if (processing && healthy && retouchMeshOn && mesh != null) {
+            try {
+                if (!meshRendered) {
+                    source = faceMeshPass.renderBaseOnly(preMeshSource, width, height)
+                }
+                val retouchLandmarks = workingLandmarks ?: mesh.landmarks
+                faceRetouchPass.renderInPlace(
+                    targetFbo = faceMeshPass.outputFbo,
+                    sourceTexture = preMeshSource,
+                    width = width,
+                    height = height,
+                    landmarks = retouchLandmarks,
+                    meshVertices = if (meshRendered) faceMeshDeformer.vertexData else null,
+                    axisX = mesh.axisX,
+                    axisY = mesh.axisY,
+                    faceWidth = mesh.faceWidth,
+                    faceHeight = mesh.faceHeight,
+                    frontFaceCw = if (meshRendered) faceMeshDeformer.frontFaceCw else FaceMeshFrame.isFrontFaceCw(retouchLandmarks),
+                    darkCircles = value.darkCircles * presence * steadyEye,
+                    brightEyes = value.brightEyes * presence * steadyEye,
+                    teethWhiten = value.teethWhiten * presence * steadyEye,
+                    nasolabial = value.nasolabial * presence * steadyEye,
+                )
+            } catch (_: Exception) {
+                glDisable(GL_CULL_FACE)
+                glFrontFace(GL_CCW)
+                glDisable(GL_BLEND)
+                if (!stale) faceRetouchHealthy = false
+            }
+        } else if (processing && healthy && faceShapeOn) {
             try { source = faceShapePass.render(source, width, height, faceShapeValues) }
             catch (_: Exception) { if (!stale) faceShapeHealthy = false }
         }
@@ -1209,7 +1255,7 @@ class VideoEffectsFilter(
             segmenter?.close(); segmenter = null
             hairSegmenter?.close(); hairSegmenter = null
             clearStaged() // 还没取票的延迟回读记录随上下文丢弃
-            bgPass.delete(); faceShapePass.delete(); faceMeshPass.delete()
+            bgPass.delete(); faceShapePass.delete(); faceRetouchPass.delete(); faceMeshPass.delete()
             hairTexture.delete(); semanticPass.delete()
             guidedFilterPass.delete(); skinMaskPass.delete()
             prePass.delete(); faceSampler.delete(); bodyPass.delete()
@@ -1407,8 +1453,8 @@ class VideoEffectsFilter(
         const val MASK_LAG_ZERO_MS = 200L
         /** 上一帧耗时低于这么多毫秒才做预热。 */
         const val WARMUP_WORK_MS = 12L
-        /** 预热的处理道数：FrameDelay、共享小图、美妆程序、背景虚化、头发遮罩（A 通道与背景合并道）。 */
-        const val WARMUP_STEPS = 5
+        /** 预热的处理道数：FrameDelay、共享小图、美妆程序、背景虚化、头发遮罩、468 点解剖精修子网格。 */
+        const val WARMUP_STEPS = 6
     }
 }
 

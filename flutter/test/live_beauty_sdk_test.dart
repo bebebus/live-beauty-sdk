@@ -75,6 +75,7 @@ void main() {
       const LiveBeautyConfig custom = LiveBeautyConfig(
         chinShape: -0.45,
         foreheadShape: 0.35,
+        cranialTop: 0.60,
         eyeDistance: -0.25,
         eyeCorner: 0.30,
         noseLength: -0.20,
@@ -86,6 +87,11 @@ void main() {
       );
       expect(() => custom.validate(), returnsNormally);
       expect(custom.hasFaceReshape, isTrue);
+      expect(const LiveBeautyConfig(cranialTop: 0.4).hasFaceReshape, isTrue);
+      expect(
+        () => custom.copyWith(cranialTop: 1.05).validate(),
+        throwsRangeError,
+      );
       expect(custom.hasBodyReshape, isTrue);
       expect(custom.hasMakeup, isTrue);
 

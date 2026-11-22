@@ -309,6 +309,7 @@ class FaceMeshDeformerTest {
             FaceMeshDeformer.Params(1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f),
             FaceMeshDeformer.Params(1f, 1f, 1f, 1f, 1f, -1f, -1f, 1f, -1f, -1f, 1f, -1f, -1f, 1f),
             FaceMeshDeformer.Params(1f, 0f, 1f, 0f, 1f, -1f, 1f, 1f, -1f, 1f, 1f, 1f, -1f, 1f),
+            FaceMeshDeformer.Params(1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f),
         )
         for (p in combos) {
             assertTrue(
@@ -1097,6 +1098,76 @@ class FaceMeshDeformerTest {
         val leftMove = asymDeformer.warpedLandmarks[172 * 2] - asymMesh.landmarks[172 * 2]
         val rightMove = asymMesh.landmarks[397 * 2] - asymDeformer.warpedLandmarks[397 * 2]
         assertTrue("正脸天然左宽右窄时左颊内收量 ($leftMove) 应严格大于右颊 ($rightMove)", leftMove > rightMove * 1.15f)
+    }
+
+    @Test
+    fun cranialTopFluffsHairCrownWithoutStretchingBareForeheadOrBendingOuterBackground() {
+        val aspect = 9f / 16f
+        // 平面规范 2D 网格：全部 1086 个三角形严格零翻面。
+        val flatMesh = FaceMeshFrame.fromMediaPipe(canonicalMediaPipePoints(aspect = aspect), aspect)!!
+        val flatDeformer = FaceMeshDeformer()
+        assertTrue(
+            flatDeformer.deform(
+                flatMesh.landmarks, aspect, flatMesh.axisX, flatMesh.axisY, flatMesh.faceWidth, flatMesh.faceHeight,
+                1f, 1f, 1f, 1f, 1f, 1f, FaceMeshDeformer.Params(faceSlim = 0.25f, foreheadShape = -0.3f, cranialTop = 1.0f),
+            ),
+        )
+        assertNoFoldedTriangles(flatDeformer.vertexData, expectCw = flatDeformer.frontFaceCw)
+
+        // 3D 透视正侧脸 (-24°, 0°, +24°)：所有原本正面可见三角形零翻面，发冠外蓬、裸额头不拉长、外框背景零弯曲。
+        for (yawDeg in listOf(-24.0, 0.0, 24.0)) {
+            val raw = FaceTestFixtures.render(yawRad = Math.toRadians(yawDeg), aspect = aspect)
+            val mesh = FaceMeshFrame.fromMediaPipe(FaceTestFixtures.toMediaPipe(raw), aspect)!!
+            val baseDeformer = FaceMeshDeformer()
+            val cranialDeformer = FaceMeshDeformer()
+            assertTrue(
+                baseDeformer.deform(
+                    mesh.landmarks, aspect, mesh.axisX, mesh.axisY, mesh.faceWidth, mesh.faceHeight,
+                    mesh.leftWeight, mesh.rightWeight, mesh.yawWeight, 1f, 1f, 1f,
+                    FaceMeshDeformer.Params(faceSlim = 0.2f),
+                ),
+            )
+            assertTrue(
+                cranialDeformer.deform(
+                    mesh.landmarks, aspect, mesh.axisX, mesh.axisY, mesh.faceWidth, mesh.faceHeight,
+                    mesh.leftWeight, mesh.rightWeight, mesh.yawWeight, 1f, 1f, 1f,
+                    FaceMeshDeformer.Params(faceSlim = 0.2f, cranialTop = 1.0f),
+                ),
+            )
+            val verts = cranialDeformer.vertexData
+            val indices = FaceMeshTopology.FULL_INDICES
+            for (t in 0 until FaceMeshTopology.TOTAL_TRIANGLE_COUNT) {
+                val a = indices[t * 3].toInt() * 4
+                val b = indices[t * 3 + 1].toInt() * 4
+                val c = indices[t * 3 + 2].toInt() * 4
+                val origArea = (verts[b + 2] - verts[a + 2]) * (verts[c + 3] - verts[a + 3]) -
+                    (verts[b + 3] - verts[a + 3]) * (verts[c + 2] - verts[a + 2])
+                if (origArea > 1e-6f) {
+                    val newArea = (verts[b] - verts[a]) * (verts[c + 1] - verts[a + 1]) -
+                        (verts[b + 1] - verts[a + 1]) * (verts[c] - verts[a])
+                    assertTrue("yaw=$yawDeg 正面可见三角形 #$t 严禁翻面：newArea=$newArea", newArea > 0f)
+                }
+            }
+
+            // 1. 裸额头发际线顶点 10 不得被向上拉长（dY <= 0）。
+            assertTrue(
+                "yaw=$yawDeg 高颅顶不得把裸发际线 10 向上拉长",
+                cranialDeformer.warpedLandmarks[10 * 2 + 1] <= baseDeformer.warpedLandmarks[10 * 2 + 1] + 1e-4f,
+            )
+
+            // 2. 颅顶正中发冠缓冲点 (MID_BUFFER_OFFSET + 0, 对应 FACE_OVAL[0]=10) 必须显著向上蓬起（NDC y 增大）。
+            val crownMidIdx = FaceMeshTopology.MID_BUFFER_OFFSET * 4
+            val crownDstNdcY = cranialDeformer.vertexData[crownMidIdx + 1]
+            val crownSrcNdcY = cranialDeformer.vertexData[crownMidIdx + 3] * 2f - 1f
+            assertTrue("yaw=$yawDeg 颅顶发冠应显著向上外蓬", crownDstNdcY - crownSrcNdcY > 0.025f)
+
+            // 3. 外层锚定缓冲环 (504..539) 与屏幕外锚点 (540..547) 位移严格恒为 0，天花板/门框直线零弯曲。
+            for (v in FaceMeshTopology.BUFFER_OFFSET until FaceMeshTopology.TOTAL_VERTEX_COUNT) {
+                val k = v * 4
+                assertEquals(cranialDeformer.vertexData[k + 2] * 2f - 1f, cranialDeformer.vertexData[k], 1e-5f)
+                assertEquals(cranialDeformer.vertexData[k + 3] * 2f - 1f, cranialDeformer.vertexData[k + 1], 1e-5f)
+            }
+        }
     }
 
     private fun assertNoFoldedTriangles(vertices: FloatArray, expectCw: Boolean = false) {

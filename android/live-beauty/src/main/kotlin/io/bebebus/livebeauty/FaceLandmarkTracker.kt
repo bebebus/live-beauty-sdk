@@ -59,9 +59,14 @@ class FaceLandmarkTracker(context: Context, private val onFailure: () -> Unit) {
                     gpuConfirmed=true; policy.onGpuSuccess()
                 }
                 // numFaces = 1 时最多一张（跟踪以上一帧 ROI 为准，第二张脸入镜不会抢走主脸）；NUM_FACES > 1（A/B）时取第一张。
+                val crop = sample.crop
                 faces.firstOrNull()?.let { face ->
                     val aspect = ticket.width.toFloat() / ticket.height
-                    val pts = face.map { it.x() to it.y() }
+                    val pts = if (crop.isFullFrame) {
+                        face.map { it.x() to it.y() }
+                    } else {
+                        face.map { crop.unprojectX(it.x()) to crop.unprojectY(it.y()) }
+                    }
                     val meshFrame = FaceMeshFrame.fromMediaPipe(pts, aspect)
                     // 0.45 < |r| <= 0.72 侧脸段由 meshFrame 提供兼容几何（仅遮罩），避免大侧脸突然丢脸闪烁。
                     val geo = FaceGeometry.fromMesh(pts, aspect) ?: meshFrame?.toCompatGeometry(aspect)

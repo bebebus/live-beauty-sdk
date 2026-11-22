@@ -109,12 +109,13 @@ class VideoEffectsConfigTest {
     @Test fun parsesAll14MeshReshapeParamsIncludingBidirectional() {
         val actual = VideoEffectsConfig.parse(values().apply {
             put("vFace", 0.5); put("faceNarrow", 0.3); put("faceSmall", 0.4)
-            put("cheekboneSlim", 0.25); put("mouthSmile", 0.6)
+            put("cheekboneSlim", 0.25); put("mouthSmile", 0.6); put("cranialTop", 0.55)
             put("chinShape", -0.4); put("foreheadShape", -0.35)
             put("eyeDistance", -0.5); put("eyeCorner", 0.45)
             put("noseLength", -0.2); put("mouthSize", 0.3)
         })
         assertEquals(0.5f, actual.vFace)
+        assertEquals(0.55f, actual.cranialTop)
         assertEquals(0.3f, actual.faceNarrow)
         assertEquals(0.4f, actual.faceSmall)
         assertEquals(0.25f, actual.cheekboneSlim)
@@ -127,7 +128,8 @@ class VideoEffectsConfigTest {
         assertEquals(0.3f, actual.mouthSize)
         assertTrue(actual.hasFaceReshape())
         assertFalse(VideoEffectsConfig.parse(values()).hasFaceReshape())
-        for (key in listOf("vFace", "faceNarrow", "faceSmall", "cheekboneSlim", "mouthSmile")) {
+        assertTrue(VideoEffectsConfig.parse(values().apply { put("cranialTop", 0.35) }).hasFaceReshape())
+        for (key in listOf("vFace", "faceNarrow", "faceSmall", "cheekboneSlim", "mouthSmile", "cranialTop")) {
             for (bad in listOf(-0.01, 1.01, Double.NaN)) {
                 try { VideoEffectsConfig.parse(values().apply { put(key, bad) }); fail("应拒绝 $key=$bad") }
                 catch (_: IllegalArgumentException) {}

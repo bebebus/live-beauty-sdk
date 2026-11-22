@@ -68,11 +68,13 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val contactLens: Float = 0f,
     val contactLensStyle: String = "hazel",
     val catchlight: Float = 0f,
+    /** 高颅顶 / 蓬松头包脸（仅 Android，0..1，置于末尾保持位置构造兼容）：外蓬颅顶与上颞发冠且不拉长裸额头。 */
+    val cranialTop: Float = 0f,
 ) {
-    /** 任意一项 14 项面部微整处于非零状态。 */
+    /** 任意一项面部与颅顶网格微整处于非零状态。 */
     fun hasFaceReshape(): Boolean =
         faceSlim > 0f || eyeEnlarge > 0f || vFace > 0f || faceNarrow > 0f || faceSmall > 0f ||
-            cheekboneSlim > 0f || chinShape != 0f || foreheadShape != 0f ||
+            cheekboneSlim > 0f || chinShape != 0f || foreheadShape != 0f || cranialTop > 0f ||
             eyeDistance != 0f || eyeCorner != 0f || noseSlim > 0f ||
             noseLength != 0f || mouthSize != 0f || mouthSmile > 0f
 
@@ -133,7 +135,8 @@ data class VideoEffectsConfig @JvmOverloads constructor(
                 unit("waistSlim", 0f), unit("bustEnhance", 0f), unit("legLengthen", 0f),
                 shoulderSlim = unit("shoulderSlim", 0f), neckLengthen = unit("neckLengthen", 0f),
                 backgroundBlur = unit("backgroundBlur", 0f),
-                chinShape = signed("chinShape"), foreheadShape = signed("foreheadShape"), noseSlim = unit("noseSlim", 0f),
+                chinShape = signed("chinShape"), foreheadShape = signed("foreheadShape"),
+                cranialTop = unit("cranialTop", 0f), noseSlim = unit("noseSlim", 0f),
                 vFace = unit("vFace", 0f), faceNarrow = unit("faceNarrow", 0f), faceSmall = unit("faceSmall", 0f),
                 cheekboneSlim = unit("cheekboneSlim", 0f), eyeDistance = signed("eyeDistance"), eyeCorner = signed("eyeCorner"),
                 noseLength = signed("noseLength"), mouthSize = signed("mouthSize"), mouthSmile = unit("mouthSmile", 0f),

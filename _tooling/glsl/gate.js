@@ -888,6 +888,7 @@ void main() {
   out.results.hairAlpha = hairAlpha(INPUT.hairAlpha);
   out.results.bgHair = bgHair(INPUT.bgHair);
   out.results.beardBorder = runBeardBorderProbes();
+  out.results.v11Upgrade = runV11UpgradeProbes();
 
   // ---- 毛发边界段（G1–G8）：场景、指标与阈值都在 glsl_gate.py，这里只跑生产程序并按 base64 回读。
   function hairEdge(input) {
@@ -1576,6 +1577,229 @@ void main() {
       brownBorderLift: beardBrown.borderLift,
       shadowSmoothRatio,
       coolLedSmoothRatio,
+    };
+  }
+
+  // ---- v1.1 双频奶油肌匀肤（G9）与 468 点解剖子网格精修（R1–R4）像素探针
+  function runV11UpgradeProbes() {
+    const luma = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+    // 1. G9: GUIDED_COEFF_FRAGMENT 双频奶油肌匀光（uEvenness=0 vs 0.42）
+    function evalGuidedCoeff(fineRgb, macroRgb, energyA, evenness) {
+      const tFine = texture(4, 4, (() => {
+        const b = new Uint8Array(4 * 4 * 4);
+        for (let i = 0; i < 16; i++) { b[i * 4] = fineRgb[0]; b[i * 4 + 1] = fineRgb[1]; b[i * 4 + 2] = fineRgb[2]; b[i * 4 + 3] = energyA; }
+        return b;
+      })());
+      const tMacro = texture(4, 4, (() => {
+        const b = new Uint8Array(4 * 4 * 4);
+        for (let i = 0; i < 16; i++) { b[i * 4] = macroRgb[0]; b[i * 4 + 1] = macroRgb[1]; b[i * 4 + 2] = macroRgb[2]; b[i * 4 + 3] = 255; }
+        return b;
+      })());
+      const dstT = texture(4, 4, null), dstF = framebuffer(dstT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dstF); gl.viewport(0, 0, 4, 4);
+      const p = use(P.guidedCoeff), at = p.at;
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tMacro);
+      if (at('uMacro') !== null) gl.uniform1i(at('uMacro'), 1);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tFine);
+      gl.uniform1i(at('uSampler'), 0);
+      gl.uniform2f(at('uDir'), 0.0, 0.25);
+      gl.uniform1f(at('uGuidedEps'), 0.0443);
+      if (at('uEvenness') !== null) gl.uniform1f(at('uEvenness'), evenness);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      p.done();
+      const px = new Uint8Array(4 * 4 * 4);
+      gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.deleteFramebuffer(dstF); gl.deleteTexture(dstT); gl.deleteTexture(tFine); gl.deleteTexture(tMacro);
+      // 重构平坦皮肤 q = a * fine + b * 255
+      const a = px[3] / 255.0;
+      return {
+        raw: [px[0], px[1], px[2], px[3]],
+        reconY: luma(a * fineRgb[0] + px[0], a * fineRgb[1] + px[1], a * fineRgb[2] + px[2]),
+      };
+    }
+
+    const blotchFine = [192, 146, 124], blotchMacro = [206, 158, 135];
+    const gZero = evalGuidedCoeff(blotchFine, blotchMacro, 8, 0.0);
+    const gZeroNoMacro = evalGuidedCoeff(blotchFine, [0, 0, 0], 8, 0.0);
+    let evenZeroDiff = 0;
+    for (let c = 0; c < 4; c++) evenZeroDiff = Math.max(evenZeroDiff, Math.abs(gZero.raw[c] - gZeroNoMacro.raw[c]));
+    const gEven = evalGuidedCoeff(blotchFine, blotchMacro, 8, 0.42);
+    const targetGap = luma(...blotchMacro) - gZero.reconY;
+    const blotchCloseRatio = (gEven.reconY - gZero.reconY) / Math.max(targetGap, 1e-4);
+
+    // 48/255 立体骨相大光比：boneKeep 门控保护阴影不被抹平
+    const boneFine = [150, 112, 95], boneMacro = [205, 160, 138];
+    const bZero = evalGuidedCoeff(boneFine, boneMacro, 8, 0.0);
+    const bEven = evalGuidedCoeff(boneFine, boneMacro, 8, 0.42);
+    const boneShiftAbs = Math.abs(bEven.reconY - bZero.reconY);
+
+    // 2. R1 & R2: 468 点解剖子网格 RETOUCH_SKIN_FRAGMENT（卧蚕权重 0 + 泪沟遮瑕 + 弧形法令纹）
+    const RW = 64, RH = 64;
+    function runRetouchMesh(prog, baseImg, verts, indices, setUniforms) {
+      const srcT = texture(RW, RH, baseImg);
+      const dstT = texture(RW, RH, new Uint8Array(baseImg)); // 原位已有底图（模拟 FaceMeshWarpPass FBO）
+      const dstF = framebuffer(dstT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dstF); gl.viewport(0, 0, RW, RH);
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      gl.useProgram(prog);
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+      const ibo = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+      const pLoc = gl.getAttribLocation(prog, 'aPosition');
+      const sLoc = gl.getAttribLocation(prog, 'aSrcCoord');
+      const aLoc = gl.getAttribLocation(prog, 'aRetouchAttr');
+      if (pLoc >= 0) { gl.enableVertexAttribArray(pLoc); gl.vertexAttribPointer(pLoc, 2, gl.FLOAT, false, 32, 0); }
+      if (sLoc >= 0) { gl.enableVertexAttribArray(sLoc); gl.vertexAttribPointer(sLoc, 2, gl.FLOAT, false, 32, 8); }
+      if (aLoc >= 0) { gl.enableVertexAttribArray(aLoc); gl.vertexAttribPointer(aLoc, 4, gl.FLOAT, false, 32, 16); }
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcT);
+      gl.uniform1i(gl.getUniformLocation(prog, 'uSampler'), 0);
+      setUniforms((name) => gl.getUniformLocation(prog, name));
+      gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
+      if (pLoc >= 0) gl.disableVertexAttribArray(pLoc);
+      if (sLoc >= 0) gl.disableVertexAttribArray(sLoc);
+      if (aLoc >= 0) gl.disableVertexAttribArray(aLoc);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+      gl.disable(gl.BLEND);
+      const outPx = new Uint8Array(RW * RH * 4);
+      gl.readPixels(0, 0, RW, RH, gl.RGBA, gl.UNSIGNED_BYTE, outPx);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.deleteBuffer(vbo); gl.deleteBuffer(ibo);
+      gl.deleteFramebuffer(dstF); gl.deleteTexture(dstT); gl.deleteTexture(srcT);
+      return outPx;
+    }
+
+    // R1 合成场景：上半 y∈[36,56) 为卧蚕带（attr.x=0），中间 y∈[20,36) 为暗青泪沟（142,102,94），下半 y∈[0,20) 为干净苹果肌（202,158,136）
+    const r1Base = new Uint8Array(RW * RH * 4);
+    for (let y = 0; y < RH; y++) {
+      const rgb = y >= 36 ? [210, 168, 146] : (y >= 20 ? [142, 102, 94] : [202, 158, 136]);
+      for (let x = 0; x < RW; x++) {
+        const k = (y * RW + x) * 4;
+        r1Base[k] = rgb[0]; r1Base[k + 1] = rgb[1]; r1Base[k + 2] = rgb[2]; r1Base[k + 3] = 255;
+      }
+    }
+    // 仅在泪沟子网格 y∈[18,36) (v∈[0.28125, 0.5625]) 赋 tearWeight=1、向下采样偏移 dy=-0.25；卧蚕区 y>=38 顶点权重严格 0
+    const r1Verts = [
+      // 卧蚕带矩形 (v=0.60..0.90)：tearWeight = 0 -> 必须 discard 零修改
+      -0.8, 0.20, 0.1, 0.60, 0.0, 0.0, 0.0, -0.25,
+       0.8, 0.20, 0.9, 0.60, 0.0, 0.0, 0.0, -0.25,
+      -0.8, 0.80, 0.1, 0.90, 0.0, 0.0, 0.0, -0.25,
+       0.8, 0.80, 0.9, 0.90, 0.0, 0.0, 0.0, -0.25,
+      // 泪沟带矩形 (v=0.32..0.55)：tearWeight = 1.0，向下采干净脸颊
+      -0.8, -0.36, 0.1, 0.32, 1.0, 0.0, 0.0, -0.22,
+       0.8, -0.36, 0.9, 0.32, 1.0, 0.0, 0.0, -0.22,
+      -0.8,  0.10, 0.1, 0.55, 1.0, 0.0, 0.0, -0.22,
+       0.8,  0.10, 0.9, 0.55, 1.0, 0.0, 0.0, -0.22,
+    ];
+    const r1Out = runRetouchMesh(P.retouchSkin, r1Base, r1Verts, [0, 1, 2, 2, 1, 3, 4, 5, 6, 6, 5, 7], (at) => {
+      gl.uniform4f(at('uRetouchStrength'), 1.0, 0.0, 0.0, 0.0);
+    });
+    let aegyoMaxDiff = 0;
+    for (let y = 40; y < 54; y++) {
+      for (let x = 16; x < 48; x++) {
+        const k = (y * RW + x) * 4;
+        for (let c = 0; c < 3; c++) aegyoMaxDiff = Math.max(aegyoMaxDiff, Math.abs(r1Out[k + c] - r1Base[k + c]));
+      }
+    }
+    const tearIdx = (26 * RW + 32) * 4;
+    const tearLift = luma(r1Out[tearIdx], r1Out[tearIdx + 1], r1Out[tearIdx + 2]) - luma(r1Base[tearIdx], r1Base[tearIdx + 1], r1Base[tearIdx + 2]);
+
+    // R2 弧形法令纹：中心暗沟 x∈[29,35) 为 (148,110,92)，两侧皮肤为 (204,160,138)
+    const r2Base = new Uint8Array(RW * RH * 4);
+    for (let y = 0; y < RH; y++) {
+      for (let x = 0; x < RW; x++) {
+        const rgb = (x >= 29 && x < 35) ? [148, 110, 92] : (x >= 46 ? [222, 180, 158] : [204, 160, 138]);
+        const k = (y * RW + x) * 4;
+        r2Base[k] = rgb[0]; r2Base[k + 1] = rgb[1]; r2Base[k + 2] = rgb[2]; r2Base[k + 3] = 255;
+      }
+    }
+    const r2Verts = [
+      -0.6, -0.6, 0.2, 0.2, 0.0, 1.0, 0.16, 0.0,
+       0.8, -0.6, 0.9, 0.2, 0.0, 1.0, 0.16, 0.0,
+      -0.6,  0.6, 0.2, 0.8, 0.0, 1.0, 0.16, 0.0,
+       0.8,  0.6, 0.9, 0.8, 0.0, 1.0, 0.16, 0.0,
+    ];
+    const r2Out = runRetouchMesh(P.retouchSkin, r2Base, r2Verts, [0, 1, 2, 2, 1, 3], (at) => {
+      gl.uniform4f(at('uRetouchStrength'), 0.0, 1.0, 0.0, 0.0);
+    });
+    const foldIdx = (32 * RW + 32) * 4;
+    const foldLift = luma(r2Out[foldIdx], r2Out[foldIdx + 1], r2Out[foldIdx + 2]) - luma(r2Base[foldIdx], r2Base[foldIdx + 1], r2Base[foldIdx + 2]);
+    const brightIdx = (32 * RW + 52) * 4;
+    let foldBrightMaxDiff = 0;
+    for (let c = 0; c < 3; c++) foldBrightMaxDiff = Math.max(foldBrightMaxDiff, Math.abs(r2Out[brightIdx + c] - r2Base[brightIdx + c]));
+
+    // R3 内唇口腔子网格白牙：外围水光浅粉唇釉 (232,198,204) 低饱和高亮，中心内唇子网格内为偏黄牙色 (202,188,144)
+    const r3Base = new Uint8Array(RW * RH * 4);
+    for (let y = 0; y < RH; y++) {
+      for (let x = 0; x < RW; x++) {
+        const inCavity = x >= 20 && x < 44 && y >= 22 && y < 42;
+        const rgb = inCavity ? [202, 188, 144] : [232, 198, 204];
+        const k = (y * RW + x) * 4;
+        r3Base[k] = rgb[0]; r3Base[k + 1] = rgb[1]; r3Base[k + 2] = rgb[2]; r3Base[k + 3] = 255;
+      }
+    }
+    // 严格只在内唇孔洞 [20..44, 22..42] (NDC [-0.375..0.375, -0.3125..0.3125]) 光栅化
+    const r3Verts = [
+      -0.375, -0.3125, 0.3125, 0.34375, 1.0, 0.0, 0.0, 0.0,
+       0.375, -0.3125, 0.6875, 0.34375, 1.0, 0.0, 0.0, 0.0,
+      -0.375,  0.3125, 0.3125, 0.65625, 1.0, 0.0, 0.0, 0.0,
+       0.375,  0.3125, 0.6875, 0.65625, 1.0, 0.0, 0.0, 0.0,
+    ];
+    const r3Out = runRetouchMesh(P.retouchEyeTeeth, r3Base, r3Verts, [0, 1, 2, 2, 1, 3], (at) => {
+      gl.uniform4f(at('uRetouchMode'), 1.0, 1.0, 0.0, 0.0);
+    });
+    let lipGlossMaxDiff = 0;
+    for (const [lx, ly] of [[12, 32], [52, 32], [32, 14], [32, 50]]) {
+      const k = (ly * RW + lx) * 4;
+      for (let c = 0; c < 3; c++) lipGlossMaxDiff = Math.max(lipGlossMaxDiff, Math.abs(r3Out[k + c] - r3Base[k + c]));
+    }
+    const tIdx = (32 * RW + 32) * 4;
+    const teethLumaLift = luma(r3Out[tIdx], r3Out[tIdx + 1], r3Out[tIdx + 2]) - luma(r3Base[tIdx], r3Base[tIdx + 1], r3Base[tIdx + 2]);
+    const teethYellowDrop = (r3Base[tIdx] - r3Base[tIdx + 2]) - (r3Out[tIdx] - r3Out[tIdx + 2]);
+
+    // R4 眼裂子网格亮眼：中心眼裂内巩膜 (196,192,188)，外部眼睑皮肤 (206,162,140)
+    const r4Base = new Uint8Array(RW * RH * 4);
+    for (let y = 0; y < RH; y++) {
+      for (let x = 0; x < RW; x++) {
+        const inEye = x >= 20 && x < 44 && y >= 24 && y < 40;
+        const rgb = inEye ? [196, 192, 188] : [206, 162, 140];
+        const k = (y * RW + x) * 4;
+        r4Base[k] = rgb[0]; r4Base[k + 1] = rgb[1]; r4Base[k + 2] = rgb[2]; r4Base[k + 3] = 255;
+      }
+    }
+    const r4Out = runRetouchMesh(P.retouchEyeTeeth, r4Base, r3Verts, [0, 1, 2, 2, 1, 3], (at) => {
+      gl.uniform4f(at('uRetouchMode'), 1.0, 0.0, 0.0, 0.0);
+    });
+    let eyeOutsideMaxDiff = 0;
+    for (const [ex, ey] of [[10, 32], [54, 32], [32, 10], [32, 54]]) {
+      const k = (ey * RW + ex) * 4;
+      for (let c = 0; c < 3; c++) eyeOutsideMaxDiff = Math.max(eyeOutsideMaxDiff, Math.abs(r4Out[k + c] - r4Base[k + c]));
+    }
+    const sIdx = (32 * RW + 32) * 4;
+    const scleraLift = luma(r4Out[sIdx], r4Out[sIdx + 1], r4Out[sIdx + 2]) - luma(r4Base[sIdx], r4Base[sIdx + 1], r4Base[sIdx + 2]);
+
+    checkError('v11Upgrade');
+    return {
+      evenZeroDiff,
+      blotchCloseRatio,
+      boneShiftAbs,
+      aegyoMaxDiff,
+      tearLift,
+      foldLift,
+      foldBrightMaxDiff,
+      lipGlossMaxDiff,
+      teethLumaLift,
+      teethYellowDrop,
+      eyeOutsideMaxDiff,
+      scleraLift,
     };
   }
 }

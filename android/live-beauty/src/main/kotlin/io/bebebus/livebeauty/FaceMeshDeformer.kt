@@ -31,7 +31,7 @@ import kotlin.math.pow
  * 此时它覆盖的面积趋于 0，切换的覆盖面积随噪声连续；抖动主要来自旧的二值可见度与 relax ×0.65 的位移跳变。
  */
 internal class FaceMeshDeformer {
-    /** 14 项微整输入参数。 */
+    /** 15 项微整输入参数（14 项五官脸型 + 末尾新增高颅顶蓬松头包脸 cranialTop，保持位置参数兼容）。 */
     data class Params(
         val faceSlim: Float = 0f,
         val vFace: Float = 0f,
@@ -47,10 +47,11 @@ internal class FaceMeshDeformer {
         val noseLength: Float = 0f,      // -1..+1（正拉长，负缩短）
         val mouthSize: Float = 0f,       // -1..+1（正放大，负缩小）
         val mouthSmile: Float = 0f,      // 0..1
+        val cranialTop: Float = 0f,      // 0..1（高颅顶/蓬松头包脸：保持发际线不拉长裸额头，外蓬颅顶与上颞发冠）
     ) {
         fun isActive(): Boolean =
             faceSlim > EPS || vFace > EPS || faceNarrow > EPS || faceSmall > EPS || cheekboneSlim > EPS ||
-                abs(chinShape) > EPS || abs(foreheadShape) > EPS || eyeEnlarge > EPS ||
+                abs(chinShape) > EPS || abs(foreheadShape) > EPS || cranialTop > EPS || eyeEnlarge > EPS ||
                 abs(eyeDistance) > EPS || abs(eyeCorner) > EPS || noseSlim > EPS ||
                 abs(noseLength) > EPS || abs(mouthSize) > EPS || mouthSmile > EPS
 
@@ -259,6 +260,7 @@ internal class FaceMeshDeformer {
         val sCheekbone = params.cheekboneSlim.coerceIn(0f, 1f) * faceMod
         val sChin = params.chinShape.coerceIn(-1f, 1f) * symFaceMod
         val sForehead = params.foreheadShape.coerceIn(-1f, 1f) * symFaceMod
+        val sCranial = params.cranialTop.coerceIn(0f, 1f) * symFaceMod
         val sEyeEnlarge = params.eyeEnlarge.coerceIn(0f, 1f) * eyeMod
         val sEyeDist = params.eyeDistance.coerceIn(-1f, 1f) * symEyeMod
         val sEyeCorner = params.eyeCorner.coerceIn(-1f, 1f) * eyeMod
@@ -393,6 +395,12 @@ internal class FaceMeshDeformer {
                         val vert = smoothstep(0.32f, 0.78f, nv)
                         val lat = 1f - smoothstep(0.70f, 1.05f, absNu) * 0.35f
                         dV += sForehead * 0.092f * fh * vert * lat
+                    }
+
+                    // (7') 高颅顶发际线防拉长（cranialTop）：微收上发际线 0.6%，防止外蓬颅顶发冠时把裸额头皮肤带高。
+                    if (sCranial > 1e-4f && nv > 0.58f) {
+                        val tuck = smoothstep(0.58f, 0.92f, nv) * (1f - smoothstep(0.65f, 1.0f, absNu) * 0.5f)
+                        dV -= sCranial * 0.006f * fh * tuck
                     }
 
                     // (8) 大眼 eyeEnlarge：按真实上下眼睑各向异性撑开，上边界接近眉毛时平滑衰减避免顶眉。
@@ -542,7 +550,10 @@ internal class FaceMeshDeformer {
             val rx = mx / mNorm; val ry = my / mNorm
             val silExcess = min(softMaxOvalExcess(k, ox, oy, rx, ry, excessBeta), 0.070f * fw)
             val outwardDisp = max(0f, dispMx[oi] * rx + dispMy[oi] * ry)
-            val padMid = padMidBase + silExcess + outwardDisp * 0.70f
+            val crownW = if (sCranial > 1e-4f) smoothstep(-0.10f, 0.68f, cNv) else 0f
+            val templeW = if (sCranial > 1e-4f) smoothstep(0.02f, 0.44f, cNv) * (1f - smoothstep(0.72f, 0.98f, cNv)) else 0f
+            val cranialSpan = sCranial * crownW * 0.095f * fh
+            val padMid = padMidBase + silExcess + outwardDisp * 0.70f + cranialSpan
             val midX = ox + rx * padMid
             val midY = oy + ry * padMid
             val mi = FaceMeshTopology.MID_BUFFER_OFFSET + k
@@ -550,11 +561,20 @@ internal class FaceMeshDeformer {
             dstMx[mi] = midX; dstMy[mi] = midY
             if (faceMod > 0f || eyeMod > 0f) {
                 val (mcx, mcy) = evalContour2D(midX, midY)
-                dispMx[mi] = mcx + interiorMx[oi] * MID_INTERIOR_CARRY
-                dispMy[mi] = mcy + interiorMy[oi] * MID_INTERIOR_CARRY
+                var mdx = mcx + interiorMx[oi] * MID_INTERIOR_CARRY
+                var mdy = mcy + interiorMy[oi] * MID_INTERIOR_CARRY
+                if (sCranial > 1e-4f && (crownW > 0f || templeW > 0f)) {
+                    val liftV = sCranial * crownW * 0.072f * fh
+                    val sideSgn = smoothstep(-0.18f, 0.18f, cNu) * 2f - 1f
+                    val fluffU = sCranial * templeW * 0.026f * fw * sideSgn
+                    mdx += fluffU * ux + liftV * vx
+                    mdy += fluffU * uy + liftV * vy
+                }
+                dispMx[mi] = mdx
+                dispMy[mi] = mdy
             }
 
-            val padOuter = max(padOuterBase + silExcess * 0.85f + outwardDisp * 1.50f, padMid + 0.115f * fw)
+            val padOuter = padOuterBase + silExcess * 0.85f + outwardDisp * 1.50f + sCranial * 0.185f * fh
             val bx = ox + rx * padOuter
             val by = oy + ry * padOuter
             val bi = FaceMeshTopology.BUFFER_OFFSET + k

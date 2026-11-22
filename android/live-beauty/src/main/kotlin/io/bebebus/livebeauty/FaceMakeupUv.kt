@@ -14,12 +14,35 @@ internal object FaceMakeupUv {
     const val VERTEX_STRIDE_FLOATS = 6 // dstNdcX, dstNdcY, screenU, screenV, makeupU, makeupV
     const val VERTEX_DATA_SIZE = FaceMeshTopology.FACE_VERTEX_COUNT * VERTEX_STRIDE_FLOATS
 
-    private val RIGHT_EYE_SET = setOf(33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
-    private val LEFT_EYE_SET = setOf(263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466)
-    private val INNER_LIP_SET = setOf(78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95)
+    internal val RIGHT_EYE_SET = setOf(33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
+    internal val LEFT_EYE_SET = setOf(263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466)
+    internal val INNER_LIP_SET = setOf(78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95)
 
     /** 852 个面部皮肤三角形索引（排除眼裂内部与内唇孔洞），供腮红/修容/高光/眉妆/眼妆渲染。 */
     val SKIN_FACE_INDICES: ShortArray = buildSkinFaceIndices()
+
+    /** 18 个纯内唇口腔三角形索引（三顶点均在内唇环内，唇红覆盖率为物理 0，供 468 点白牙子网格防染唇渲染）。 */
+    val INNER_MOUTH_INDICES: ShortArray = buildInnerMouthIndices()
+
+    /** 28 个双眼眼裂内部三角形索引（供 468 点亮眼子网格精准提亮巩膜与虹膜对比度）。 */
+    val EYE_OPENING_INDICES: ShortArray = ShortArray(FaceMeshTopology.RIGHT_EYE_INDICES.size + FaceMeshTopology.LEFT_EYE_INDICES.size).apply {
+        FaceMeshTopology.RIGHT_EYE_INDICES.copyInto(this, 0)
+        FaceMeshTopology.LEFT_EYE_INDICES.copyInto(this, FaceMeshTopology.RIGHT_EYE_INDICES.size)
+    }
+
+    private fun buildInnerMouthIndices(): ShortArray {
+        val src = FaceMeshTopology.CANONICAL_INDICES
+        val kept = ArrayList<Short>(18 * 3)
+        for (i in src.indices step 3) {
+            val a = src[i].toInt()
+            val b = src[i + 1].toInt()
+            val c = src[i + 2].toInt()
+            if (a in INNER_LIP_SET && b in INNER_LIP_SET && c in INNER_LIP_SET) {
+                kept.add(src[i]); kept.add(src[i + 1]); kept.add(src[i + 2])
+            }
+        }
+        return ShortArray(kept.size) { kept[it] }
+    }
 
     private fun buildSkinFaceIndices(): ShortArray {
         val src = FaceMeshTopology.CANONICAL_INDICES

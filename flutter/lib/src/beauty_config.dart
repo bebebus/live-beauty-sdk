@@ -50,6 +50,7 @@ class LiveBeautyConfig {
     this.neckLengthen = 0.0,
     this.chinShape = 0.0,
     this.foreheadShape = 0.0,
+    this.cranialTop = 0.0,
     this.noseSlim = 0.0,
     this.vFace = 0.0,
     this.faceNarrow = 0.0,
@@ -99,7 +100,7 @@ class LiveBeautyConfig {
   final double filterIntensity;
   final bool compareOriginal;
 
-  // 14-item 478-pt C-infinity diffeomorphic face reshape
+  // 15-item 478-pt C-infinity diffeomorphic face & cranial crown reshape
   final double faceSlim;
   final double eyeEnlarge;
   final double vFace;
@@ -108,6 +109,7 @@ class LiveBeautyConfig {
   final double cheekboneSlim;
   final double chinShape;
   final double foreheadShape;
+  final double cranialTop;
   final double eyeDistance;
   final double eyeCorner;
   final double noseSlim;
@@ -376,6 +378,7 @@ class LiveBeautyConfig {
       cheekboneSlim > 0 ||
       chinShape != 0 ||
       foreheadShape != 0 ||
+      cranialTop > 0 ||
       eyeDistance != 0 ||
       eyeCorner != 0 ||
       noseSlim > 0 ||
@@ -438,6 +441,7 @@ class LiveBeautyConfig {
     unit('neckLengthen', neckLengthen);
     signed('chinShape', chinShape);
     signed('foreheadShape', foreheadShape);
+    unit('cranialTop', cranialTop);
     unit('noseSlim', noseSlim);
     unit('vFace', vFace);
     unit('faceNarrow', faceNarrow);
@@ -502,6 +506,7 @@ class LiveBeautyConfig {
       'neckLengthen': neckLengthen,
       'chinShape': chinShape,
       'foreheadShape': foreheadShape,
+      'cranialTop': cranialTop,
       'noseSlim': noseSlim,
       'vFace': vFace,
       'faceNarrow': faceNarrow,
@@ -597,6 +602,7 @@ class LiveBeautyConfig {
       neckLengthen: numOr('neckLengthen', 0.0),
       chinShape: numOr('chinShape', 0.0),
       foreheadShape: numOr('foreheadShape', 0.0),
+      cranialTop: numOr('cranialTop', 0.0),
       noseSlim: numOr('noseSlim', 0.0),
       vFace: numOr('vFace', 0.0),
       faceNarrow: numOr('faceNarrow', 0.0),
@@ -660,6 +666,7 @@ class LiveBeautyConfig {
     double? neckLengthen,
     double? chinShape,
     double? foreheadShape,
+    double? cranialTop,
     double? noseSlim,
     double? vFace,
     double? faceNarrow,
@@ -719,6 +726,7 @@ class LiveBeautyConfig {
       neckLengthen: neckLengthen ?? this.neckLengthen,
       chinShape: chinShape ?? this.chinShape,
       foreheadShape: foreheadShape ?? this.foreheadShape,
+      cranialTop: cranialTop ?? this.cranialTop,
       noseSlim: noseSlim ?? this.noseSlim,
       vFace: vFace ?? this.vFace,
       faceNarrow: faceNarrow ?? this.faceNarrow,

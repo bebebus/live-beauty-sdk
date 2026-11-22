@@ -21,6 +21,10 @@ internal class FaceMeshWarpPass {
     private var w = 0
     private var h = 0
 
+    /** 当前全分辨率输出 FBO 句柄，供 [FaceRetouchMeshPass] 直接原位叠加解剖精修子网格，省去额外整屏 FBO。 */
+    val outputFbo: Int get() = frame
+    val outputTexture: Int get() = texture
+
     // 预分配全屏原图兜底四边形与直连缓冲（512 × 4 floats = 8 KB，3042 shorts = 6 KB），渲染期零分配。
     private val quadBuffer = ByteBuffer
         .allocateDirect(16 * 4)
@@ -51,33 +55,7 @@ internal class FaceMeshWarpPass {
      */
     fun render(source: Int, width: Int, height: Int, vertices: FloatArray, frontFaceCw: Boolean = false): Int {
         check(width > 0 && height > 0 && vertices.size >= FaceMeshTopology.TOTAL_VERTEX_COUNT * 4)
-        var fresh = false
-        if (program == 0) {
-            program = GlUtil.createProgram(VideoEffectsShaders.MESH_WARP_VERTEX, VideoEffectsShaders.MESH_WARP_FRAGMENT).also { check(it > 0) }
-            position = glGetAttribLocation(program, "aPosition")
-            coordinate = glGetAttribLocation(program, "aTextureCoord")
-            sampler = glGetUniformLocation(program, "uSampler")
-            fresh = true
-        }
-        if (w != width || h != height) {
-            deleteBuffers()
-            val ids = IntArray(1)
-            glGenTextures(1, ids, 0); texture = ids[0]
-            glActiveTexture(GL_TEXTURE0)
-            glBindTexture(GL_TEXTURE_2D, texture)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, null)
-            glGenFramebuffers(1, ids, 0); frame = ids[0]
-            glBindFramebuffer(GL_FRAMEBUFFER, frame)
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0)
-            check(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
-            glBindTexture(GL_TEXTURE_2D, 0)
-            w = width; h = height
-            fresh = true
-        }
+        val fresh = ensureTarget(width, height)
         vertexBuffer.clear()
         vertexBuffer.put(vertices, 0, FaceMeshTopology.TOTAL_VERTEX_COUNT * 4)
 
@@ -127,6 +105,65 @@ internal class FaceMeshWarpPass {
         glBindTexture(GL_TEXTURE_2D, 0)
         if (fresh) check(glGetError() == GL_NO_ERROR)
         return texture
+    }
+
+    /** 未开启五官微整但开启了 468 点局部精修时，将 [source] 极轻直通拷贝至本通道 FBO 供 [FaceRetouchMeshPass] 原位叠加。 */
+    fun renderBaseOnly(source: Int, width: Int, height: Int): Int {
+        check(width > 0 && height > 0)
+        val fresh = ensureTarget(width, height)
+        glBindFramebuffer(GL_FRAMEBUFFER, frame)
+        glViewport(0, 0, width, height)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_SCISSOR_TEST)
+        glDisable(GL_BLEND)
+        glDisable(GL_CULL_FACE)
+        glUseProgram(program)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, source)
+        glUniform1i(sampler, 0)
+        quadBuffer.position(0)
+        glVertexAttribPointer(position, 2, GL_FLOAT, false, 16, quadBuffer)
+        glEnableVertexAttribArray(position)
+        quadBuffer.position(2)
+        glVertexAttribPointer(coordinate, 2, GL_FLOAT, false, 16, quadBuffer)
+        glEnableVertexAttribArray(coordinate)
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        glDisableVertexAttribArray(position)
+        glDisableVertexAttribArray(coordinate)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        if (fresh) check(glGetError() == GL_NO_ERROR)
+        return texture
+    }
+
+    private fun ensureTarget(width: Int, height: Int): Boolean {
+        var fresh = false
+        if (program == 0) {
+            program = GlUtil.createProgram(VideoEffectsShaders.MESH_WARP_VERTEX, VideoEffectsShaders.MESH_WARP_FRAGMENT).also { check(it > 0) }
+            position = glGetAttribLocation(program, "aPosition")
+            coordinate = glGetAttribLocation(program, "aTextureCoord")
+            sampler = glGetUniformLocation(program, "uSampler")
+            fresh = true
+        }
+        if (w != width || h != height) {
+            deleteBuffers()
+            val ids = IntArray(1)
+            glGenTextures(1, ids, 0); texture = ids[0]
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, texture)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, null)
+            glGenFramebuffers(1, ids, 0); frame = ids[0]
+            glBindFramebuffer(GL_FRAMEBUFFER, frame)
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0)
+            check(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            w = width; h = height
+            fresh = true
+        }
+        return fresh
     }
 
     private fun deleteBuffers() {

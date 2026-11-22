@@ -104,6 +104,9 @@ PROGRAMS = [
     ('makeupLayer', 'MAKEUP_VERTEX', 'MAKEUP_LAYER_FRAGMENT'),
     ('makeupLip', 'MAKEUP_VERTEX', 'MAKEUP_LIP_FRAGMENT'),
     ('makeupIris', 'MAKEUP_VERTEX', 'MAKEUP_IRIS_FRAGMENT'),
+    # 468 点解剖子网格局部精修（仅 Android，FaceRetouchMeshPass.kt）。
+    ('retouchSkin', 'RETOUCH_VERTEX', 'RETOUCH_SKIN_FRAGMENT'),
+    ('retouchEyeTeeth', 'RETOUCH_VERTEX', 'RETOUCH_EYE_TEETH_FRAGMENT'),
     # 头发遮罩写皮肤遮罩 A 通道（仅 Android，SemanticAlphaPass.kt）与背景虚化的头发合并道（BackgroundBlurPass.kt）。
     ('hairAlpha', 'SEMANTIC_VERTEX', 'HAIR_ALPHA_FRAGMENT'),
     ('bgHair', 'VERTEX', 'BG_HAIR_FRAGMENT'),
@@ -181,7 +184,7 @@ def static_checks(shaders, report):
 
 
 # ---- Kotlin 接线的静态核对：PROGRAMS 与几何 uniform 打包都从生产 Kotlin 原文解析，不靠手抄。
-WIRING_FILES = ('VideoEffectsFilter.kt', 'GuidedFilterPrePass.kt', 'SkinMaskPass.kt', 'BeautyPrePass.kt', 'BodyWarpPass.kt', 'TemporalDenoisePass.kt', 'LutPass.kt', 'BackgroundBlurPass.kt', 'FaceShapePass.kt', 'FaceMeshWarpPass.kt', 'MakeupPass.kt', 'FrameDelay.kt', 'SemanticAlphaPass.kt')
+WIRING_FILES = ('VideoEffectsFilter.kt', 'GuidedFilterPrePass.kt', 'SkinMaskPass.kt', 'BeautyPrePass.kt', 'BodyWarpPass.kt', 'TemporalDenoisePass.kt', 'LutPass.kt', 'BackgroundBlurPass.kt', 'FaceShapePass.kt', 'FaceRetouchMeshPass.kt', 'FaceMeshWarpPass.kt', 'MakeupPass.kt', 'FrameDelay.kt', 'SemanticAlphaPass.kt')
 # GlUtil.createProgram(VideoEffectsShaders.X, VideoEffectsShaders.Y) 与 BeautyPrePass 的 Program(…, …)。
 PROGRAM_CALL = re.compile(r'\b(?:createProgram|Program)\(\s*VideoEffectsShaders\.(\w+)\s*,\s*VideoEffectsShaders\.(\w+)\s*\)')
 # 期望值：meta.uniforms.android 的约定（README「Uniform 换算」）由 end_to_end.geometry 各字段拼出。
@@ -3004,6 +3007,40 @@ def check_beard_border(kotlin_dir, result, report):
                     b['blackBorderLift'], b['brownBorderLift'], b['shadowSmoothRatio'], b['coolLedSmoothRatio']))
 
 
+def check_v11_upgrade(kotlin_dir, result, report):
+    """核对 v1.1 双频奶油肌匀肤（G9）与 468 点解剖子网格精修（R1 留卧蚕去黑眼圈、R2 弧形法令纹、R3 零染唇白牙、R4 眼裂亮眼）。"""
+    prepass = kotlin_code(os.path.join(kotlin_dir, 'GuidedFilterPrePass.kt'))
+    even_wired = re.search(r'BeautyQualityTuning\.macroEvenness\(', prepass) is not None
+    report.line(even_wired, 'GuidedFilterPrePass.kt 的 uEvenness 取自 BeautyQualityTuning.macroEvenness=%s' % even_wired)
+
+    v = result
+    # G9：uEvenness=0 与单频逐字节一致；uEvenness=0.42 下 14/255 泪沟色块拉近 >= 30%，而 48/255 骨相大光比偏移 <= 2.5/255。
+    g9_ok = v['evenZeroDiff'] == 0 and v['blotchCloseRatio'] >= 0.30 and v['boneShiftAbs'] <= 2.5
+    report.line(g9_ok, 'G9 双频奶油肌匀肤：evenness=0 逐字节恒等（diff=%d），14/255 色块匀化率 %.1f%%（≥30%%），'
+                       '48/255 立体骨相保护偏移 %.2f/255（≤2.5）' % (
+                           v['evenZeroDiff'], v['blotchCloseRatio'] * 100.0, v['boneShiftAbs']))
+
+    # R1：去黑眼圈留卧蚕（卧蚕区 Δ=0，泪沟暗带提亮 >= 10/255）。
+    r1_ok = v['aegyoMaxDiff'] == 0 and v['tearLift'] >= 10.0
+    report.line(r1_ok, 'R1 468 点去黑眼圈留卧蚕：卧蚕保护带最大像素差 %d/255（=0），泪沟凹陷带提亮 %+.1f/255（≥+10）' % (
+        v['aegyoMaxDiff'], v['tearLift']))
+
+    # R2：弧形鼻唇沟淡法令纹（暗沟提亮 >= 16/255，亮肤色不变 <= 1/255）。
+    r2_ok = v['foldLift'] >= 16.0 and v['foldBrightMaxDiff'] <= 1
+    report.line(r2_ok, 'R2 468 点弧形法令纹：弯曲暗沟提亮 %+.1f/255（≥+16），高亮皮肤最大差 %d/255（≤1）' % (
+        v['foldLift'], v['foldBrightMaxDiff']))
+
+    # R3：内唇孔洞子网格白牙（浅粉水光唇釉像素差 == 0，口腔内黄牙提亮且去黄）。
+    r3_ok = v['lipGlossMaxDiff'] == 0 and v['teethLumaLift'] >= 8.0 and v['teethYellowDrop'] >= 12.0
+    report.line(r3_ok, 'R3 468 点内唇白牙防染唇：水光浅粉唇釉最大差 %d/255（=0），黄牙提亮 %+.1f/255（≥+8）、去黄 -%.1f/255（≥12）' % (
+        v['lipGlossMaxDiff'], v['teethLumaLift'], v['teethYellowDrop']))
+
+    # R4：眼裂子网格亮眼（眼外皮肤像素差 == 0，巩膜提亮 >= 4/255）。
+    r4_ok = v['eyeOutsideMaxDiff'] == 0 and v['scleraLift'] >= 4.0
+    report.line(r4_ok, 'R4 468 点眼裂亮眼：眼睑外皮肤最大差 %d/255（=0），巩膜提亮 %+.1f/255（≥+4）' % (
+        v['eyeOutsideMaxDiff'], v['scleraLift']))
+
+
 def main(argv):
     if len(argv) not in (4, 5):
         print(__doc__, file=sys.stderr)
@@ -3088,6 +3125,7 @@ def main(argv):
         check_hair_edge(result['results']['hairEdge'], hair_context, report)
         check_hair_mask(result['results'], hair_context, report)
         check_beard_border(kotlin_dir, result['results']['beardBorder'], report)
+        check_v11_upgrade(kotlin_dir, result['results']['v11Upgrade'], report)
     elif not result['errors']:
         report.line(False, '没有像素结果')
     elapsed = time.time() - started

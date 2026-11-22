@@ -324,6 +324,83 @@ void main() {
 }
 """
 
+    /** 468 点解剖子网格局部精修顶点着色器（仅 Android，FaceRetouchMeshPass）：原位叠加在 FaceMeshWarpPass FBO 上，零额外整屏拷贝。 */
+    const val RETOUCH_VERTEX = """attribute vec2 aPosition;
+attribute vec2 aSrcCoord;
+attribute vec4 aRetouchAttr;
+varying vec2 vSrcCoord;
+varying vec4 vRetouchAttr;
+void main() {
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+    vSrcCoord = aSrcCoord;
+    vRetouchAttr = aRetouchAttr;
+}
+"""
+
+    /**
+     * 468 点解剖子网格泪沟去黑眼圈（精准避开卧蚕带）+ 弧形鼻唇沟淡法令纹片元着色器（仅 Android，FaceRetouchMeshPass）。
+     * vRetouchAttr = (tearWeight, foldWeight, sampleOffsetX, sampleOffsetY)；uRetouchStrength = (darkCircles, nasolabial, 0, 0)。
+     */
+    const val RETOUCH_SKIN_FRAGMENT = """$PRECISION
+uniform sampler2D uSampler;
+uniform vec4 uRetouchStrength;
+varying vec2 vSrcCoord;
+varying vec4 vRetouchAttr;
+void main() {
+    float wTear = clamp(vRetouchAttr.x * uRetouchStrength.x * 0.85, 0.0, 1.0);
+    float wFold = clamp(vRetouchAttr.y * uRetouchStrength.y * 0.82, 0.0, 1.0);
+    float alpha = clamp(wTear + wFold, 0.0, 1.0);
+    if (alpha <= 0.002) { discard; }
+    vec3 c = texture2D(uSampler, vSrcCoord).rgb;
+    vec2 off = vRetouchAttr.zw;
+    vec3 target = c;
+    if (wTear > wFold) {
+        vec3 cheekRef = texture2D(uSampler, clamp(vSrcCoord + off, 0.0, 1.0)).rgb;
+        float yBase = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        float yRef = dot(cheekRef, vec3(0.2126, 0.7152, 0.0722));
+        float deficit = clamp((yRef - yBase) * 2.4, 0.0, 0.22);
+        target = clamp(c + (cheekRef - c) * clamp(deficit * 3.8, 0.0, 0.75) + vec3(0.065, 0.052, 0.036) * (1.0 - yBase), 0.0, 1.0);
+    } else {
+        vec3 sideA = texture2D(uSampler, clamp(vSrcCoord + off, 0.0, 1.0)).rgb;
+        vec3 sideB = texture2D(uSampler, clamp(vSrcCoord - off, 0.0, 1.0)).rgb;
+        target = max(c, 0.5 * (sideA + sideB));
+    }
+    gl_FragColor = vec4(target, alpha);
+}
+"""
+
+    /**
+     * 468 点解剖子网格眼裂精准亮眼（28 个眼裂内部三角形）+ 内唇口腔物理防染唇白牙（18 个内唇孔洞三角形）。
+     * uRetouchMode = (strength, isTeethMode, 0, 0)。
+     */
+    const val RETOUCH_EYE_TEETH_FRAGMENT = """$PRECISION
+uniform sampler2D uSampler;
+uniform vec4 uRetouchMode;
+varying vec2 vSrcCoord;
+varying vec4 vRetouchAttr;
+void main() {
+    float strength = uRetouchMode.x * vRetouchAttr.x;
+    if (strength <= 0.002) { discard; }
+    vec3 c = texture2D(uSampler, vSrcCoord).rgb;
+    float y = dot(c, vec3(0.299, 0.587, 0.114));
+    float chroma = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+    if (uRetouchMode.y < 0.5) {
+        float sclera = smoothstep(0.38, 0.62, y) * (1.0 - smoothstep(0.12, 0.28, chroma));
+        vec3 contrasted = clamp((c - 0.42) * 1.16 + 0.45, 0.0, 1.0);
+        vec3 cleanSclera = mix(contrasted, vec3(min(y * 1.07 + 0.025, 1.0)), sclera * 0.55);
+        gl_FragColor = vec4(cleanSclera, clamp(strength * 0.72, 0.0, 1.0));
+    } else {
+        float toothMask = smoothstep(0.28, 0.50, y) * (1.0 - smoothstep(0.20, 0.38, chroma));
+        float alpha = clamp(strength * toothMask * 0.84, 0.0, 1.0);
+        if (alpha <= 0.002) { discard; }
+        float targetY = clamp(y * 1.12 + 0.035, 0.0, 0.96);
+        vec3 neutralWhite = vec3(targetY, targetY, min(targetY * 1.015, 0.98));
+        vec3 whitened = mix(c * (targetY / max(y, 0.001)), neutralWhite, 0.68);
+        gl_FragColor = vec4(clamp(whitened, 0.0, 1.0), alpha);
+    }
+}
+"""
+
     /**
      * 背景虚化（仅 Android）的预乘降采样：将前景人像置零（rgb * bg, bg），后续高斯模糊只对背景区域传播，
      * 彻底消除头发、肩膀向模糊背景渗色造成的深色残影光晕。见 BackgroundBlurPass。
@@ -957,6 +1034,8 @@ void main() {
      */
     const val GUIDED_COEFF = """$BLUR
 uniform float uGuidedEps;
+uniform sampler2D uMacro;
+uniform float uEvenness;
 float guidedCoeff(float s) {
     float r = s * s / max(uGuidedEps, 0.005);
     float rp = r * sqrt(r);
@@ -964,13 +1043,23 @@ float guidedCoeff(float s) {
     float a = max(rp / (1.0 + rp), smoothstep(lo, 0.30, s));
     return a;
 }
+vec3 evenMean(vec3 fineMean, float s, float maskW) {
+    if (uEvenness <= 0.0) return fineMean;
+    vec3 macroMean = texture2D(uMacro, vC).rgb;
+    float dy = abs(dot(macroMean - fineMean, vec3(0.2126, 0.7152, 0.0722))) / 0.068;
+    float dy2 = dy * dy;
+    float boneKeep = 1.0 / (1.0 + dy2 * dy2);
+    float flatKeep = 1.0 - smoothstep(0.05, 0.14, s);
+    return mix(fineMean, macroMean, uEvenness * boneKeep * flatKeep * maskW);
+}
 """
 
-    /** 导向滤波 P5：纵向模糊能量得 s，按 GUIDED_COEFF 的映射求系数 a，输出 ((1 - a) * mean, a)。 */
+    /** 导向滤波 P5：纵向模糊能量得 s，按 GUIDED_COEFF 的映射求系数 a，输出 ((1 - a) * evenMean, a)。 */
     const val GUIDED_COEFF_FRAGMENT = """$GUIDED_COEFF
 void main() {
-    vec3 mean = texture2D(uSampler, vC).rgb;
-    float a = guidedCoeff(blur5().a);
+    float s = blur5().a;
+    vec3 mean = evenMean(texture2D(uSampler, vC).rgb, s, 1.0);
+    float a = guidedCoeff(s);
     gl_FragColor = vec4((1.0 - a) * mean, a);
 }
 """
@@ -1021,9 +1110,10 @@ void main() {
 uniform sampler2D uWeight;
 // Hair (weight 0) gets the identity coefficients a = 1, b = 0, so the coefficient blur never pulls hair colour into skin.
 void main() {
-    vec3 mean = texture2D(uSampler, vC).rgb;
+    float s = blur5().a;
     float w = clamp(texture2D(uWeight, vC).a * 1.04 - 0.02, 0.0, 1.0);
-    float a = mix(1.0, guidedCoeff(blur5().a), w);
+    vec3 mean = evenMean(texture2D(uSampler, vC).rgb, s, w);
+    float a = mix(1.0, guidedCoeff(s), w);
     gl_FragColor = vec4((1.0 - a) * mean, a);
 }
 """

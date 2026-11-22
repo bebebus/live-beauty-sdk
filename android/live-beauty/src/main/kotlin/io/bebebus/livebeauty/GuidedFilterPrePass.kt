@@ -5,28 +5,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * 快速导向滤波预处理（仅 Android，He-Sun-Tang Fast Guided Filter 的 1/3 分辨率近似）。
+ * 双频快速导向滤波预处理（仅 Android，He-Sun-Tang Fast Guided Filter 1/3 分辨率保边 + 1/9 分辨率奶油肌宏匀光）。
  *
- * - P1 以 3×3 盒式均值降到 1/3 分辨率（720p 竖屏下 240×427）：抽头间距 [BeautyQualityTuning.DOWN_TAP_SCALE] = 2/3 原始像素，
- *   4 次双线性取样覆盖全部 9 个像素（见 DOWN_VERTEX）；
- * - 求局部均值 mean，并把 RGB 偏差的线性能量 clamp(|I − mean| × 2.5) 存进 alpha
- *   （GUIDED_DIFF_FRAGMENT；线性编码让 RGBA8 在 σ ≈ 1/255 处仍有分辨率）；
- * - 模糊能量得 s，按软映射求系数 `a = r^1.5 / (1 + r^1.5)`、`r = s² / eps`，并以 smoothstep(lo, 0.30, s) 把强边缘锁到 1，
- *   锁下限 lo = clamp(√eps − 0.09, 0.12, 0.18) 随磨皮档抬高（GUIDED_COEFF_FRAGMENT）；eps 随磨皮强度取
- *   [BeautyQualityTuning.guidedEps]；
- * - `(b, a) = ((1 − a)·mean, a)` 打包进 RGBA8，再在 1/3 分辨率经 P6/P7 二次平滑；
- * - 主合成在全分辨率按 `q = a·I + b` 重构：平坦皮肤 a 小、趋向局部均值，发丝、睫毛、唇线等高对比处 a 趋近 1、接近原图。
- *   系数是 1/3 分辨率求得再放大的，硬边两侧仍会有 1–2 像素的过渡，主合成另有 RGB 距离护栏兜底。
- * 采样间距 spread（1/3 分辨率 texel）随人脸大小自适应，见 [GuidedSpread]。
- *
- * 头发加权（毛发边界第二批，评审 2026-11-21 #0）：传入 hairWeight（本帧 SemanticAlphaPass 写过 A 的皮肤遮罩，A = 非头发权重）时，
- * P2/P3 改为按非头发权重预乘、模糊后归一化求局部均值（GUIDED_WEIGHT_BLUR / GUIDED_WEIGHT_DIFF）：发缘皮肤侧的均值不再
- * 混进头发，中等、偏深肤色配棕发、金发时额头一侧的暗带随之消失（门禁 G1 矩阵：棕发 × 中等肤色默认档 5.93 → 0.88/255）。
- * 能量不加权；P5 另让头发像素取恒等系数（GUIDED_WEIGHT_COEFF）。
- * 不传（0）时走原路径，与不接头发逐字节相同。加权路径单成故障域：出错时 [weightHealthy] 置 false（[release] 复位），
- * 本帧起退回原路径，导向滤波本身不停。
- *
- * 只在 GL 线程使用；返回后 GL_TEXTURE0 激活、unit 0–2 未绑定、属性数组已关闭；FBO 与 viewport 由调用方恢复。
+ * - P1 以 3×3 盒式均值降到 1/3 分辨率（720p 竖屏下 240×427）：抽头间距 [BeautyQualityTuning.DOWN_TAP_SCALE] = 2/3 原始像素；
+ * - 求局部均值 mean，并把 RGB 偏差线性能量存进 alpha（GUIDED_DIFF_FRAGMENT）；
+ * - 同步将局部均值降到 1/9 分辨率（720p 下仅 80×142，耗时 < 0.02 ms）做宽核高斯匀光得 `macroMean`，在 P5 / P5' 按骨相光比与边缘门控
+ *   融合进线性重构偏移 `b = (1 - a) * evenMean`，一次性抚平 18–40 px 泪沟暗沉与面中色块，不占主合成任何额外纹理单元或 uniform；
+ * - 头发加权路径（传入 `hairWeight`）下局部均值与宏均值均天然排除头发像素污染，发际线与胡须边界零暗带。
  */
 internal class GuidedFilterPrePass {
     private class Program(vertex: String, fragment: String) {
@@ -39,6 +24,8 @@ internal class GuidedFilterPrePass {
         val original = glGetUniformLocation(id, "uOrig")
         val eps = glGetUniformLocation(id, "uGuidedEps")
         val weight = glGetUniformLocation(id, "uWeight")
+        val macro = glGetUniformLocation(id, "uMacro")
+        val evenness = glGetUniformLocation(id, "uEvenness")
     }
 
     private class Programs {
@@ -67,23 +54,20 @@ internal class GuidedFilterPrePass {
     /** 头发加权路径是否可用；出过错就本上下文内不再加权（[release] 复位）。 */
     var weightHealthy = true
         private set
-    // 本上下文内是否已校验过一次加权路径的真实绘制（建程序那一帧之外，首次加权绘制也查一次 glGetError）。
     private var weightVerified = false
     private val textures = IntArray(3)
     private val frames = IntArray(3)
+    private val macroTextures = IntArray(2)
+    private val macroFrames = IntArray(2)
     private var sw = 0
     private var sh = 0
+    private var mw = 0
+    private var mh = 0
     private val vertices = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
         put(floatArrayOf(-1f, -1f, 0f, 0f, 1f, -1f, 1f, 0f, -1f, 1f, 0f, 1f, 1f, 1f, 1f, 1f))
         position(0)
     }
 
-    /**
-     * [smoothing] 决定 eps（[BeautyQualityTuning.guidedEps]），[spread] 为模糊采样间距（[GuidedSpread.value]）。
-     * [hairWeight]：本帧 SemanticAlphaPass 成功写过 A 通道的 SkinMaskPass 输出纹理（skinMaskTexture，A = 非头发权重，
-     * 与主合成 uSkinMask 同一张），传 0 或加权路径已停用时走原路径（与不接头发逐字节相同）。
-     * @return 存放 `(meanB.rgb, meanA)` 的 1/3 分辨率 RGBA8 纹理 T2。
-     */
     fun render(source: Int, width: Int, height: Int, smoothing: Float, spread: Float = GuidedSpread.DEFAULT,
                hairWeight: Int = 0): Int {
         check(width > 0 && height > 0)
@@ -96,17 +80,16 @@ internal class GuidedFilterPrePass {
             glGenTextures(3, textures, 0)
             glGenFramebuffers(3, frames, 0)
             sw = w; sh = h
+            mw = ((w + 2) / 3).coerceAtLeast(1)
+            mh = ((h + 2) / 3).coerceAtLeast(1)
             glActiveTexture(GL_TEXTURE0)
             for (i in 0 until 3) {
-                glBindTexture(GL_TEXTURE_2D, textures[i])
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, null)
-                glBindFramebuffer(GL_FRAMEBUFFER, frames[i])
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures[i], 0)
-                check(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+                initAttachment(textures[i], frames[i], w, h)
+            }
+            glGenTextures(2, macroTextures, 0)
+            glGenFramebuffers(2, macroFrames, 0)
+            for (i in 0 until 2) {
+                initAttachment(macroTextures[i], macroFrames[i], mw, mh)
             }
             glBindTexture(GL_TEXTURE_2D, 0)
             fresh = true
@@ -116,12 +99,12 @@ internal class GuidedFilterPrePass {
         val dx = step / w
         val dy = step / h
         val eps = BeautyQualityTuning.guidedEps(smoothing)
+        val even = BeautyQualityTuning.macroEvenness(smoothing)
 
         glViewport(0, 0, w, h)
         if (hairWeight != 0 && weightHealthy) {
-            // 建程序或（重新）分配那一帧先查这些操作本身的错误，免得被加权路径记到自己头上、吞掉。
             if (fresh) check(glGetError() == GL_NO_ERROR)
-            val weightedResult = renderWeighted(p, source, width, height, dx, dy, eps, hairWeight, fresh)
+            val weightedResult = renderWeighted(p, source, width, height, w, h, dx, dy, eps, even, hairWeight, fresh)
             if (weightedResult != 0) return weightedResult
             glViewport(0, 0, w, h)
         }
@@ -136,12 +119,15 @@ internal class GuidedFilterPrePass {
             glUniform2f(it.direction, 0f, dy)
             glUniform1i(it.original, 1)
         }
+        val macroTex = if (even > 0f) renderMacro(p, textures[2], w, h) else 0
         // P4 H-VAR：T2 → T1（模糊 alpha 能量，保留 mean.rgb）。
         pass(p.blurAlpha, frames[1], textures[2]) { glUniform2f(it.direction, dx, 0f) }
-        // P5 V-COEFF：T1 → T0 = ((1 - a) * mean, a)。
-        pass(p.guidedCoeff, frames[0], textures[1]) {
+        // P5 V-COEFF：T1 + macro → T0 = ((1 - a) * evenMean, a)。
+        pass(p.guidedCoeff, frames[0], textures[1], macroTex) {
             glUniform2f(it.direction, 0f, dy)
             glUniform1f(it.eps, eps)
+            if (it.macro >= 0) glUniform1i(it.macro, 1)
+            if (it.evenness >= 0) glUniform1f(it.evenness, even)
         }
         // P6/P7 COEFF-BLUR：T0 → T1 → T2 = (meanB.rgb, meanA)。
         pass(p.blurRgb, frames[1], textures[0]) { glUniform2f(it.direction, dx, 0f) }
@@ -153,13 +139,20 @@ internal class GuidedFilterPrePass {
         return textures[2]
     }
 
-    /**
-     * 头发加权路径：P1 → P2'（按非头发权重预乘横向模糊）→ P3'（归一化均值与能量）→ P4 → P5'（头发取恒等系数）→ P6/P7。
-     * 头发权重绑在纹理单元 2。建加权程序那一帧、本上下文首次加权绘制、以及（重新）分配那一帧（[fresh]）查一次 glGetError。
-     * 出错时停用加权（[weightHealthy] = false）、尽力清掉本路径留下的 GL 错误并返回 0，由调用方当帧改走原路径。
-     */
-    private fun renderWeighted(p: Programs, source: Int, width: Int, height: Int, dx: Float, dy: Float, eps: Float,
-                               hairWeight: Int, fresh: Boolean): Int {
+    private fun renderWeighted(
+        p: Programs,
+        source: Int,
+        width: Int,
+        height: Int,
+        w: Int,
+        h: Int,
+        dx: Float,
+        dy: Float,
+        eps: Float,
+        even: Float,
+        hairWeight: Int,
+        fresh: Boolean,
+    ): Int {
         try {
             var verify = fresh || !weightVerified
             val q = weighted ?: WeightedPrograms().also { weighted = it; verify = true }
@@ -179,13 +172,16 @@ internal class GuidedFilterPrePass {
                 glUniform2f(it.direction, 0f, dy)
                 glUniform1i(it.original, 1)
             }
+            val macroTex = if (even > 0f) renderMacro(p, textures[2], w, h) else 0
             // P4 H-VAR：同原路径。
             pass(p.blurAlpha, frames[1], textures[2]) { glUniform2f(it.direction, dx, 0f) }
-            // P5' V-COEFF：T1 → T0，头发像素取恒等系数。
-            pass(q.coeff, frames[0], textures[1]) {
+            // P5' V-COEFF：T1 + macro → T0，头发像素取恒等系数。
+            pass(q.coeff, frames[0], textures[1], macroTex) {
                 glUniform2f(it.direction, 0f, dy)
                 glUniform1f(it.eps, eps)
                 glUniform1i(it.weight, 2)
+                if (it.macro >= 0) glUniform1i(it.macro, 1)
+                if (it.evenness >= 0) glUniform1f(it.evenness, even)
             }
             // P6/P7：同原路径。
             pass(p.blurRgb, frames[1], textures[0]) { glUniform2f(it.direction, dx, 0f) }
@@ -199,10 +195,36 @@ internal class GuidedFilterPrePass {
         } catch (_: Exception) {
             weightHealthy = false
             unbind()
-            // 清掉本路径留下的错误，免得当帧原路径的分配检查把它记到导向滤波头上（有界，丢上下文时不死循环）。
             for (i in 0 until 8) if (glGetError() == GL_NO_ERROR) break
             return 0
         }
+    }
+
+    /** 在 1/9 分辨率求大核肤色匀光参考均值（约 32 px 全屏等效尺度），完成后恢复 1/3 viewport。 */
+    private fun renderMacro(p: Programs, fineMeanTex: Int, w: Int, h: Int): Int {
+        glViewport(0, 0, mw, mh)
+        val macroTap = 0.6666667f
+        pass(p.down, macroFrames[0], fineMeanTex) {
+            glUniform2f(it.texel, macroTap / w, macroTap / h)
+        }
+        val mdx = 1.55f / mw
+        val mdy = 1.55f / mh
+        pass(p.blurRgb, macroFrames[1], macroTextures[0]) { glUniform2f(it.direction, mdx, 0f) }
+        pass(p.blurRgb, macroFrames[0], macroTextures[1]) { glUniform2f(it.direction, 0f, mdy) }
+        glViewport(0, 0, w, h)
+        return macroTextures[0]
+    }
+
+    private fun initAttachment(tex: Int, fbo: Int, w: Int, h: Int) {
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, null)
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0)
+        check(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
     }
 
     private fun unbind() {
@@ -237,21 +259,24 @@ internal class GuidedFilterPrePass {
         if (sw != 0) {
             glDeleteFramebuffers(3, frames, 0)
             glDeleteTextures(3, textures, 0)
+            glDeleteFramebuffers(2, macroFrames, 0)
+            glDeleteTextures(2, macroTextures, 0)
         }
-        frames.fill(0); textures.fill(0); sw = 0; sh = 0
+        frames.fill(0); textures.fill(0); macroFrames.fill(0); macroTextures.fill(0)
+        sw = 0; sh = 0; mw = 0; mh = 0
     }
 
     fun release() {
-        frames.fill(0); textures.fill(0); sw = 0; sh = 0
+        frames.fill(0); textures.fill(0); macroFrames.fill(0); macroTextures.fill(0)
+        sw = 0; sh = 0; mw = 0; mh = 0
         programs = null
         weighted = null; weightHealthy = true; weightVerified = false
     }
 
     fun delete() {
+        deleteBuffers()
         programs?.delete()
         weighted?.delete()
-        deleteBuffers()
         release()
     }
-
 }

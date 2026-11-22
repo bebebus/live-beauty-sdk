@@ -21,7 +21,7 @@ echo "=================================================================="
 python3 reference/gen_face_topology.py --verify
 
 echo "=================================================================="
-echo " [4/7] 41 GLSL Shaders + 27 Mutants + 10 3D LUTs Gate (_tooling/verify-glsl.sh)"
+echo " [4/7] 44 GLSL Shaders + 28 Mutants + 10 3D LUTs Gate (_tooling/verify-glsl.sh)"
 echo "=================================================================="
 if [[ "${SKIP_GLSL_BROWSER_GATE:-0}" == "1" ]]; then
   echo "SKIP  SKIP_GLSL_BROWSER_GATE=1，仅执行内置 3D LUT 像素校验"
