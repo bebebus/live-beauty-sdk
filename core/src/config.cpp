@@ -35,7 +35,10 @@ bool BeautyConfig::isProcessing() const {
     if (!enabled || compareOriginal) return false;
     return smoothing > 0.0f || brightness != 0.0f || filter != ColorFilterStyle::kNone ||
            sharpness > 0.0f || std::fabs(saturation - 1.0f) > 1e-4f || whiten > 0.0f ||
-           rosy > 0.0f || radiance > 0.0f || backgroundBlur > 0.0f || !lutUrl.empty() ||
+           rosy > 0.0f || radiance > 0.0f || backgroundBlur > 0.0f ||
+           backgroundMode == BackgroundMode::kVirtualImage ||
+           backgroundMode == BackgroundMode::kVirtualBlur ||
+           !lutUrl.empty() ||
            hasFaceReshape() || hasBodyReshape() || hasRetouch() || hasMakeup();
 }
 
@@ -185,6 +188,13 @@ ContactLensStyle parseContactLensStyle(const std::string& s) {
     if (s == "mist_grey") return ContactLensStyle::kMistGrey;
     if (s == "sakura_pink") return ContactLensStyle::kSakuraPink;
     return ContactLensStyle::kHazel;
+}
+
+BackgroundMode parseBackgroundMode(const std::string& s) {
+    if (s == "blur") return BackgroundMode::kBlur;
+    if (s == "virtual_image" || s == "image") return BackgroundMode::kVirtualImage;
+    if (s == "virtual_blur" || s == "blur_image") return BackgroundMode::kVirtualBlur;
+    return BackgroundMode::kNone;
 }
 
 }  // namespace livebeauty

@@ -255,6 +255,146 @@ void testEndToEndMetalBeautyEngine(MetalDevice& dev) {
     dev.destroyTexture(inputTex);
 }
 
+// V1 + H1: Virtual background replacement replaces background pixels with virtualBgTex while preserving foreground & hair flyaways.
+void testVirtualBackgroundAndHairFlyawayProbeV1H1(MetalDevice& dev) {
+    constexpr int kW = 64, kH = 64;
+    // Camera input: solid red foreground person (220, 40, 40)
+    std::vector<uint8_t> camPx(kW * kH * 4);
+    for (int i = 0; i < kW * kH; ++i) {
+        camPx[i * 4 + 0] = 220; camPx[i * 4 + 1] = 40; camPx[i * 4 + 2] = 40; camPx[i * 4 + 3] = 255;
+    }
+    // Virtual background: solid blue (30, 80, 230)
+    std::vector<uint8_t> vbgPx(kW * kH * 4);
+    for (int i = 0; i < kW * kH; ++i) {
+        vbgPx[i * 4 + 0] = 30; vbgPx[i * 4 + 1] = 80; vbgPx[i * 4 + 2] = 230; vbgPx[i * 4 + 3] = 255;
+    }
+    // Person mask (R8 top-down): left third = person (255), right two-thirds = background (0)
+    std::vector<uint8_t> personPx(kW * kH, 0);
+    // Hair mask (R8 top-down): middle third = hair flyaway (255), right third = 0
+    std::vector<uint8_t> hairPx(kW * kH, 0);
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            if (x < 20) personPx[y * kW + x] = 255;
+            if (x >= 22 && x < 42) hairPx[y * kW + x] = 255;
+        }
+    }
+
+    const TextureId camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camPx.data());
+    const TextureId vbgTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, vbgPx.data());
+    const TextureId personTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, personPx.data());
+    const TextureId hairTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, hairPx.data());
+
+    // Step 1: Merge person + hair mask
+    const RenderTargetId mergedRt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+    {
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, personTex);
+        tb.bind(1, hairTex);
+        UniformBlock ub{};
+        ub.push(1.0f, 0.0f, 0.0f, 1.0f);  // identity affine + shown=1.0
+        ub.push(0.0f, 1.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.5f, 0.5f);
+        ub.push(1.0f, 0.0f, 1.0f, 0.0f);  // hasFace=0 -> full head prior
+        dev.beginPass(mergedRt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kBgHairMerge, st, tb, ub);
+        dev.endPass();
+    }
+
+    // Step 2: Virtual background mix
+    const RenderTargetId outRt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+    {
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, camTex);
+        tb.bind(1, vbgTex);
+        tb.bind(2, dev.textureOf(mergedRt));
+        UniformBlock ub{};
+        ub.push(1.0f, 0.35f, 0.70f, 0.0f);
+        ub.push(1.0f, 1.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.25f, 0.25f);
+        ub.push(1.0f, 0.0f, 1.0f, 0.0f);
+        dev.beginPass(outRt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kBgVirtualMix, st, tb, ub);
+        dev.endPass();
+    }
+
+    std::vector<uint8_t> out(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(outRt), out.data(), kW, kH));
+    const int fgIdx = (32 * kW + 10) * 4;
+    const int hairIdx = (32 * kW + 32) * 4;
+    const int bgIdx = (32 * kW + 54) * 4;
+    // Foreground person kept red
+    EXPECT_TRUE(out[fgIdx + 0] > 200 && out[fgIdx + 2] < 60);
+    // Hair flyaway preserved via BgHairMerge (stays red instead of swallowed by blue bg)
+    EXPECT_TRUE(out[hairIdx + 0] > 200 && out[hairIdx + 2] < 60);
+    // Background replaced by blue virtual image
+    EXPECT_TRUE(out[bgIdx + 2] > 210 && out[bgIdx + 0] < 50);
+
+    dev.destroyRenderTarget(outRt);
+    dev.destroyRenderTarget(mergedRt);
+    dev.destroyTexture(hairTex);
+    dev.destroyTexture(personTex);
+    dev.destroyTexture(vbgTex);
+    dev.destroyTexture(camTex);
+}
+
+// S1: 2D AR face sticker alpha-blends cleanly onto center frame.
+void testStickerOverlayProbeS1(MetalDevice& dev) {
+    constexpr int kW = 64, kH = 64;
+    std::vector<uint8_t> basePx(kW * kH * 4);
+    std::vector<uint8_t> stickerPx(kW * kH * 4);
+    for (int i = 0; i < kW * kH; ++i) {
+        basePx[i * 4 + 0] = 40; basePx[i * 4 + 1] = 40; basePx[i * 4 + 2] = 40; basePx[i * 4 + 3] = 255;
+        stickerPx[i * 4 + 0] = 255; stickerPx[i * 4 + 1] = 220; stickerPx[i * 4 + 2] = 0; stickerPx[i * 4 + 3] = 255;
+    }
+    const TextureId baseTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, basePx.data());
+    const TextureId stickerTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, stickerPx.data());
+    const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+    // Quad covering center 50% (-0.5..+0.5 in NDC)
+    static constexpr float kCenterQuad[16] = {
+        -0.5f, -0.5f, 0.0f, 1.0f,
+         0.5f, -0.5f, 1.0f, 1.0f,
+        -0.5f,  0.5f, 0.0f, 0.0f,
+         0.5f,  0.5f, 1.0f, 0.0f,
+    };
+    static constexpr uint16_t kIdx[6] = {0, 1, 2, 2, 1, 3};
+    const BufferId vb = dev.createDynamicVertexBuffer(sizeof(kCenterQuad));
+    dev.updateVertexBuffer(vb, kCenterQuad, sizeof(kCenterQuad));
+    const BufferId ib = dev.createStaticIndexBuffer(kIdx, 6);
+
+    dev.beginPass(rt, kW, kH, false, {});
+    {
+        RenderState copySt{};
+        TextureBindings tb{}; tb.bind(0, baseTex);
+        UniformBlock ub{};
+        dev.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+    }
+    {
+        RenderState blendSt{}; blendSt.blendEnable = true;
+        TextureBindings tb{}; tb.bind(0, stickerTex);
+        UniformBlock ub{}; ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+        dev.drawIndexed(ShaderId::kStickerQuad, blendSt, vb, ib, 0, 6, VertexLayout::kQuadPos2Uv2, tb, ub);
+    }
+    dev.endPass();
+
+    std::vector<uint8_t> out(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+    const int centerIdx = (32 * kW + 32) * 4;
+    const int cornerIdx = (4 * kW + 4) * 4;
+    // Center covered by yellow sticker
+    EXPECT_TRUE(out[centerIdx + 0] > 240 && out[centerIdx + 1] > 200 && out[centerIdx + 2] < 20);
+    // Corner remains dark grey base
+    EXPECT_TRUE(out[cornerIdx + 0] < 50 && out[cornerIdx + 1] < 50 && out[cornerIdx + 2] < 50);
+
+    dev.destroyBuffer(ib);
+    dev.destroyBuffer(vb);
+    dev.destroyRenderTarget(rt);
+    dev.destroyTexture(stickerTex);
+    dev.destroyTexture(baseTex);
+}
+
 }  // namespace
 
 int main() {
@@ -268,9 +408,11 @@ int main() {
         testEyeshadowSkinGateProbesE1ToE4(dev);
         testRetouchDarkSkinProbeR1(dev);
         testEndToEndMetalBeautyEngine(dev);
+        testVirtualBackgroundAndHairFlyawayProbeV1H1(dev);
+        testStickerOverlayProbeS1(dev);
 
         if (gFailures == 0) {
-            std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, E2E KoreanWaterGlow) passed!\n";
+            std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, S1, E2E) passed!\n";
             return 0;
         }
         std::cerr << "FAIL  " << gFailures << " Metal GPU pixel gate assertion(s) failed.\n";

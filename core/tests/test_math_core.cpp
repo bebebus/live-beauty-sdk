@@ -14,6 +14,8 @@
 #include "livebeauty/math/face_mesh_topology.h"
 #include "livebeauty/math/face_roi_selector.h"
 #include "livebeauty/math/face_timeline.h"
+#include "livebeauty/math/hair_mask_tuning.h"
+#include "livebeauty/math/sticker_transform.h"
 
 using namespace livebeauty;
 using namespace livebeauty::math;
@@ -293,6 +295,75 @@ void testBodyAndLoadGovernor() {
     EXPECT_TRUE(upgraded >= 1 && gov.level() >= 1);
 }
 
+void testHairMaskTuningAndMotionComp() {
+    float aff[HairMaskTuning::kAffineSize];
+    const float poseMask[6] = {0.48f, 0.50f, 0.20f, 0.25f, 1.0f, 0.0f};
+    const float poseDisp[6] = {0.52f, 0.50f, 0.20f, 0.25f, 1.0f, 0.0f};
+    // Small 0.04 shift -> valid rigid compensation mapping display center (0.52, 0.50) -> mask center (0.48, 0.50)
+    EXPECT_TRUE(HairMaskTuning::affine(poseMask, poseDisp, 0.5625f, aff));
+    const float mappedU = aff[0] * 0.52f + aff[1] * 0.50f + aff[2];
+    const float mappedV = aff[4] * 0.52f + aff[5] * 0.50f + aff[6];
+    EXPECT_NEAR(mappedU, 0.48f, 1e-5f);
+    EXPECT_NEAR(mappedV, 0.50f, 1e-5f);
+
+    // Excessive shift (> 0.10) falls back to identity for safety
+    const float poseFar[6] = {0.75f, 0.50f, 0.20f, 0.25f, 1.0f, 0.0f};
+    EXPECT_TRUE(!HairMaskTuning::affine(poseMask, poseFar, 0.5625f, aff));
+    EXPECT_NEAR(aff[0], 1.0f, 1e-6f);
+    EXPECT_NEAR(aff[5], 1.0f, 1e-6f);
+    EXPECT_NEAR(aff[2], 0.0f, 1e-6f);
+
+    // Freshness window: <= 420ms is 1.0, >= 650ms is 0.0
+    EXPECT_NEAR(HairMaskTuning::fresh(200.0f), 1.0f, 1e-6f);
+    EXPECT_NEAR(HairMaskTuning::fresh(420.0f), 1.0f, 1e-6f);
+    EXPECT_TRUE(HairMaskTuning::fresh(535.0f) > 0.3f && HairMaskTuning::fresh(535.0f) < 0.7f);
+    EXPECT_NEAR(HairMaskTuning::fresh(700.0f), 0.0f, 1e-6f);
+
+    // faceKeep fades out cleanly by 450ms after confirmed miss (t reaches 1462 >= 1450)
+    float fk = 1.0f;
+    for (int64_t t = 1000; t <= 1470; t += 33) {
+        fk = HairMaskTuning::faceKeep(fk, 1000, 1050, t, 33, false);
+    }
+    EXPECT_NEAR(fk, 0.0f, 1e-5f);
+}
+
+void testStickerTransformAnchorsAndRotation() {
+    const float aspect = 9.0f / 16.0f;
+    std::array<float, FaceMeshFrame::kCoordCount> glPts{};
+    makeCanonicalFace(aspect, 0.50f, 0.50f, 0.42f, 0.0f, 0.0f, 0.0f, glPts);
+    std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+    for (int i = 0; i < 478; ++i) {
+        mpXy[i * 2] = glPts[i * 2];
+        mpXy[i * 2 + 1] = 1.0f - glPts[i * 2 + 1];
+    }
+    FaceMeshFrame frame{};
+    EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mpXy.data(), 478, aspect, frame));
+
+    StickerLayerConfig cfg{};
+    cfg.enabled = true;
+    cfg.texture = 99;
+    cfg.anchor = StickerAnchor::kForeheadCrown;
+    cfg.scale = 1.0f;
+    cfg.opacity = 0.9f;
+    float quad[StickerTransform::kQuadFloats];
+    EXPECT_TRUE(StickerTransform::buildQuadVertices(cfg, frame.landmarks.data(), frame.meta.data(), aspect, quad));
+    // Crown should sit above nose tip (NDC y > 0) and stay finite
+    const float crownCenterY = 0.25f * (quad[1] + quad[5] + quad[9] + quad[13]);
+    EXPECT_TRUE(std::isfinite(crownCenterY) && crownCenterY > 0.05f);
+
+    // Nose tip anchor should center directly on landmark 1
+    cfg.anchor = StickerAnchor::kNoseTip;
+    EXPECT_TRUE(StickerTransform::buildQuadVertices(cfg, frame.landmarks.data(), frame.meta.data(), aspect, quad));
+    const float noseCenterX = 0.25f * (quad[0] + quad[4] + quad[8] + quad[12]);
+    const float noseCenterY = 0.25f * (quad[1] + quad[5] + quad[9] + quad[13]);
+    EXPECT_NEAR(noseCenterX, frame.landmarks[2] * 2.0f - 1.0f, 1e-4f);
+    EXPECT_NEAR(noseCenterY, frame.landmarks[3] * 2.0f - 1.0f, 1e-4f);
+
+    // Disabled layer returns false
+    cfg.enabled = false;
+    EXPECT_TRUE(!StickerTransform::buildQuadVertices(cfg, frame.landmarks.data(), frame.meta.data(), aspect, quad));
+}
+
 }  // namespace
 
 int main() {
@@ -301,6 +372,8 @@ int main() {
     testFaceTimelineAndEyeMakeupKeep();
     testRoiSelectorAndTuning();
     testBodyAndLoadGovernor();
+    testHairMaskTuningAndMotionComp();
+    testStickerTransformAnchorsAndRotation();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [2.1.0] - 2026-11-23
+
+### Added
+- **Hair Semantic Protection & Flyaway Preservation in Unified C++17 Core (`HairMaskTuning`, `HairMaskGate`, `kHairAlpha`, `kBgHairMerge`)**:
+  - Ported rigid head-motion compensation affine (`HairMaskTuning::affine`), freshness/presence/faceKeep temporal gating, alpha-only skin-mask hair protection (`kHairAlpha`), and person+hair mask flyaway merging (`kBgHairMerge`) into C++17 `core/` for both GLES and Metal backends.
+- **Green-Screen-Free Virtual Background Replacement (`BackgroundMode::kVirtualImage / kVirtualBlur`, `kBgVirtualMix`)**:
+  - Added centered aspect-fill virtual background replacement and soft-blurred virtual background modes reusing the merged person+hair mask, zero extra inference cost.
+- **Face-Anchored 2D AR Sticker Pipeline (`StickerTransform`, `kStickerQuad`)**:
+  - Supports up to 4 concurrent face-anchored 2D AR sticker layers (`FOREHEAD_CROWN`, `EYES_BRIDGE`, `NOSE_TIP`, `CHEEKS`, `FULL_FACE`) driven by post-warp 478-pt landmarks with rigid scale/rotation tracking and zero extra 1080p FBO allocation.
+- **One-Step Android `GL_TEXTURE_EXTERNAL_OES` Direct Ingestion (`GlesDevice::convertOesTo2D`, `nativeProcessOesFrame`, `LiveBeautyProcessor.processOes`)**:
+  - Allows CameraX / Camera2 / WebRTC `SurfaceTexture` OES textures + 4×4 transform matrices to enter the C++17 pipeline directly without host-side OES→2D conversion boilerplate.
+- **Real-Time Telemetry (`PerfStats`, `nativeGetStats`, `BeautyPerfStats`) & Default C++17 Core in `LiveBeautyProcessor`**:
+  - Exposes per-frame latency (`lastFrameMs`, `emaFrameMs`), `fps`, `loadLevel`, `facePresence`, `hairShown`, `activePassesMask`, and `frameCount`.
+  - `LiveBeautyProcessor` now enables the unified C++17 kernel (`LiveBeautyCppEngine`) by default when `liblivebeauty_jni.so` is present, with seamless zero-crash fallback on x86_64 emulators / pure JVM environments.
+- **Standard `maven-publish` Configuration & CPU Micro-Benchmark (`livebeauty_bench`)**:
+  - Added Gradle `maven-publish` release publication (`io.bebebus:live-beauty:2.1.0` + sourcesJar + Apache-2.0 POM) for one-command local Maven / JitPack / Maven Central publishing.
+  - Added `livebeauty_bench` verifying the full C++17 CPU pipeline (`FaceTimeline` + 478-pt `FaceMeshFilter` + 548-vertex 15-axis `FaceMeshDeformer` + `StickerTransform`) runs in **~55 μs/frame** on Apple Silicon (~18,000 fps theoretical CPU ceiling).
+  - Expanded Apple Metal GPU pixel gate (`livebeauty_metal_pixel_gate`) with `V1/H1` (virtual background + hair flyaway preservation) and `S1` (2D AR sticker alpha overlay) probes.
+
 ## [2.0.0] - 2026-11-23
 
 ### Added

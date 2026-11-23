@@ -11,11 +11,28 @@
 #include "livebeauty/math/face_makeup_uv.h"
 #include "livebeauty/math/face_mesh_deformer.h"
 #include "livebeauty/math/face_mesh_topology.h"
+#include "livebeauty/math/hair_mask_tuning.h"
+#include "livebeauty/math/sticker_transform.h"
 #include "livebeauty/rhi/rhi_device.h"
 
 namespace livebeauty::rhi {
 
-/** Static makeup atlases & 3D LUT texture handles uploaded once by platform host. */
+/** Bitmask of passes executed during the last RenderPipeline::render() call (for PerfStats). */
+enum PassBit : uint32_t {
+    kPassBg        = 1u << 0,
+    kPassBody      = 1u << 1,
+    kPassFaceWarp  = 1u << 2,
+    kPassRetouch   = 1u << 3,
+    kPassSkinMask  = 1u << 4,
+    kPassHairAlpha = 1u << 5,
+    kPassGuided    = 1u << 6,
+    kPassComposite = 1u << 7,
+    kPassMakeup    = 1u << 8,
+    kPassSticker   = 1u << 9,
+    kPassDenoise   = 1u << 10,
+};
+
+/** Static makeup atlases, virtual background & 3D LUT texture handles uploaded once by platform host. */
 struct PipelineAssets {
     TextureId lutTex = kInvalidTexture;
     TextureId blushAtlas = kInvalidTexture;
@@ -24,6 +41,8 @@ struct PipelineAssets {
     TextureId contourHighlightAtlas = kInvalidTexture;
     TextureId irisAtlas = kInvalidTexture;
     TextureId whiteAlphaFallbackTex = kInvalidTexture;  // 1x1 RGBA(0,0,0,255) for nonHair=1
+    TextureId virtualBgTex = kInvalidTexture;           // Optional virtual background image (RGBA)
+    float virtualBgAspect = 0.0f;                       // <=0 means match frame aspect
 };
 
 struct FrameInputs {
@@ -51,8 +70,16 @@ struct FrameInputs {
     const float* bodyState7 = nullptr;
     float bodyPresence = 0.0f;
 
-    // Optional portrait/hair segmentation mask (R8, top-down)
+    // Optional portrait & hair segmentation masks (R8, top-down)
     TextureId personMaskTex = kInvalidTexture;
+    TextureId hairMaskTex = kInvalidTexture;
+    float hairShown = 0.0f;     // Semantic alpha strength [0..1] (post neck-lift attenuation)
+    float hairBgShown = 0.0f;   // Background hair-merge strength [0..1] (pre-warp coordinates)
+    std::array<float, math::HairMaskTuning::kAffineSize> hairAffine = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+
+    // Optional face-anchored 2D AR sticker overlays (up to 4 layers)
+    std::array<math::StickerLayerConfig, math::kMaxStickerLayers> stickers{};
+    int stickerCount = 0;
 
     // Load fades & tuning
     float loadFadeBody = 1.0f;
@@ -81,12 +108,18 @@ public:
 
     /** Execute full beauty RenderGraph and return output RGBA texture handle. */
     TextureId render(const BeautyConfig& config, const FrameInputs& in);
+    uint32_t lastActivePassesMask() const { return lastActivePassesMask_; }
 
 private:
     void ensureResources(int width, int height);
     void ensureStaticBuffers();
     void renderGuidedFilter(TextureId srcTex, int width, int height, float eps, float evenness, float spread);
     void renderSkinMask(const float* landmarks478x2, bool frontFaceCw, int width, int height);
+    void renderHairAlpha(TextureId hairMaskTex, float hairShown, const float* hairAffine8,
+                         const float* ovalState41, float aspect, bool clearRgbToZero);
+    void renderStickers(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
+                        int width, int height, const FrameInputs& in,
+                        const float* landmarks478x2, float presence);
     void renderMakeup(
         RenderTargetId targetRt, TextureId baseTex, int width, int height,
         const BeautyConfig& cfg, const float* landmarks478x2, const float* meta15,
@@ -122,9 +155,11 @@ private:
     // Polygon skin mask (1/4 res)
     RenderTargetId rtSkinMask_ = kInvalidRenderTarget;
 
-    // Background bokeh (1/4 res)
+    // Background bokeh / virtual background (1/4 res) & merged person+hair mask
     RenderTargetId rtBg_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
+    RenderTargetId rtBgHair_ = kInvalidRenderTarget;
     RenderTargetId rtBgOut_ = kInvalidRenderTarget;
+    uint32_t lastActivePassesMask_ = 0;
 
     // Owned 1x1 fallback white-alpha texture if host didn't provide one
     TextureId ownedFallbackTex_ = kInvalidTexture;
@@ -135,6 +170,7 @@ private:
     BufferId vbSkinMask_ = kInvalidBuffer;
     BufferId vbRetouch_ = kInvalidBuffer;
     BufferId vbMakeup_ = kInvalidBuffer;
+    BufferId vbSticker_ = kInvalidBuffer;
     BufferId ibFullMesh_ = kInvalidBuffer;
     BufferId ibSkinRetouch_ = kInvalidBuffer;
     BufferId ibEyeOpening_ = kInvalidBuffer;
@@ -143,6 +179,7 @@ private:
     BufferId ibLipBand_ = kInvalidBuffer;
     BufferId ibRightEye_ = kInvalidBuffer;
     BufferId ibLeftEye_ = kInvalidBuffer;
+    BufferId ibSticker_ = kInvalidBuffer;
 
     // Reusable CPU staging buffers (zero per-frame heap allocation)
     math::FaceMeshDeformer deformer_;

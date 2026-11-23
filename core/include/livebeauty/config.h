@@ -65,6 +65,13 @@ enum class ContactLensStyle : int {
     kSakuraPink = 3,
 };
 
+enum class BackgroundMode : int {
+    kNone = 0,          // Follow backgroundBlur (>0 => bokeh blur)
+    kBlur = 1,          // Portrait bokeh blur
+    kVirtualImage = 2,  // Green-screen-free virtual background replacement
+    kVirtualBlur = 3,   // Virtual background image with soft bokeh blur
+};
+
 struct BeautyConfig {
     bool enabled = true;
     float smoothing = 0.0f;
@@ -110,8 +117,10 @@ struct BeautyConfig {
     float teethWhiten = 0.0f;
     float nasolabial = 0.0f;
 
-    // Portrait bokeh & 3D LUT
+    // Portrait bokeh, virtual background & 3D LUT
     float backgroundBlur = 0.0f;
+    BackgroundMode backgroundMode = BackgroundMode::kNone;
+    float virtualBgStrength = 1.0f;
     std::string lutUrl;
     float lutIntensity = 1.0f;
 
@@ -162,5 +171,6 @@ EyebrowStyle parseEyebrowStyle(const std::string& s);
 EyebrowColor parseEyebrowColor(const std::string& s);
 EyeshadowColor parseEyeshadowColor(const std::string& s);
 ContactLensStyle parseContactLensStyle(const std::string& s);
+BackgroundMode parseBackgroundMode(const std::string& s);
 
 }  // namespace livebeauty

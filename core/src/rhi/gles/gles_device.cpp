@@ -1,6 +1,7 @@
 #include "gles_device.h"
 
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include <cstdio>
 
 #include "gles_shaders.h"
@@ -68,6 +69,7 @@ void GlesDevice::releaseAll(bool contextAlive) {
             if (buf.glBuf) glDeleteBuffers(1, &buf.glBuf);
         }
         if (quadVbo_) glDeleteBuffers(1, &quadVbo_);
+        if (oesProgram_) glDeleteProgram(oesProgram_);
         for (auto& pc : programs_) {
             if (pc.program) glDeleteProgram(pc.program);
         }
@@ -76,6 +78,10 @@ void GlesDevice::releaseAll(bool contextAlive) {
     textures_.clear();
     buffers_.clear();
     quadVbo_ = 0;
+    oesProgram_ = 0;
+    oesAttrPos_ = oesAttrUv_ = oesUniTex_ = oesUniMat_ = -1;
+    oesRt_ = kInvalidRenderTarget;
+    oesW_ = oesH_ = 0;
     for (auto& pc : programs_) {
         pc = ProgramCache{};
         pc.uniLoc.fill(-1);
@@ -95,6 +101,77 @@ TextureId GlesDevice::wrapExternalTexture(uint32_t glTexId) {
 uint32_t GlesDevice::unwrapGlTexture(TextureId tex) const {
     auto it = textures_.find(tex);
     return (it != textures_.end()) ? it->second.glTex : 0u;
+}
+
+TextureId GlesDevice::convertOesTo2D(uint32_t oesTexId, int width, int height, const float* stMatrix16) {
+    if (oesTexId == 0 || width <= 0 || height <= 0) return kInvalidTexture;
+    if (oesProgram_ == 0) {
+        static const char* kOesVert = R"(
+attribute vec4 aPosition;
+attribute vec4 aTextureCoord;
+uniform mat4 uTexMatrix;
+varying vec2 vTextureCoord;
+void main() {
+    gl_Position = aPosition;
+    vTextureCoord = (uTexMatrix * aTextureCoord).xy;
+}
+)";
+        static const char* kOesFrag = R"(
+#extension GL_OES_EGL_image_external : require
+precision mediump float;
+varying vec2 vTextureCoord;
+uniform samplerExternalOES uTex0;
+void main() {
+    gl_FragColor = texture2D(uTex0, vTextureCoord);
+}
+)";
+        oesProgram_ = linkProgram(kOesVert, kOesFrag);
+        if (oesProgram_ == 0) return kInvalidTexture;
+        oesAttrPos_ = glGetAttribLocation(oesProgram_, "aPosition");
+        oesAttrUv_ = glGetAttribLocation(oesProgram_, "aTextureCoord");
+        oesUniTex_ = glGetUniformLocation(oesProgram_, "uTex0");
+        oesUniMat_ = glGetUniformLocation(oesProgram_, "uTexMatrix");
+    }
+    if (oesRt_ == kInvalidRenderTarget || oesW_ != width || oesH_ != height) {
+        if (oesRt_ != kInvalidRenderTarget) destroyRenderTarget(oesRt_);
+        oesRt_ = createRenderTarget(width, height, TextureFormat::kRgba8);
+        oesW_ = width;
+        oesH_ = height;
+    }
+    static constexpr float kIdentity16[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    };
+    const float* mat = stMatrix16 ? stMatrix16 : kIdentity16;
+    ensureQuadVbo();
+    beginPass(oesRt_, width, height, false, {});
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glUseProgram(oesProgram_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTexId);
+    if (oesUniTex_ >= 0) glUniform1i(oesUniTex_, 0);
+    if (oesUniMat_ >= 0) glUniformMatrix4fv(oesUniMat_, 1, GL_FALSE, mat);
+    glBindBuffer(GL_ARRAY_BUFFER, quadVbo_);
+    if (oesAttrPos_ >= 0) {
+        glEnableVertexAttribArray(oesAttrPos_);
+        glVertexAttribPointer(oesAttrPos_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<const void*>(0));
+    }
+    if (oesAttrUv_ >= 0) {
+        glEnableVertexAttribArray(oesAttrUv_);
+        glVertexAttribPointer(oesAttrUv_, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                              reinterpret_cast<const void*>(2 * sizeof(float)));
+    }
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (oesAttrPos_ >= 0) glDisableVertexAttribArray(oesAttrPos_);
+    if (oesAttrUv_ >= 0) glDisableVertexAttribArray(oesAttrUv_);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    restoreSharedState();
+    endPass();
+    return textureOf(oesRt_);
 }
 
 RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureFormat format) {

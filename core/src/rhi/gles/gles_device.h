@@ -18,6 +18,12 @@ public:
     TextureId wrapExternalTexture(uint32_t glTexId);
     uint32_t unwrapGlTexture(TextureId tex) const;
 
+    /**
+     * One-step conversion of Android SurfaceTexture GL_TEXTURE_EXTERNAL_OES into an internal
+     * RGBA8 GL_TEXTURE_2D owned by GlesDevice (with 4x4 SurfaceTexture transform matrix).
+     */
+    TextureId convertOesTo2D(uint32_t oesTexId, int width, int height, const float* stMatrix16);
+
     RenderTargetId createRenderTarget(int width, int height, TextureFormat format) override;
     void destroyRenderTarget(RenderTargetId rt) override;
     TextureId textureOf(RenderTargetId rt) const override;
@@ -74,6 +80,14 @@ private:
 
     uint32_t nextId_ = 1;
     uint32_t quadVbo_ = 0;
+    uint32_t oesProgram_ = 0;
+    int oesAttrPos_ = -1;
+    int oesAttrUv_ = -1;
+    int oesUniTex_ = -1;
+    int oesUniMat_ = -1;
+    RenderTargetId oesRt_ = kInvalidRenderTarget;
+    int oesW_ = 0;
+    int oesH_ = 0;
     std::array<ProgramCache, static_cast<size_t>(ShaderId::kCount)> programs_{};
     std::unordered_map<RenderTargetId, RtRecord> rts_;
     std::unordered_map<TextureId, TexRecord> textures_;

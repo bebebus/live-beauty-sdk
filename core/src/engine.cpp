@@ -1,5 +1,6 @@
 #include "livebeauty/engine.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace livebeauty {
@@ -15,9 +16,27 @@ void LiveBeautyEngine::resetTracking() {
     roiSelector_.reset();
     bodySmoother_.reset();
     guidedSpread_.reset();
+    hairGate_.reset();
     pipeline_.resetTemporal();
     hasPendingBody_ = false;
     pendingBodyTs_ = kTimeInvalid;
+}
+
+void LiveBeautyEngine::setSticker(int slot, const math::StickerLayerConfig& layer) {
+    if (slot < 0 || slot >= math::kMaxStickerLayers) return;
+    stickers_[slot] = layer;
+    int maxActive = 0;
+    for (int i = 0; i < math::kMaxStickerLayers; ++i) {
+        if (stickers_[i].enabled && stickers_[i].texture != rhi::kInvalidTexture) {
+            maxActive = i + 1;
+        }
+    }
+    stickerCount_ = maxActive;
+}
+
+void LiveBeautyEngine::clearStickers() {
+    for (auto& s : stickers_) s = math::StickerLayerConfig{};
+    stickerCount_ = 0;
 }
 
 bool LiveBeautyEngine::submitFaceLandmarks(
@@ -88,16 +107,19 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     int64_t nowMs,
     rhi::TextureId personMaskTex,
     float lightLuma,
-    float bitrateRatio) {
+    float bitrateRatio,
+    rhi::TextureId hairMaskTex,
+    int64_t hairMaskStampMs) {
     if (width <= 0 || height <= 0 || inputTexture == rhi::kInvalidTexture) return inputTexture;
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
     if (width != lastWidth_ || height != lastHeight_) {
-        timeline_.setAspect(static_cast<float>(width) / static_cast<float>(height));
+        timeline_.setAspect(aspect);
         lastWidth_ = width;
         lastHeight_ = height;
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    const bool processing = config_.isProcessing();
+    const bool processing = config_.isProcessing() || (config_.enabled && !config_.compareOriginal && stickerCount_ > 0);
     loadFades_.update(governor_.level(), nowMs);
 
     timeline_.update(nowMs);
@@ -110,6 +132,45 @@ rhi::TextureId LiveBeautyEngine::processFrame(
 
     const float* bodyState = bodySmoother_.update(
         hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
+
+    // Hair semantic temporal gate & rigid head-motion compensation affine
+    const bool hasHairTex = (hairMaskTex != rhi::kInvalidTexture);
+    const int64_t effHairStamp = (hairMaskStampMs != kTimeInvalid) ? hairMaskStampMs : frameTimestampMs;
+    const float hairLevel = hairGate_.update(
+        hasHairTex, effHairStamp, frameTimestampMs,
+        loadFades_.body(), timeline_.latest(), timeline_.missSince(), nowMs);
+    const float neckWeight = (bodyState != nullptr && config_.neckLengthen > 0.0f) ? bodySmoother_.presence() : 0.0f;
+    const float hairShown = hasHairTex ? hairGate_.shown(neckWeight) : 0.0f;
+    const float hairBgShown = hasHairTex ? hairLevel : 0.0f;
+
+    std::array<float, math::HairMaskTuning::kAffineSize> hairAffine{};
+    math::HairMaskTuning::identity(hairAffine.data());
+    if (hasHairTex && hairLevel > 1e-4f && state41 != nullptr) {
+        float poseDisplay[math::HairMaskTuning::kPoseSize];
+        for (int i = 0; i < math::HairMaskTuning::kPoseSize; ++i) {
+            poseDisplay[i] = state41[22 + i];
+        }
+        float poseMask[math::HairMaskTuning::kPoseSize];
+        const int64_t newest = timeline_.latest();
+        bool hasMaskPose = false;
+        if (newest != kTimeInvalid) {
+            if (effHairStamp <= newest) {
+                hasMaskPose = timeline_.poseAt(effHairStamp, poseMask);
+            } else if (timeline_.poseAt(newest, poseMask)) {
+                if (frameTimestampMs > newest) {
+                    const float g = std::min(1.0f,
+                        static_cast<float>(effHairStamp - newest) / static_cast<float>(frameTimestampMs - newest));
+                    for (int i = 0; i < math::HairMaskTuning::kPoseSize; ++i) {
+                        poseMask[i] += g * (poseDisplay[i] - poseMask[i]);
+                    }
+                }
+                hasMaskPose = true;
+            }
+        }
+        if (hasMaskPose) {
+            math::HairMaskTuning::affine(poseMask, poseDisplay, aspect, hairAffine.data());
+        }
+    }
 
     rhi::FrameInputs in{};
     in.inputTexture = inputTexture;
@@ -131,6 +192,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.bodyState7 = bodyState;
     in.bodyPresence = bodySmoother_.presence();
     in.personMaskTex = personMaskTex;
+    in.hairMaskTex = hairMaskTex;
+    in.hairShown = hairShown;
+    in.hairBgShown = hairBgShown;
+    in.hairAffine = hairAffine;
+    in.stickers = stickers_;
+    in.stickerCount = stickerCount_;
     in.loadFadeBody = loadFades_.body();
     in.loadFadeFace = loadFades_.face();
     in.loadFadeSmooth = loadFades_.smooth();
@@ -143,6 +210,22 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const auto t1 = std::chrono::steady_clock::now();
     const int64_t workNs = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     governor_.onFrame(frameTimestampMs * 1000000LL, workNs, processing, nowMs);
+
+    // Update real-time telemetry
+    const float frameMs = static_cast<float>(workNs) * 1e-6f;
+    stats_.lastFrameMs = frameMs;
+    stats_.emaFrameMs = (stats_.frameCount == 0) ? frameMs : (stats_.emaFrameMs * 0.9f + frameMs * 0.1f);
+    if (lastStatsNowMs_ != kTimeInvalid && nowMs > lastStatsNowMs_) {
+        const float instFps = 1000.0f / static_cast<float>(nowMs - lastStatsNowMs_);
+        stats_.fps = (stats_.fps <= 0.0f) ? instFps : (stats_.fps * 0.9f + instFps * 0.1f);
+    }
+    lastStatsNowMs_ = nowMs;
+    stats_.loadLevel = governor_.level();
+    stats_.facePresence = timeline_.presence();
+    stats_.hairShown = hairShown;
+    stats_.activePassesMask = pipeline_.lastActivePassesMask();
+    stats_.frameCount++;
+
     return outTex;
 }
 

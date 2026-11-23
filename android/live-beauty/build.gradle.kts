@@ -1,10 +1,11 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
 
 group = "io.bebebus"
-version = "2.0.0"
+version = "2.1.0"
 
 android {
     namespace = "io.bebebus.livebeauty"
@@ -60,6 +61,12 @@ android {
                 .withPathSensitivity(PathSensitivity.RELATIVE)
         }
     }
+
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 kotlin {
@@ -73,4 +80,28 @@ dependencies {
     implementation("androidx.annotation:annotation:1.8.2")
 
     testImplementation("junit:junit:4.13.2")
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "io.bebebus"
+                artifactId = "live-beauty"
+                version = project.version.toString()
+                pom {
+                    name.set("Bebebus Live Beauty SDK")
+                    description.set("Unified C++17 math & RHI render core (GLES/Metal) for live streaming beauty, virtual background and 2D AR stickers.")
+                    url.set("https://github.com/bebebus/live-beauty-sdk")
+                    licenses {
+                        license {
+                            name.set("The Apache License, Version 2.0")
+                            url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

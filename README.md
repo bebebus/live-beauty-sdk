@@ -31,8 +31,12 @@ SDK 与推流 / RTC 传输层**彻底解耦**——不绑定任何特定推流�
 - **6 层 UV 实时美妆 & `64³` 3D LUT 调色**
   - 支持丝绒/水光镜面口红（6 色）、苹果肌/微醺/眼下腮红、自然/挑眉、4 色眼影、眼线、卧蚕、鼻影修容高光、虹膜遮罩美瞳与双眼神光。
   - 内置 **10 张 `512×512`（`64³`）专业直播间 3D LUT**（`natural_studio`、`clear_white`、`peach_milk`、`pure_pink`、`korean_glow`、`japanese_airy`、`soft_film`、`night_vibe`、`champagne_glam`、`sweet_berry`），同时支持 `https://` 远端 LUT 动态缓存热切换。
-- **5 轴美体微整 & 人像背景虚化**
-  - 基于 33 点姿态估计支持细腰、丰胸、长腿、瘦肩、天鹅颈及人像实时背景虚化（Portrait Bokeh）。
+- **5 轴美体微整、人像背景虚化 & 无绿幕虚拟背景替换**
+  - 基于 33 点姿态估计支持细腰、丰胸、长腿、瘦肩、天鹅颈；结合人像分割 + 头发语义飞发合并遮罩，同时支持 **人像虚化（Portrait Bokeh）** 与 **无绿幕虚拟背景图片替换（自动居中 Aspect-Fill / 虚拟背景柔化）**。
+- **人脸锚定 2D AR 挂件贴纸 & CameraX OES 一步直入 & 实时遥测**
+  - C++17 管线内置最多 **4 层同屏 2D AR 贴纸**（支持 `FOREHEAD_CROWN` 头饰 / `EYES_BRIDGE` 眼镜 / `NOSE_TIP` 鼻贴 / `CHEEKS` 颊贴 / `FULL_FACE` 面具），直接锁定变形后 478 点人脸姿态随头平移缩放旋转，零额外 1080p FBO 开销。
+  - 支持 Android `GL_TEXTURE_EXTERNAL_OES` + `SurfaceTexture` 4×4 矩阵一步直入（`LiveBeautyProcessor.processOes(...)`），并提供实时性能遥测 `BeautyPerfStats`（帧耗时、EMA、FPS、负载档位、活跃 Pass 掩码）。
+  - 统一 C++17 CPU 核心微基准（`livebeauty_bench`：时间线 + 478 点滤波 + 548 顶点 15 轴微分同胚形变 + 贴纸矩阵）单帧仅耗时 **~55 μs**（占 30fps 帧预算 `< 0.2%`）。
 - **直播工程级稳定性保障**
   - **`FrameDelayRing` 零滞后音画/掩码对齐 + 远景自适应 ROI + GLES 3.0 双 PBO 异步回读**：半身/舞蹈远景自动切换 `256×256` 各向同性人脸 ROI（有效采样精度提升 `2.5–3.5×`），ES 3.0 上下文下启用双 PBO 硬件 DMA 零阻塞回读降低长播温升。
   - **GPU 崩溃看门狗（`GpuDelegatePolicy`）**：自动识别驱动级 TFLite GPU 原生崩溃并平滑降级 CPU，永不拖垮宿主进程。
@@ -87,13 +91,18 @@ beautyProcessor.updateConfig(
 // 2. 在宿主 RTC / 相机的 OpenGL ES 线程初始化
 beautyProcessor.onGlCreated(context)
 
-// 3. 每帧传入竖屏正立 RGBA GL_TEXTURE_2D，返回美颜后的 GL_TEXTURE_2D
+// 3. 每帧传入竖屏正立 RGBA GL_TEXTURE_2D（或直接用 processOes 传入 CameraX/WebRTC OES 纹理）
 val outputTexId = beautyProcessor.process(
     inputTexture = cameraRgbaTex2D,
     width = frameWidth,
     height = frameHeight,
     timestampNs = surfaceTimestampNs,
 )
+
+// 可选：无绿幕虚拟背景替换、2D 人脸贴纸与实时性能遥测
+beautyProcessor.setVirtualBackgroundTexture(bgTex2D, aspect = 9f / 16f, mode = VirtualBackgroundMode.VIRTUAL_IMAGE)
+beautyProcessor.setSticker(0, LiveBeautySticker(anchor = StickerAnchor.FOREHEAD_CROWN, glTextureId = crownTex2D))
+val stats = beautyProcessor.perfStats() // emaFrameMs / fps / loadLevel / activePassesMask
 
 // 4. 切换前后置摄像头时重置跟踪平滑状态
 beautyProcessor.resetTracking()

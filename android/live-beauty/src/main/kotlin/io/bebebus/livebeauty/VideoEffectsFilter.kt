@@ -208,7 +208,7 @@ class VideoEffectsFilter(
      * 任何线程可调（切镜头、开预览）；平滑器在 GL 线程比较代际后自行 reset。头发分割的历史一并作废：代际加一，
      * GL 线程第 1c' 段据此复位 hairGate，在途的旧票按代际丢弃，旧镜头的头发遮罩不会在新镜头上再用（NOTICE 隐私段）。
      */
-    fun resetFaceTracking() { tracker?.state?.reset(); segmenter?.state?.reset(); hairSegmenter?.state?.reset() }
+    fun resetFaceTracking() { engine?.resetTracking(); tracker?.state?.reset(); segmenter?.state?.reset(); hairSegmenter?.state?.reset() }
     /**
      * 主线程：滤镜既未挂载、也没有排队中的 SET 时返回 true 并占位，调用方随即 glView.setFilter。
      * GLHost.setFilter 只入队，filtersCount() 看不到排队中的 SET；同一实例 SET 两次会在活上下文里

@@ -186,11 +186,90 @@ void testFullBeautyPipelineOrderingAndNoFeedbackLoop() {
     EXPECT_TRUE(idxLip > idxEyeshadow);
 }
 
+void testHairProtectionVirtualBgStickersAndTelemetry() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId personMask = dev.createTexture2D(256, 256, TextureFormat::kR8, nullptr);
+    const TextureId hairMask = dev.createTexture2D(216, 384, TextureFormat::kR8, nullptr);
+    const TextureId virtualBg = dev.createTexture2D(1080, 1920, TextureFormat::kRgba8, nullptr);
+    const TextureId stickerTex = dev.createTexture2D(256, 256, TextureFormat::kRgba8, nullptr);
+
+    PipelineAssets assets{};
+    assets.virtualBgTex = virtualBg;
+    assets.virtualBgAspect = 9.0f / 16.0f;
+    engine.setAssets(assets);
+
+    auto cfg = BeautyConfig::naturalStudio();
+    cfg.backgroundMode = BackgroundMode::kVirtualImage;
+    cfg.virtualBgStrength = 1.0f;
+    engine.setConfig(cfg);
+
+    math::StickerLayerConfig sticker{};
+    sticker.enabled = true;
+    sticker.anchor = math::StickerAnchor::kForeheadCrown;
+    sticker.texture = stickerTex;
+    sticker.scale = 1.0f;
+    sticker.opacity = 0.95f;
+    engine.setSticker(0, sticker);
+
+    // Feed 12 frames so hair presence & face presence ramp up cleanly
+    std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+    const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 720.0f / 1280.0f;
+    const float scale = 0.40f / math::FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+        const float mx = 0.5f + xyz[i * 3] * scale;
+        const float my = (0.5f / aspect) + xyz[i * 3 + 1] * scale;
+        mpXy[i * 2] = mx;
+        mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+    }
+    for (int i = 468; i < 478; ++i) {
+        mpXy[i * 2] = 0.5f;
+        mpXy[i * 2 + 1] = 0.45f;
+    }
+
+    TextureId out = kInvalidTexture;
+    for (int f = 0; f < 12; ++f) {
+        const int64_t ts = 2000 + f * 33;
+        dev.calls.clear();
+        EXPECT_TRUE(engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts));
+        out = engine.processFrame(inputTex, 720, 1280, ts, ts, personMask, 0.30f, 1.0f, hairMask, ts);
+    }
+
+    EXPECT_TRUE(out != kInvalidTexture && out != inputTex);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+
+    bool sawHairMerge = false;
+    bool sawVirtualMix = false;
+    bool sawHairAlpha = false;
+    bool sawSticker = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kBgHairMerge) sawHairMerge = true;
+        if (c.shader == ShaderId::kBgVirtualMix) sawVirtualMix = true;
+        if (c.shader == ShaderId::kHairAlpha) sawHairAlpha = true;
+        if (c.shader == ShaderId::kStickerQuad) sawSticker = true;
+    }
+    EXPECT_TRUE(sawHairMerge);
+    EXPECT_TRUE(sawVirtualMix);
+    EXPECT_TRUE(sawHairAlpha);
+    EXPECT_TRUE(sawSticker);
+
+    const auto& st = engine.stats();
+    EXPECT_TRUE(st.frameCount == 12);
+    EXPECT_TRUE(st.facePresence > 0.9f);
+    EXPECT_TRUE(st.hairShown > 0.5f);
+    EXPECT_TRUE((st.activePassesMask & kPassBg) != 0);
+    EXPECT_TRUE((st.activePassesMask & kPassHairAlpha) != 0);
+    EXPECT_TRUE((st.activePassesMask & kPassSticker) != 0);
+}
+
 }  // namespace
 
 int main() {
     testPassThroughZeroCost();
     testFullBeautyPipelineOrderingAndNoFeedbackLoop();
+    testHairProtectionVirtualBgStickersAndTelemetry();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

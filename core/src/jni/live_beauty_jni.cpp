@@ -16,6 +16,9 @@ namespace {
 struct JniEngineHandle {
     livebeauty::rhi::gles::GlesDevice device;
     livebeauty::LiveBeautyEngine engine;
+    livebeauty::rhi::PipelineAssets assets{};
+    livebeauty::BackgroundMode bgModeOverride = livebeauty::BackgroundMode::kNone;
+    float virtualBgStrengthOverride = 1.0f;
 
     JniEngineHandle() : device(), engine(device) {}
 };
@@ -74,14 +77,59 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAssets(
     jint eyeMakeupGlTex, jint contourHighlightGlTex, jint irisGlTex) {
     auto* handle = fromHandle(ptr);
     if (!handle) return;
-    livebeauty::rhi::PipelineAssets assets{};
-    assets.lutTex = handle->device.wrapExternalTexture(static_cast<uint32_t>(lutGlTex));
-    assets.blushAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(blushGlTex));
-    assets.eyebrowAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(eyebrowGlTex));
-    assets.eyeMakeupAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(eyeMakeupGlTex));
-    assets.contourHighlightAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(contourHighlightGlTex));
-    assets.irisAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(irisGlTex));
-    handle->engine.setAssets(assets);
+    handle->assets.lutTex = handle->device.wrapExternalTexture(static_cast<uint32_t>(lutGlTex));
+    handle->assets.blushAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(blushGlTex));
+    handle->assets.eyebrowAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(eyebrowGlTex));
+    handle->assets.eyeMakeupAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(eyeMakeupGlTex));
+    handle->assets.contourHighlightAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(contourHighlightGlTex));
+    handle->assets.irisAtlas = handle->device.wrapExternalTexture(static_cast<uint32_t>(irisGlTex));
+    handle->engine.setAssets(handle->assets);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetVirtualBackground(
+    JNIEnv* env, jclass, jlong ptr,
+    jint bgGlTex, jfloat bgAspect, jstring modeStr, jfloat strength) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->assets.virtualBgTex = handle->device.wrapExternalTexture(static_cast<uint32_t>(bgGlTex));
+    handle->assets.virtualBgAspect = bgAspect;
+    handle->engine.setAssets(handle->assets);
+
+    handle->bgModeOverride = livebeauty::parseBackgroundMode(toStdString(env, modeStr));
+    handle->virtualBgStrengthOverride = strength;
+    auto cfg = handle->engine.config();
+    cfg.backgroundMode = handle->bgModeOverride;
+    cfg.virtualBgStrength = handle->virtualBgStrengthOverride;
+    handle->engine.setConfig(cfg);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetSticker(
+    JNIEnv*, jclass, jlong ptr,
+    jint slot, jboolean enabled, jint anchor, jint texGlId,
+    jfloat scale, jfloat offsetX, jfloat offsetY,
+    jfloat rotationRad, jfloat opacity, jfloat textureAspect) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    livebeauty::math::StickerLayerConfig layer{};
+    layer.enabled = (enabled == JNI_TRUE);
+    layer.anchor = static_cast<livebeauty::math::StickerAnchor>(anchor);
+    layer.texture = handle->device.wrapExternalTexture(static_cast<uint32_t>(texGlId));
+    layer.scale = scale;
+    layer.offsetX = offsetX;
+    layer.offsetY = offsetY;
+    layer.rotationRad = rotationRad;
+    layer.opacity = opacity;
+    layer.textureAspect = textureAspect;
+    handle->engine.setSticker(slot, layer);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeClearStickers(
+    JNIEnv*, jclass, jlong ptr) {
+    auto* handle = fromHandle(ptr);
+    if (handle) handle->engine.clearStickers();
 }
 
 // Pack all 40 scalar floats in one flat JNI array + 9 enum strings to avoid per-field JNI overhead.
@@ -164,6 +212,8 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     cfg.eyebrowColor = livebeauty::parseEyebrowColor(toStdString(env, browColorStr));
     cfg.eyeshadowColor = livebeauty::parseEyeshadowColor(toStdString(env, shadowColorStr));
     cfg.contactLensStyle = livebeauty::parseContactLensStyle(toStdString(env, lensStyleStr));
+    cfg.backgroundMode = handle->bgModeOverride;
+    cfg.virtualBgStrength = handle->virtualBgStrengthOverride;
 
     handle->engine.setConfig(cfg);
 }
@@ -229,6 +279,71 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeProcessFrame(
     const auto outTex = handle->engine.processFrame(
         inTex, width, height, frameTsMs, nowMs, maskTex, lightLuma, bitrateRatio);
     return static_cast<jint>(handle->device.unwrapGlTexture(outTex));
+}
+
+JNIEXPORT jint JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeProcessFrameEx(
+    JNIEnv*, jclass, jlong ptr, jint inputGlTex, jint width, jint height,
+    jlong frameTsMs, jlong nowMs, jint personMaskGlTex, jint hairMaskGlTex,
+    jlong hairMaskStampMs, jfloat lightLuma, jfloat bitrateRatio) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || inputGlTex == 0) return inputGlTex;
+    const auto inTex = handle->device.wrapExternalTexture(static_cast<uint32_t>(inputGlTex));
+    const auto maskTex = (personMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(personMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    const auto hairTex = (hairMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(hairMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    const auto outTex = handle->engine.processFrame(
+        inTex, width, height, frameTsMs, nowMs, maskTex, lightLuma, bitrateRatio, hairTex, hairMaskStampMs);
+    return static_cast<jint>(handle->device.unwrapGlTexture(outTex));
+}
+
+JNIEXPORT jint JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeProcessOesFrame(
+    JNIEnv* env, jclass, jlong ptr, jint oesGlTex, jfloatArray stMatrix16,
+    jint width, jint height, jlong frameTsMs, jlong nowMs,
+    jint personMaskGlTex, jint hairMaskGlTex, jlong hairMaskStampMs,
+    jfloat lightLuma, jfloat bitrateRatio) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || oesGlTex == 0 || width <= 0 || height <= 0) return 0;
+    float mat[16];
+    const float* matPtr = nullptr;
+    if (stMatrix16 && env->GetArrayLength(stMatrix16) >= 16) {
+        env->GetFloatArrayRegion(stMatrix16, 0, 16, mat);
+        matPtr = mat;
+    }
+    const auto inTex = handle->device.convertOesTo2D(static_cast<uint32_t>(oesGlTex), width, height, matPtr);
+    if (inTex == livebeauty::rhi::kInvalidTexture) return 0;
+    const auto maskTex = (personMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(personMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    const auto hairTex = (hairMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(hairMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    const auto outTex = handle->engine.processFrame(
+        inTex, width, height, frameTsMs, nowMs, maskTex, lightLuma, bitrateRatio, hairTex, hairMaskStampMs);
+    return static_cast<jint>(handle->device.unwrapGlTexture(outTex));
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
+    JNIEnv* env, jclass, jlong ptr, jfloatArray outStats8) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !outStats8 || env->GetArrayLength(outStats8) < 8) return;
+    const auto& st = handle->engine.stats();
+    const jfloat vals[8] = {
+        st.lastFrameMs,
+        st.emaFrameMs,
+        st.fps,
+        static_cast<float>(st.loadLevel),
+        st.facePresence,
+        st.hairShown,
+        static_cast<float>(st.activePassesMask),
+        static_cast<float>(st.frameCount),
+    };
+    env->SetFloatArrayRegion(outStats8, 0, 8, vals);
 }
 
 }  // extern "C"

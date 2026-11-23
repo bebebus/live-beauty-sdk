@@ -18,7 +18,10 @@ class LiveBeautyProcessor(
     onLowLight: (Boolean) -> Unit = {},
     streaming: () -> Boolean = { false },
     bitrateRatio: () -> Float = { 1f },
+    useNativeCppCore: Boolean = true,
 ) : BeautyEngine {
+
+    private var activeCppEngine: LiveBeautyCppEngine? = null
 
     val filter = VideoEffectsFilter(
         onFailure = onFailure,
@@ -30,6 +33,17 @@ class LiveBeautyProcessor(
         onLowLight = onLowLight,
         bitrateRatio = bitrateRatio,
         streaming = streaming,
+        engineFactory = if (useNativeCppCore && NativeBeautyBridge.isAvailable) {
+            {
+                LiveBeautyCppEngine(
+                    bitrateRatio = bitrateRatio,
+                    lutCacheDir = appContext?.cacheDir,
+                    lutAssets = appContext?.assets,
+                    onFaceFailure = onFaceFailure,
+                    onLowLight = onLowLight,
+                ).also { activeCppEngine = it }
+            }
+        } else null,
     )
 
     override val latencyFrames: Int
@@ -40,8 +54,43 @@ class LiveBeautyProcessor(
         filter.config = config
     }
 
+    /** 配置无绿幕虚拟背景替换纹理（GL_TEXTURE_2D，需启用 C++17 原生内核）。 */
+    fun setVirtualBackgroundTexture(
+        glTextureId: Int,
+        aspect: Float = 0f,
+        mode: VirtualBackgroundMode = VirtualBackgroundMode.VIRTUAL_IMAGE,
+        strength: Float = 1.0f,
+    ) {
+        activeCppEngine?.setVirtualBackgroundTexture(glTextureId, aspect, mode, strength)
+    }
+
+    /** 配置人脸锚定 2D AR 挂件贴纸层（slot 0..3，传 null 清除该层）。 */
+    fun setSticker(slot: Int, sticker: LiveBeautySticker?) {
+        activeCppEngine?.setSticker(slot, sticker)
+    }
+
+    /** 清除全部 2D AR 贴纸层。 */
+    fun clearStickers() {
+        activeCppEngine?.clearStickers()
+    }
+
+    /** 读取 C++17 内核实时性能遥测快照。 */
+    fun perfStats(): BeautyPerfStats = activeCppEngine?.perfStats() ?: BeautyPerfStats()
+
+    /**
+     * CameraX / Camera2 / WebRTC `GL_TEXTURE_EXTERNAL_OES` 一步直入处理（GL 线程）。
+     * 若当前处于纯 Kotlin 回退模式则返回 0，请使用 `process(glTexture2D, ...)`。
+     */
+    fun processOes(
+        oesTexture: Int,
+        stMatrix16: FloatArray?,
+        width: Int,
+        height: Int,
+        timestampNs: Long,
+    ): Int = activeCppEngine?.processOes(oesTexture, stMatrix16, width, height, timestampNs) ?: 0
+
     /** 切换前后置摄像头或重开预览时重置人脸/人像/美发跟踪代际。 */
-    fun resetTracking() {
+    override fun resetTracking() {
         filter.resetFaceTracking()
     }
 

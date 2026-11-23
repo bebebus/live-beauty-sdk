@@ -137,6 +137,10 @@ struct MetalDevice::Impl {
             case ShaderId::kBgPremask:       vsName = @"vs_quad";      fsName = @"fs_bg_premask"; break;
             case ShaderId::kBgBlur:          vsName = @"vs_quad";      fsName = @"fs_bg_blur"; break;
             case ShaderId::kBgMix:           vsName = @"vs_quad";      fsName = @"fs_bg_mix"; break;
+            case ShaderId::kHairAlpha:       vsName = @"vs_quad";      fsName = @"fs_hair_alpha"; break;
+            case ShaderId::kBgHairMerge:     vsName = @"vs_quad";      fsName = @"fs_bg_hair_merge"; break;
+            case ShaderId::kBgVirtualMix:    vsName = @"vs_quad";      fsName = @"fs_bg_virtual_mix"; break;
+            case ShaderId::kStickerQuad:     vsName = @"vs_quad";      fsName = @"fs_sticker_quad"; break;
             case ShaderId::kPassThrough:
             default:                         vsName = @"vs_quad";      fsName = @"fs_pass_through"; break;
         }

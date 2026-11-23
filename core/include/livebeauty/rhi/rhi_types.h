@@ -51,6 +51,10 @@ enum class ShaderId : uint8_t {
     kBgPremask,
     kBgBlur,
     kBgMix,
+    kHairAlpha,
+    kBgHairMerge,
+    kBgVirtualMix,
+    kStickerQuad,
     kCount,
 };
 

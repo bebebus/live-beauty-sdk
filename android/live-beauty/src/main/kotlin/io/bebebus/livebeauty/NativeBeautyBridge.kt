@@ -28,6 +28,29 @@ object NativeBeautyBridge {
         contourHighlightGlTex: Int,
         irisGlTex: Int,
     )
+    /** 配置无绿幕虚拟背景替换（mode: "none" / "blur" / "virtual_image" / "virtual_blur"）。 */
+    @JvmStatic external fun nativeSetVirtualBackground(
+        handle: Long,
+        bgGlTex: Int,
+        bgAspect: Float,
+        mode: String,
+        strength: Float,
+    )
+    /** 配置 2D 人脸锚定 AR 挂件贴纸层（slot 0..3；anchor: 0=头饰 1=眼镜 2=鼻贴 3=颊贴 4=全脸）。 */
+    @JvmStatic external fun nativeSetSticker(
+        handle: Long,
+        slot: Int,
+        enabled: Boolean,
+        anchor: Int,
+        texGlId: Int,
+        scale: Float,
+        offsetX: Float,
+        offsetY: Float,
+        rotationRad: Float,
+        opacity: Float,
+        textureAspect: Float,
+    )
+    @JvmStatic external fun nativeClearStickers(handle: Long)
     @JvmStatic external fun nativeSetConfig(
         handle: Long,
         enabled: Boolean,
@@ -81,6 +104,37 @@ object NativeBeautyBridge {
         lightLuma: Float,
         bitrateRatio: Float,
     ): Int
+    /** 扩展版处理入口：同时接入头发语义分割遮罩（防磨皮保护 + 背景飞发合并）。 */
+    @JvmStatic external fun nativeProcessFrameEx(
+        handle: Long,
+        inputGlTex: Int,
+        width: Int,
+        height: Int,
+        frameTsMs: Long,
+        nowMs: Long,
+        personMaskGlTex: Int,
+        hairMaskGlTex: Int,
+        hairMaskStampMs: Long,
+        lightLuma: Float,
+        bitrateRatio: Float,
+    ): Int
+    /** Android CameraX/Camera2/WebRTC SurfaceTexture GL_TEXTURE_EXTERNAL_OES 一步直入入口（内部自动 OES->2D）。 */
+    @JvmStatic external fun nativeProcessOesFrame(
+        handle: Long,
+        oesGlTex: Int,
+        stMatrix16: FloatArray?,
+        width: Int,
+        height: Int,
+        frameTsMs: Long,
+        nowMs: Long,
+        personMaskGlTex: Int,
+        hairMaskGlTex: Int,
+        hairMaskStampMs: Long,
+        lightLuma: Float,
+        bitrateRatio: Float,
+    ): Int
+    /** 读取 C++17 内核实时性能遥测：[lastMs, emaMs, fps, loadLevel, facePresence, hairShown, activePassesMask, frameCount]。 */
+    @JvmStatic external fun nativeGetStats(handle: Long, outStats8: FloatArray)
 
     /** 将 [VideoEffectsConfig] 的 45 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
     fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(45)): FloatArray {

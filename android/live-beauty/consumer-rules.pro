@@ -1,6 +1,11 @@
 # Bebebus Live Beauty SDK 公共 API 保留规则（供集成方开启 R8 fullMode 时直接消费）。
 -keep public class io.bebebus.livebeauty.LiveBeautyProcessor { public *; }
 -keep public class io.bebebus.livebeauty.LiveBeautyPresets { public *; }
+-keep public class io.bebebus.livebeauty.VirtualBackgroundMode { public *; }
+-keep public class io.bebebus.livebeauty.StickerAnchor { public *; }
+-keep public class io.bebebus.livebeauty.LiveBeautySticker { public *; }
+-keep public class io.bebebus.livebeauty.BeautyPerfStats { public *; }
+-keep public class io.bebebus.livebeauty.NativeBeautyBridge { *; }
 -keep public class io.bebebus.livebeauty.BeautyEngine { public *; }
 -keep public class io.bebebus.livebeauty.VideoEffectsConfig { public *; }
 -keep public class io.bebebus.livebeauty.VideoEffectsConfig$Companion { public *; }

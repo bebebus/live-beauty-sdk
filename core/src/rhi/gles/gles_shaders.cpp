@@ -649,6 +649,106 @@ void main() {
 }
 )";
 
+// uU0=(a00, a01, a02, shown), uU1=(a10, a11, a12, 0), uU2=oval(cx,cy,rx,ry), uU3=(ax,ay,aspect,hasFace)
+const char* kHairAlphaFrag = R"(
+precision mediump float;
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform vec4 uU0;
+uniform vec4 uU1;
+uniform vec4 uU2;
+uniform vec4 uU3;
+float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
+    vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
+    float u = dot(d, a) / max(o.z, 0.0001);
+    float v = dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001);
+    return u * u + v * v;
+}
+void main() {
+    vec2 muv = vec2(uU0.x * vTextureCoord.x + uU0.y * vTextureCoord.y + uU0.z,
+                    uU1.x * vTextureCoord.x + uU1.y * vTextureCoord.y + uU1.z);
+    float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
+    float hair = texture2D(uTex0, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
+    float inFace = uU3.w > 0.5 ? (1.0 - smoothstep(0.85, 1.15, ellipseE(vTextureCoord, uU2, uU3.xy, max(uU3.z, 0.0001)))) : 0.0;
+    float bias = 0.15 * inFace;
+    float h = smoothstep(0.35 + bias, 0.65 + bias, hair);
+    float nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
+    gl_FragColor = vec4(0.0, 0.0, 0.0, nonHair);
+}
+)";
+
+// Renders in top-down mask space matching personMaskTex so downstream BgPremask/BgMix/BgVirtualMix sample identically.
+// uU0=(a00, a01, a02, shown), uU1=(a10, a11, a12, 0), uU2=oval, uU3=(ax,ay,aspect,hasFace)
+const char* kBgHairMergeFrag = R"(
+precision mediump float;
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform vec4 uU0;
+uniform vec4 uU1;
+uniform vec4 uU2;
+uniform vec4 uU3;
+float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
+    vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
+    float u = dot(d, a) / max(o.z, 0.0001);
+    float v = dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001);
+    return u * u + v * v;
+}
+void main() {
+    float person = texture2D(uTex0, vTextureCoord).r;
+    vec2 dispUv = vec2(vTextureCoord.x, 1.0 - vTextureCoord.y);
+    vec2 muv = vec2(uU0.x * dispUv.x + uU0.y * dispUv.y + uU0.z,
+                    uU1.x * dispUv.x + uU1.y * dispUv.y + uU1.z);
+    float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
+    float hair = texture2D(uTex1, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
+    float head = uU3.w > 0.5 ? (1.0 - smoothstep(2.0, 2.8, sqrt(ellipseE(dispUv, uU2, uU3.xy, max(uU3.z, 0.0001))))) : 1.0;
+    float merged = max(person, head * uU0.w * smoothstep(0.30, 0.65, hair));
+    gl_FragColor = vec4(merged, merged, merged, 1.0);
+}
+)";
+
+// uU0=(strength, lo, hi, detailKeep), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY), uU2=oval, uU3=(ax,ay,aspect,0)
+const char* kBgVirtualMixFrag = R"(
+precision mediump float;
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform vec4 uU0;
+uniform vec4 uU1;
+uniform vec4 uU2;
+uniform vec4 uU3;
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
+    vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
+    float u = dot(d, a) / max(o.z, 0.0001);
+    float v = dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001);
+    return u * u + v * v;
+}
+void main() {
+    vec4 color = texture2D(uTex0, vTextureCoord);
+    vec2 bgUv = vec2(vTextureCoord.x * uU1.x + uU1.z, (1.0 - vTextureCoord.y) * uU1.y + uU1.w);
+    vec3 vbg = texture2D(uTex1, clamp(bgUv, 0.0, 1.0)).rgb;
+    float person = texture2D(uTex2, vec2(vTextureCoord.x, 1.0 - vTextureCoord.y)).r;
+    float head = 1.0 - smoothstep(2.0, 2.8, sqrt(ellipseE(vTextureCoord, uU2, uU3.xy, max(uU3.z, 0.0001))));
+    float fg = smoothstep(0.06, 0.16, person) * head;
+    float keep = clamp(max(smoothstep(uU0.y, uU0.z, person), uU0.w * 0.45 * fg), 0.0, 1.0);
+    gl_FragColor = vec4(mix(color.rgb, mix(vbg, color.rgb, keep), uU0.x), color.a);
+}
+)";
+
+// uU0=(opacity, 0, 0, 0)
+const char* kStickerQuadFrag = R"(
+precision mediump float;
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform vec4 uU0;
+void main() {
+    vec4 s = texture2D(uTex0, vTextureCoord);
+    gl_FragColor = vec4(s.rgb, s.a * uU0.x);
+}
+)";
+
 }  // namespace
 
 ShaderSourcePair getShaderSources(ShaderId id) {
@@ -671,6 +771,10 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kBgPremask:       return {kQuadVert, kBgPremaskFrag};
         case ShaderId::kBgBlur:          return {kQuadVert, kBgBlurFrag};
         case ShaderId::kBgMix:           return {kQuadVert, kBgMixFrag};
+        case ShaderId::kHairAlpha:       return {kQuadVert, kHairAlphaFrag};
+        case ShaderId::kBgHairMerge:     return {kQuadVert, kBgHairMergeFrag};
+        case ShaderId::kBgVirtualMix:    return {kQuadVert, kBgVirtualMixFrag};
+        case ShaderId::kStickerQuad:     return {kQuadVert, kStickerQuadFrag};
         case ShaderId::kPassThrough:
         default:                         return {kQuadVert, kPassThroughFrag};
     }

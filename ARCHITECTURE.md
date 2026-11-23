@@ -86,8 +86,8 @@ flowchart LR
 
 自 `v2.0` 架构演进起，SDK 将全部核心数学模型、渲染编排与图形后端收口为三层零重型依赖的 C++17 模块（详见 [docs/cpp-core-architecture-plan.md](./docs/cpp-core-architecture-plan.md)）：
 
-1. **纯数学与状态机核（`livebeauty_math`）**：`FaceMeshTopology`（由 `reference/gen_face_topology.py` 与 Kotlin 逐字节同源生成）、`FaceMeshDeformer`（15 轴 $C^\infty$ 微分同胚 + 高颅顶）、`FaceMeshFilter`、`FaceTimeline`、`FaceRoiSelector`、`FaceMakeupUv`、`FaceRetouchSubMesh`、`BodyGeometry` 与 `EffectsLoadGovernor`。
-2. **跨后端轻量 RHI 与 RenderGraph 编排器（`livebeauty_engine`）**：`IRhiDevice` + `RenderPipeline` + `LiveBeautyEngine`，统一管理全 8 大 Pass 调度顺序、画家序背面剔除、FBO 复用池与反馈环隔离。
+1. **纯数学与状态机核（`livebeauty_math`）**：`FaceMeshTopology`（由 `reference/gen_face_topology.py` 与 Kotlin 逐字节同源生成）、`FaceMeshDeformer`（15 轴 $C^\infty$ 微分同胚 + 高颅顶）、`FaceMeshFilter`、`FaceTimeline`、`FaceRoiSelector`、`FaceMakeupUv`、`FaceRetouchSubMesh`、`BodyGeometry`、`HairMaskTuning`（刚体运动补偿仿射 + 时域新鲜度门控）、`StickerTransform`（5 类人脸锚定 2D AR 贴纸）与 `EffectsLoadGovernor`。
+2. **跨后端轻量 RHI 与 RenderGraph 编排器（`livebeauty_engine`）**：`IRhiDevice` + `RenderPipeline` + `LiveBeautyEngine`，统一管理全链路 Pass 调度顺序（头发飞发合并 / 虚拟背景替换 / 背景虚化 / 美体 / 画家序人脸形变 / 原位精修 / 皮肤与头发语义遮罩 / 双频导向滤波 / CompositePro + 64³ LUT / 6 层 UV 美妆 / 2D AR 贴纸 / 时域降噪）、FBO 复用池、反馈环隔离与实时性能遥测 `PerfStats`。
 3. **双原生图形后端**：
-   - **Android（`livebeauty_gles` + `livebeauty_jni`）**：OpenGL ES 2.0/3.0 + 精调 GLSL 着色器 + NDK/JNI 桥接（`arm64-v8a` / `armeabi-v7a` 双架构 `.so` 自动打包进 AAR）；
+   - **Android（`livebeauty_gles` + `livebeauty_jni`）**：OpenGL ES 2.0/3.0 + 精调 GLSL 着色器 + `GL_TEXTURE_EXTERNAL_OES` 一步转换 + NDK/JNI 桥接（`arm64-v8a` / `armeabi-v7a` 双架构 `.so` 自动打包进 AAR，并支持 `maven-publish` 标准发布）；
    - **iOS / macOS（`livebeauty_metal` + `FLTLiveBeautyMetalEngine`）**：Apple Metal + 等价精调 MSL 着色器 + `CVMetalTextureCache` 零拷贝桥接，使 iOS 端与 Android 满血能力全面对齐。

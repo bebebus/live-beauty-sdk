@@ -676,6 +676,62 @@ fragment float4 fs_bg_mix(QuadOut in [[stage_in]],
     float keep = max(smoothstep(uni.u[0].y, uni.u[0].z, person), uni.u[0].w * fg);
     return float4(mix(color.rgb, mix(blurred, color.rgb, keep), uni.u[0].x), color.a);
 }
+
+fragment float4 fs_hair_alpha(QuadOut in [[stage_in]],
+                              texture2d<float> tex0 [[texture(0)]],
+                              constant Uniforms& uni [[buffer(1)]]) {
+    float2 muv = float2(uni.u[0].x * in.uv.x + uni.u[0].y * in.uv.y + uni.u[0].z,
+                        uni.u[1].x * in.uv.x + uni.u[1].y * in.uv.y + uni.u[1].z);
+    float inBounds = step(0.0f, muv.x) * step(muv.x, 1.0f) * step(0.0f, muv.y) * step(muv.y, 1.0f);
+    float hair = tex0.sample(kLinearClamp, toMtlUv(muv)).r * inBounds;
+    float inFace = uni.u[3].w > 0.5f
+        ? (1.0f - smoothstep(0.85f, 1.15f, ellipseE(in.uv, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f))))
+        : 0.0f;
+    float bias = 0.15f * inFace;
+    float h = smoothstep(0.35f + bias, 0.65f + bias, hair);
+    float nonHair = clamp(1.0f - uni.u[0].w * h, 0.0f, 1.0f);
+    return float4(0.0f, 0.0f, 0.0f, nonHair);
+}
+
+fragment float4 fs_bg_hair_merge(QuadOut in [[stage_in]],
+                                 texture2d<float> tex0 [[texture(0)]],
+                                 texture2d<float> tex1 [[texture(1)]],
+                                 constant Uniforms& uni [[buffer(1)]]) {
+    float2 muvBase = toMtlUv(in.uv);
+    float person = tex0.sample(kLinearClamp, muvBase).r;
+    float2 muv = float2(uni.u[0].x * in.uv.x + uni.u[0].y * in.uv.y + uni.u[0].z,
+                        uni.u[1].x * in.uv.x + uni.u[1].y * in.uv.y + uni.u[1].z);
+    float inBounds = step(0.0f, muv.x) * step(muv.x, 1.0f) * step(0.0f, muv.y) * step(muv.y, 1.0f);
+    float hair = tex1.sample(kLinearClamp, toMtlUv(muv)).r * inBounds;
+    float head = uni.u[3].w > 0.5f
+        ? (1.0f - smoothstep(2.0f, 2.8f, sqrt(ellipseE(in.uv, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f)))))
+        : 1.0f;
+    float merged = max(person, head * uni.u[0].w * smoothstep(0.30f, 0.65f, hair));
+    return float4(merged, merged, merged, 1.0f);
+}
+
+fragment float4 fs_bg_virtual_mix(QuadOut in [[stage_in]],
+                                  texture2d<float> tex0 [[texture(0)]],
+                                  texture2d<float> tex1 [[texture(1)]],
+                                  texture2d<float> tex2 [[texture(2)]],
+                                  constant Uniforms& uni [[buffer(1)]]) {
+    float2 muv = toMtlUv(in.uv);
+    float4 color = tex0.sample(kLinearClamp, muv);
+    float2 bgUv = float2(in.uv.x * uni.u[1].x + uni.u[1].z, (1.0f - in.uv.y) * uni.u[1].y + uni.u[1].w);
+    float3 vbg = tex1.sample(kLinearClamp, clamp(bgUv, 0.0f, 1.0f)).rgb;
+    float person = tex2.sample(kLinearClamp, muv).r;
+    float head = 1.0f - smoothstep(2.0f, 2.8f, sqrt(ellipseE(in.uv, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f))));
+    float fg = smoothstep(0.06f, 0.16f, person) * head;
+    float keep = clamp(max(smoothstep(uni.u[0].y, uni.u[0].z, person), uni.u[0].w * 0.45f * fg), 0.0f, 1.0f);
+    return float4(mix(color.rgb, mix(vbg, color.rgb, keep), uni.u[0].x), color.a);
+}
+
+fragment float4 fs_sticker_quad(QuadOut in [[stage_in]],
+                                texture2d<float> tex0 [[texture(0)]],
+                                constant Uniforms& uni [[buffer(1)]]) {
+    float4 s = tex0.sample(kLinearClamp, in.uv);
+    return float4(s.rgb, s.a * uni.u[0].x);
+}
 )MSL";
 
 }  // namespace livebeauty::rhi::metal

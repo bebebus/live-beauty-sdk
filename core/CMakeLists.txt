@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(livebeauty_core VERSION 2.0.0 LANGUAGES CXX)
+project(livebeauty_core VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,8 @@ add_library(livebeauty_math STATIC
     src/math/face_mesh_filter.cpp
     src/math/face_mesh_deformer.cpp
     src/math/face_timeline.cpp
+    src/math/hair_mask_tuning.cpp
+    src/math/sticker_transform.cpp
 )
 target_include_directories(livebeauty_math PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -96,6 +98,9 @@ if(LIVEBEAUTY_BUILD_TESTS)
     add_executable(livebeauty_rhi_tests tests/test_rhi_pipeline.cpp)
     target_link_libraries(livebeauty_rhi_tests PRIVATE livebeauty_engine)
     add_test(NAME livebeauty_rhi_tests COMMAND livebeauty_rhi_tests)
+
+    add_executable(livebeauty_bench tests/bench_math_core.cpp)
+    target_link_libraries(livebeauty_bench PRIVATE livebeauty_math)
 
     if(LIVEBEAUTY_ENABLE_METAL AND APPLE)
         add_executable(livebeauty_metal_pixel_gate tests/test_metal_pixel_gate.mm)

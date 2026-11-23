@@ -39,6 +39,9 @@ interface BeautyEngine {
      */
     val latencyFrames: Int
 
+    /** 任何线程可调（切镜头、开预览）：重置引擎内部的人脸/美体/分割跟踪状态。 */
+    fun resetTracking() {}
+
     /**
      * [contextAlive] 为 true：GL 线程、创建对象的上下文仍是当前上下文，释放 GL 对象；
      * false：上下文已销毁（OpenGlView.stop 在别的线程拆除），只丢引用。
