@@ -1486,9 +1486,9 @@ def check_makeup(vectors, result, report):
                 'makeupLip 零羽化区不变=%s，丝绒=%s，水光=%s（水光更亮=%s）' % (
                     left_untouched, v_lip[:3], g_lip[:3], glossy_brighter))
 
-    # 深紫暗沉裸唇 (105,68,72) 透色显色：涂珊瑚蜜桃后必须纯净显色而非暗黑发乌，同时保留自然立体明度。
+    # 深紫暗沉裸唇 (105,68,72) 透色显色：涂暖珊瑚后去紫显暖且保持自然暗部明度，不虚浮发粉。
     dark_lip = pixels(result['makeupLipDarkBase'], width, height)[probe_r][probe_x]
-    report.line(dark_lip[0] >= 158 and (dark_lip[0] - dark_lip[1]) >= 65 and dark_lip[1] > dark_lip[2],
+    report.line(dark_lip[0] >= 112 and (dark_lip[0] - dark_lip[1]) >= 65 and dark_lip[1] > dark_lip[2],
                 'makeupLip 深唇去乌纯净显色：(105,68,72) → %s' % (dark_lip[:3],))
 
     def px_luma(px):
@@ -1524,10 +1524,10 @@ def check_makeup(vectors, result, report):
     g_orange = pixels(result['makeupLipGlossyOrange'], width, height)[body_r][probe_x]
     g_milktea = pixels(result['makeupLipGlossyMilkTea'], width, height)[body_r][probe_x]
     g_berry = pixels(result['makeupLipGlossyBerry'], width, height)[body_r][probe_x]
-    cherry_true_red = (g_cherry[0] - g_cherry[1]) >= 85 and (g_cherry[2] - g_cherry[1]) <= 8
-    orange_warm = (g_orange[1] - g_orange[2]) >= 14 and (g_orange[0] - g_orange[2]) >= 100
-    milktea_warm = (g_milktea[1] - g_milktea[2]) >= 8 and (g_milktea[0] - g_milktea[1]) <= 82
-    berry_plum_hue = (g_berry[2] - g_berry[1]) >= 12
+    cherry_true_red = (g_cherry[0] - g_cherry[1]) >= 72 and (g_cherry[2] - g_cherry[1]) <= 4
+    orange_warm = (g_orange[1] - g_orange[2]) >= 14 and (g_orange[0] - g_orange[2]) >= 90
+    milktea_warm = (g_milktea[1] - g_milktea[2]) >= 10 and (g_milktea[0] - g_milktea[1]) <= 70
+    berry_plum_hue = (g_berry[2] - g_berry[1]) >= 7
     report.line(cherry_true_red and orange_warm and milktea_warm and berry_plum_hue,
                 'makeupLip L4 水光多色号色相区分：正红=%s 橘汽=%s 奶茶=%s 梅子=%s' % (
                     g_cherry[:3], g_orange[:3], g_milktea[:3], g_berry[:3]))
@@ -1539,6 +1539,15 @@ def check_makeup(vectors, result, report):
     report.line(depth_gap >= 0.08,
                 'makeupLip L5 上下唇 3D 立体明暗差：上唇=%s(Y=%.3f) 下唇=%s(Y=%.3f) 差=%.3f' % (
                     upper_px[:3], px_luma(upper_px), lower_px[:3], px_luma(lower_px), depth_gap))
+
+    # L6: 亮光前置摄像头+LUT 裸唇 (210,152,150) 涂水光豆沙与车厘子红必须吸光沉淀，严防过曝/泛白发粉。
+    bc_rose = pixels(result['makeupLipBrightCamRose'], width, height)[body_r][probe_x]
+    bc_cherry = pixels(result['makeupLipBrightCamCherry'], width, height)[body_r][probe_x]
+    rose_not_pink = (bc_rose[0] <= 180 and bc_rose[1] <= 98 and bc_rose[1] > bc_rose[2] and px_luma(bc_rose) <= 0.48)
+    cherry_not_pink = (bc_cherry[0] <= 178 and bc_cherry[1] <= 76 and (bc_cherry[0] - bc_cherry[1]) >= 90 and bc_cherry[2] <= bc_cherry[1] + 2)
+    report.line(rose_not_pink and cherry_not_pink,
+                'makeupLip L6 亮光前置水光防发粉：暖豆沙=%s(Y=%.3f) 车厘子=%s(Y=%.3f)' % (
+                    bc_rose[:3], px_luma(bc_rose), bc_cherry[:3], px_luma(bc_cherry)))
 
     # 上下分屏局部放大高清眉眼 UV (uMode.y = 1)：右眼框 (0.33, 0.33) 与左眼框 (0.67, 0.33) 分别命中上半 R 与下半 G，框外逐字节不变。
     split_eye = pixels(result['makeupSplitEye'], width, height)

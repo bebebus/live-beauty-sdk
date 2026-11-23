@@ -101,12 +101,12 @@ internal object FaceMakeupUv {
     // ---- 秀场精选调色板（RGB 0..1）----
 
     fun lipstickRgb(color: String): FloatArray = when (color) {
-        "coral_peach" -> floatArrayOf(0.86f, 0.36f, 0.27f)
-        "cherry_red" -> floatArrayOf(0.70f, 0.09f, 0.11f)
-        "milk_tea" -> floatArrayOf(0.64f, 0.39f, 0.27f)
-        "berry_plum" -> floatArrayOf(0.54f, 0.12f, 0.26f)
-        "orange_soda" -> floatArrayOf(0.88f, 0.30f, 0.10f)
-        else -> floatArrayOf(0.73f, 0.32f, 0.33f) // rose_bean 温柔豆沙
+        "coral_peach" -> floatArrayOf(0.76f, 0.27f, 0.17f) // 暖珊瑚杏橘（去荧光粉）
+        "cherry_red" -> floatArrayOf(0.58f, 0.06f, 0.05f) // 复古车厘子正红（纯正深红，G>B 不偏粉）
+        "milk_tea" -> floatArrayOf(0.56f, 0.29f, 0.18f) // 肉桂烤奶茶（高级裸棕，不发粉）
+        "berry_plum" -> floatArrayOf(0.46f, 0.08f, 0.16f) // 深酒红梅子（浓郁浆果红，去淡紫粉）
+        "orange_soda" -> floatArrayOf(0.74f, 0.21f, 0.05f) // 烂番茄暖橘（浓郁胡萝卜橘）
+        else -> floatArrayOf(0.60f, 0.23f, 0.19f) // rose_bean 温柔暖豆沙（自然唇血红棕，去冷粉）
     }
 
     fun blushRgb(color: String): FloatArray = when (color) {

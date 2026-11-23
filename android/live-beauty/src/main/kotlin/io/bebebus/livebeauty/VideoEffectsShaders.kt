@@ -176,31 +176,33 @@ void main() {
         smoothY = dot(avg, vec3(0.299, 0.587, 0.114));
     }
     float lipDetail = clamp(baseY - smoothY, -0.09, 0.09);
-    // 3. Proportional illumination shading (zero flat shadow floor) + midtone-only bare-lip de-dulling.
-    float midLift = 1.0 + 0.22 * smoothstep(0.16, 0.30, smoothY) * (1.0 - smoothstep(0.42, 0.66, smoothY));
-    float illum = (smoothY / 0.44) * midLift;
-    float illumSoft = illum / (1.0 + 0.24 * max(illum - 0.85, 0.0));
-    float cY = max(dot(uLipColor.rgb, vec3(0.299, 0.587, 0.114)), 0.15);
-    vec3 normC = clamp(uLipColor.rgb / max(cY * 1.12, 0.34), 0.12, 1.45);
-    vec3 multLip = clamp(base * mix(vec3(1.0), normC, 0.88), 0.0, 1.0);
+    // 3. Calibrated subtractive pigment shading (Beer-Lambert stain + neutral 0.54 illumination with soft highlight roll-off,
+    //    preventing bright front cameras & beauty LUTs from over-exposing rich lip shades into glowing pastel pink).
+    float midLift = 1.0 + 0.14 * smoothstep(0.14, 0.26, smoothY) * (1.0 - smoothstep(0.32, 0.48, smoothY));
+    float illum = (smoothY / 0.54) * midLift;
+    float illumSoft = illum / (1.0 + 0.52 * max(illum - 0.82, 0.0));
+    vec3 stainTint = clamp(uLipColor.rgb * 1.15, 0.05, 1.02);
+    vec3 multLip = clamp(base * mix(vec3(1.0), stainTint, 0.92), 0.0, 1.0);
     float isGlossy = step(0.5, uLipStyle.x);
-    vec3 pigmentLip = clamp(uLipColor.rgb * illumSoft * mix(1.0, 0.90, isGlossy), 0.0, 1.0);
-    float coverage = mix(0.48, 0.74, clamp(uLipColor.a, 0.0, 1.0));
+    vec3 pigmentLip = clamp(uLipColor.rgb * illumSoft * mix(1.0, 0.88, isGlossy), 0.0, 1.0);
+    float brightStainBias = smoothstep(0.46, 0.68, smoothY) * 0.16;
+    float coverage = clamp(mix(0.48, 0.76, clamp(uLipColor.a, 0.0, 1.0)) - brightStainBias, 0.32, 0.76);
     vec3 result = mix(multLip, pigmentLip, coverage);
     result = clamp(result + vec3(lipDetail * mix(1.15, 0.75, isGlossy)), 0.0, 1.0);
-    // 4. Wet clearcoat specular: tight neutral warm-white reflection driven by real surface brightness and lip creases.
+    // 4. Wet clearcoat specular: tight localized glint only on lower belly & cupid-bow ridge (naturalHot strictly > 0.78,
+    //    avoiding full-lip milky white wash that turns glossy shades pastel pink on lit front cameras).
     if (isGlossy > 0.5) {
         float lumaDrive = smoothstep(0.24, 0.58, baseY);
-        float centerBelly = 1.0 - smoothstep(0.02, 0.095, abs(vMakeupUv.x - 0.5));
-        float ridgeMask = clamp(0.80 + lipDetail * 5.0, 0.20, 1.40);
-        float dyLo = (vMakeupUv.y - 0.714) * 100.0;
-        float dyHi = (vMakeupUv.y - 0.673) * 120.0;
+        float centerBelly = 1.0 - smoothstep(0.015, 0.085, abs(vMakeupUv.x - 0.5));
+        float ridgeMask = clamp(0.85 + lipDetail * 5.0, 0.20, 1.40);
+        float dyLo = (vMakeupUv.y - 0.714) * 145.0;
+        float dyHi = (vMakeupUv.y - 0.673) * 165.0;
         float lowerBand = exp(-(dyLo * dyLo));
-        float upperBand = exp(-(dyHi * dyHi)) * 0.42;
-        float naturalHot = smoothstep(0.48, 0.80, baseY) * 0.42;
-        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.78 + naturalHot) * ridgeMask * effFeather, 0.0, 0.78);
+        float upperBand = exp(-(dyHi * dyHi)) * 0.38;
+        float naturalHot = smoothstep(0.78, 0.95, baseY) * 0.24;
+        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.78 + naturalHot) * ridgeMask * effFeather, 0.0, 0.68);
         vec3 specCol = vec3(1.0, 0.99, 0.97);
-        result = clamp(result + (specCol - result) * (spec * 0.65), 0.0, 1.0);
+        result = clamp(result + (specCol - result) * (spec * 0.52), 0.0, 1.0);
     }
     gl_FragColor = vec4(clamp(result, 0.0, 1.0), alpha);
 }

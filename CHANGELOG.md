@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [1.1.4] - 2026-11-23
+
+### Fixed
+- **Subtractive True-to-Life Lip Color & Bright-Camera Anti-Pink Calibration (`MAKEUP_LIP_FRAGMENT`, `FaceMakeupUv`)**:
+  - Replaced the `smoothY / 0.44` illumination boost and `normC <= 1.45` channel brightening with a calibrated Beer-Lambert subtractive stain (`stainTint <= 1.02`) + neutral `0.54` scene illumination with soft highlight compression (`<= 1.04`), stopping well-lit front cameras and beauty LUTs (`Y = 0.55..0.68`) from over-exposing rich lip shades into glowing pastel pink.
+  - Raised the glossy `naturalHot` specular threshold from `0.48` to `0.78` and tightened lower-lip/cupid-bow catchlight bands (`145 / 165`), eliminating full-lip milky white wash on glossy shades so 90% of the lip body keeps juicy, wet-deepened pigment (`0.88×`) with crisp localized wet glints.
+  - Recalibrated all 6 lipstick shades (`rose_bean`, `coral_peach`, `cherry_red`, `milk_tea`, `berry_plum`, `orange_soda`) to deeper, warm-neutral realistic pigment values (eliminating `B > G` cool-pink drift on `rose_bean` and `cherry_red`).
+  - Added GPU regression probe `L6` (`_tooling/glsl/`) locking bright front-camera (`(210,152,150)`) glossy `rose_bean` and `cherry_red` against pastel/milky pink washout.
+
 ## [1.1.3] - 2026-11-23
 
 ### Fixed
