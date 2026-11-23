@@ -407,11 +407,15 @@ def build_eye_makeup_atlas(uvs):
     r_lash = [r_wing_tip, r_wing_mid] + [(uvs[i][0], uvs[i][1] - 0.0012) for i in (33, 246, 161, 160, 159, 158, 157, 173)]
     l_lash = [l_wing_tip, l_wing_mid] + [(uvs[i][0], uvs[i][1] - 0.0012) for i in (263, 466, 388, 387, 386, 385, 384, 398)]
 
-    # 眼影主晕染中心（上睑折痕渐变）与深晕染中心（外眼角三角加深区）。
-    r_sh_base = [(uvs[i][0] - 0.004, uvs[i][1] - 0.016) for i in (33, 246, 161, 159, 157)]
-    l_sh_base = [(uvs[i][0] + 0.004, uvs[i][1] - 0.016) for i in (263, 466, 388, 386, 384)]
-    r_sh_deep = [(uvs[33][0] - 0.009, uvs[33][1] - 0.008), (uvs[246][0], uvs[246][1] - 0.007), (uvs[160][0], uvs[160][1] - 0.006)]
-    l_sh_deep = [(uvs[263][0] + 0.009, uvs[263][1] - 0.008), (uvs[466][0], uvs[466][1] - 0.007), (uvs[387][0], uvs[387][1] - 0.006)]
+    # 眼影主晕染中心（紧贴自然上睑折痕）与深晕染中心（克制外眼角加深，不甩出太阳穴长尾）。
+    r_sh_base = [(uvs[i][0] - 0.002, uvs[i][1] - 0.0115) for i in (33, 246, 161, 159, 157)]
+    l_sh_base = [(uvs[i][0] + 0.002, uvs[i][1] - 0.0115) for i in (263, 466, 388, 386, 384)]
+    r_sh_deep = [(uvs[33][0] - 0.005, uvs[33][1] - 0.006), (uvs[246][0], uvs[246][1] - 0.0055), (uvs[160][0], uvs[160][1] - 0.005)]
+    l_sh_deep = [(uvs[263][0] + 0.005, uvs[263][1] - 0.006), (uvs[466][0], uvs[466][1] - 0.0055), (uvs[387][0], uvs[387][1] - 0.005)]
+    r_eye_mid_v = 0.5 * (uvs[33][1] + uvs[133][1])
+    l_eye_mid_v = 0.5 * (uvs[263][1] + uvs[362][1])
+    r_brow_bot_v = min(uvs[i][1] for i in (53, 52, 65)) + 0.008
+    l_brow_bot_v = min(uvs[i][1] for i in (283, 282, 295)) + 0.008
 
     # 卧蚕提亮带（紧贴下眼睑下方 ~0.011 处）。
     r_aegyo_hi = [(uvs[i][0], uvs[i][1] + 0.011) for i in (7, 163, 144, 145, 153, 154)]
@@ -425,11 +429,20 @@ def build_eye_makeup_atlas(uvs):
             if on_border or point_in_poly(u, v, eye_poly):
                 sh_base = sh_deep = liner = aegyo_hi = 0.0
             else:
+                # 眼裂外缘柔和距离羽化 + 上睑限定 + 眉下渐隐，彻底消除 1px 硬切眼洞剪影与糊眉/下渗黑眼圈。
+                d_eye = poly_edge_dist(u, v, eye_poly)
+                eye_edge_fade = smoothstep(0.0005, 0.0075, d_eye)
+                eye_mid_v = l_eye_mid_v if is_left else r_eye_mid_v
+                brow_bot_v = l_brow_bot_v if is_left else r_brow_bot_v
+                upper_only = 1.0 - smoothstep(eye_mid_v - 0.003, eye_mid_v + 0.010, v)
+                brow_guard = smoothstep(brow_bot_v - 0.006, brow_bot_v + 0.022, v)
+                sh_guard = eye_edge_fade * upper_only * brow_guard
+
                 d, t = dist_polyline(u, v, l_sh_base if is_left else r_sh_base)
-                sh_base = math.exp(-0.5 * (d / 0.023) ** 2) * (1.0 - 0.35 * smoothstep(0.65, 1.0, t))
+                sh_base = math.exp(-0.5 * (d / 0.0165) ** 2) * (1.0 - 0.35 * smoothstep(0.65, 1.0, t)) * sh_guard
 
                 dd, _ = dist_polyline(u, v, l_sh_deep if is_left else r_sh_deep)
-                sh_deep = math.exp(-0.5 * (dd / 0.0135) ** 2)
+                sh_deep = math.exp(-0.5 * (dd / 0.010) ** 2) * sh_guard
 
                 # 高清局部放大空间下的锐利贴睑眼线（3.3× 横向分辨率，尾翼锋利不发糊）
                 dl, tl = dist_polyline(u, v, l_lash if is_left else r_lash)

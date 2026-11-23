@@ -136,6 +136,7 @@ internal class MakeupPass(private val assets: AssetManager?) {
         presence: Float,
         steadyFace: Float,
         steadyEye: Float,
+        eyeMakeupKeep: Float = steadyEye,
         config: VideoEffectsConfig,
     ) {
         check(baseTexture != 0 && width > 0 && height > 0)
@@ -177,13 +178,15 @@ internal class MakeupPass(private val assets: AssetManager?) {
 
         val faceGain = presence * steadyFace
         val eyeGain = presence * steadyEye
+        // 精细眼妆（眼影/眼线/卧蚕）附加运动防残影衰减：头部快转时 1 帧隐退，停稳后柔和渐入。
+        val fineEyeGain = presence * minOf(steadyEye, eyeMakeupKeep)
         // 口红跟着脸走（与瘦脸同一尺度的外推渐出），不随眼睛尺度的 steadyEye 闪退。
         val lipGain = presence * steadyFace
 
         // 2a. 立体修容 / 高光 / 腮红 / 眉妆 / 眼妆（共享 852 三角形面部皮肤子网，避开眼球与牙齿）。
         val hasLayer = config.contour > 0f || config.highlight > 0f || config.blush > 0f ||
             config.eyebrow > 0f || config.eyeshadow > 0f || config.eyeliner > 0f || config.aegyoSal > 0f
-        if (hasLayer && (faceGain > 0f || eyeGain > 0f)) {
+        if (hasLayer && (faceGain > 0f || eyeGain > 0f || fineEyeGain > 0f)) {
             glUseProgram(layerProgram)
             bindMakeupAttributes(layerPos, layerScreenUv, layerMakeupUv)
             glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, baseTexture)
@@ -206,19 +209,19 @@ internal class MakeupPass(private val assets: AssetManager?) {
                 val ch = FaceMakeupUv.eyebrowChannel(config.eyebrowStyle)
                 drawLayer(browTex, rgb[0], rgb[1], rgb[2], config.eyebrow * 0.80f * eyeGain, ch[0], ch[1], ch[2], ch[3], 1f, 1f)
             }
-            if (config.eyeshadow > 0f && eyeGain > 0f) {
+            if (config.eyeshadow > 0f && fineEyeGain > 0f) {
                 val mainRgb = FaceMakeupUv.eyeshadowMainRgb(config.eyeshadowColor)
                 val deepRgb = FaceMakeupUv.eyeshadowDeepRgb(config.eyeshadowColor)
-                drawLayer(eyeTex, mainRgb[0], mainRgb[1], mainRgb[2], config.eyeshadow * 0.72f * eyeGain, 1f, 0f, 0f, 0f, 1f, 1f)
-                drawLayer(eyeTex, deepRgb[0], deepRgb[1], deepRgb[2], config.eyeshadow * 0.68f * eyeGain, 0f, 1f, 0f, 0f, 1f, 1f)
+                drawLayer(eyeTex, mainRgb[0], mainRgb[1], mainRgb[2], config.eyeshadow * 0.64f * fineEyeGain, 1f, 0f, 0f, 0f, 1f, 1f, 1f)
+                drawLayer(eyeTex, deepRgb[0], deepRgb[1], deepRgb[2], config.eyeshadow * 0.56f * fineEyeGain, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
             }
-            if (config.eyeliner > 0f && eyeGain > 0f) {
-                drawLayer(eyeTex, 0.14f, 0.11f, 0.10f, config.eyeliner * 0.90f * eyeGain, 0f, 0f, 1f, 0f, 1f, 1f)
+            if (config.eyeliner > 0f && fineEyeGain > 0f) {
+                drawLayer(eyeTex, 0.14f, 0.11f, 0.10f, config.eyeliner * 0.90f * fineEyeGain, 0f, 0f, 1f, 0f, 1f, 1f)
             }
-            if (config.aegyoSal > 0f && eyeGain > 0f) {
-                // 卧蚕提亮（eyeTex.a, ScreenLift）+ 下缘微阴影（browTex.b, Multiply），均启用局部高清眉眼 UV。
-                drawLayer(eyeTex, 1.0f, 0.94f, 0.88f, config.aegyoSal * 0.65f * eyeGain, 0f, 0f, 0f, 1f, 2f, 1f)
-                drawLayer(browTex, 0.46f, 0.34f, 0.28f, config.aegyoSal * 0.42f * eyeGain, 0f, 0f, 1f, 0f, 1f, 1f)
+            if (config.aegyoSal > 0f && fineEyeGain > 0f) {
+                // 卧蚕提亮（eyeTex.a, ScreenLift）+ 下缘微阴影（browTex.b, Multiply），均启用局部高清眉眼 UV 与皮肤保护门。
+                drawLayer(eyeTex, 1.0f, 0.94f, 0.88f, config.aegyoSal * 0.65f * fineEyeGain, 0f, 0f, 0f, 1f, 2f, 1f, 1f)
+                drawLayer(browTex, 0.46f, 0.34f, 0.28f, config.aegyoSal * 0.42f * fineEyeGain, 0f, 0f, 1f, 0f, 1f, 1f, 1f)
             }
             unbindMakeupAttributes(layerPos, layerScreenUv, layerMakeupUv)
         }
@@ -280,12 +283,13 @@ internal class MakeupPass(private val assets: AssetManager?) {
         c0: Float, c1: Float, c2: Float, c3: Float,
         mode: Float,
         eyeLocalUv: Float = 0f,
+        eyelidSkinGate: Float = 0f,
     ) {
         if (strength <= 1e-4f || atlasTex == 0) return
         glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, atlasTex)
         glUniform4f(layerColor, r, g, b, strength)
         glUniform4f(layerChannel, c0, c1, c2, c3)
-        glUniform4f(layerMode, mode, eyeLocalUv, 0f, 0f)
+        glUniform4f(layerMode, mode, eyeLocalUv, eyelidSkinGate, 0f)
         skinIndexBuf.position(0)
         glDrawElements(GL_TRIANGLES, FaceMakeupUv.SKIN_FACE_INDICES.size, GL_UNSIGNED_SHORT, skinIndexBuf)
     }

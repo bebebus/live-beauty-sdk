@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'live_beauty_sdk'
-  s.version          = '1.1.2'
+  s.version          = '1.1.3'
   s.summary          = 'Real-time GPU live beauty SDK for Flutter (iOS CoreImage + MediaPipe 478-pt).'
   s.description      = <<-DESC
     Flutter wrapper for Bebebus Live Beauty SDK on iOS (CoreImage + MediaPipe 478-pt face geometry). Live demo & experience testbed: https://dh.video

@@ -1551,6 +1551,25 @@ def check_makeup(vectors, result, report):
                 'makeupLayer 上下分屏局部放大眉眼 UV：右眼命中=%s，左眼另一通道=%s，鼻梁/下颌框外不变=%s/%s' % (
                     r_box_px[:3], l_box_px[:3], nose_px == skin, jaw_px == skin))
 
+    # E1–E4: 眼影皮肤门控 (uMode.z = 1) —— 防止快速转头/网格滞后时把眼影拖染到眼球、睫毛或背景上产生残影。
+    es_skin = pixels(result['makeupEyeshadowSkin'], width, height)[height // 2][width // 2]
+    es_sclera = pixels(result['makeupEyeshadowSclera'], width, height)[height // 2][width // 2]
+    es_shadow_sclera = pixels(result['makeupEyeshadowShadowSclera'], width, height)[height // 2][width // 2]
+    es_iris = pixels(result['makeupEyeshadowDarkIris'], width, height)[height // 2][width // 2]
+    es_bg = pixels(result['makeupEyeshadowGreyBg'], width, height)[height // 2][width // 2]
+    e1_ok = (200 - es_skin[0] >= 12 and 160 - es_skin[1] >= 20 and es_skin[0] >= 120)
+    report.line(e1_ok,
+                'makeupLayer E1 眼影在真实眼皮 (200,160,140) 自然粉雾显色且不发乌发黑：%s' % (es_skin[:3],))
+    e2_ok = (es_sclera == (210, 206, 204, 255) and es_shadow_sclera == (165, 162, 164, 255))
+    report.line(e2_ok,
+                'makeupLayer E2 眼影零染眼白：亮眼白=%s 阴影眼白=%s' % (es_sclera[:3], es_shadow_sclera[:3]))
+    e3_ok = (es_iris == (38, 30, 28, 255))
+    report.line(e3_ok,
+                'makeupLayer E3 眼影零染黑瞳/睫毛：%s' % (es_iris[:3],))
+    e4_ok = (es_bg == (190, 192, 196, 255))
+    report.line(e4_ok,
+                'makeupLayer E4 眼影零染中性灰背景：%s' % (es_bg[:3],))
+
     iris_closed = pixels(result['makeupIrisClosed'], width, height)
     report.line(iris_closed == eye_img, 'makeupIris 闭眼门控（openness=0.08 < 0.10）逐字节不变，绝不穿帮')
     iris_open = pixels(result['makeupIrisOpen'], width, height)

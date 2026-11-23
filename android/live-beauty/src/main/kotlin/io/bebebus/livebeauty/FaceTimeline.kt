@@ -97,6 +97,7 @@ internal class FaceTimeline {
     private var pendingDt = 0f
     private var steadyEyeTarget = 1f
     private var steadyFaceTarget = 1f
+    private var eyeMakeupTarget = 1f
 
     // 有脸 / 无脸事件环（采样时间严格递增）：presence 按被画那一帧的采样时间判断它之前最近的事件。
     // 被 redetect 豁免的跳采漏检会改记为有脸，读这个环时不能把 eventFace 当成检测器的原始结果。
@@ -126,6 +127,9 @@ internal class FaceTimeline {
     var steadyEye = 1f
         private set
     var steadyFace = 1f
+        private set
+    /** 精细眼妆（眼影/眼线/卧蚕）防残影保持系数：综合人脸速度与紧致外推衰减，快退（35 ms）慢回（160 ms）。 */
+    var eyeMakeupKeep = 1f
         private set
     var denoiseKeep = 1f
         private set
@@ -159,8 +163,8 @@ internal class FaceTimeline {
         clearHistory()
         meshFilter.reset(keepBaseline = false)
         sampleIntervalMs = DEFAULT_INTERVAL_MS; intervalKnown = false
-        last = Long.MIN_VALUE; pendingDt = 0f; steadyEyeTarget = 1f; steadyFaceTarget = 1f
-        presence = 0f; offsetX = 0f; offsetY = 0f; speed = 0f; steadyEye = 1f; steadyFace = 1f; denoiseKeep = 1f
+        last = Long.MIN_VALUE; pendingDt = 0f; steadyEyeTarget = 1f; steadyFaceTarget = 1f; eyeMakeupTarget = 1f
+        presence = 0f; offsetX = 0f; offsetY = 0f; speed = 0f; steadyEye = 1f; steadyFace = 1f; eyeMakeupKeep = 1f; denoiseKeep = 1f
         holdX = 0f; holdY = 0f
         runId++
     }
@@ -270,7 +274,7 @@ internal class FaceTimeline {
         if (count == 0) { sampleSpeed = 0f; sampleMotion = 0f }
         speed = sampleSpeed
         denoiseKeep = approach(denoiseKeep, 1f - smoothstep(DENOISE_FADE[0], DENOISE_FADE[1], maxOf(speed, sampleMotion)), dt)
-        steadyEyeTarget = 1f; steadyFaceTarget = 1f
+        steadyEyeTarget = 1f; steadyFaceTarget = 1f; eyeMakeupTarget = 1f
         pendingDt = dt
     }
 
@@ -327,6 +331,10 @@ internal class FaceTimeline {
         val face = maxOf(output[RX_INDEX], RADIUS_FLOOR)
         steadyEyeTarget = 1f - smoothstep(EYE_FADE[0], EYE_FADE[1], distance / eye)
         steadyFaceTarget = 1f - smoothstep(FACE_FADE[0], FACE_FADE[1], distance / face)
+        val motion = maxOf(speed, sampleMotion)
+        val motionKeep = 1f - 0.85f * smoothstep(EYE_MAKEUP_MOTION[0], EYE_MAKEUP_MOTION[1], motion)
+        val extrapKeep = 1f - smoothstep(EYE_MAKEUP_EXTRAP[0], EYE_MAKEUP_EXTRAP[1], distance / eye)
+        eyeMakeupTarget = motionKeep * extrapKeep
         settle()
         return output
     }
@@ -550,6 +558,7 @@ internal class FaceTimeline {
     private fun settle() {
         steadyEye = approach(steadyEye, steadyEyeTarget, pendingDt)
         steadyFace = approach(steadyFace, steadyFaceTarget, pendingDt)
+        eyeMakeupKeep = approach(eyeMakeupKeep, eyeMakeupTarget, pendingDt, EYE_MAKEUP_OUT_MS, EYE_MAKEUP_IN_MS)
         pendingDt = 0f
     }
 
@@ -597,9 +606,9 @@ internal class FaceTimeline {
     }
 
     /** 渐出快、渐入慢。 */
-    private fun approach(current: Float, target: Float, dt: Float): Float =
-        if (target < current) maxOf(target, current - dt / FADE_OUT_MS)
-        else minOf(target, current + dt / FADE_IN_MS)
+    private fun approach(current: Float, target: Float, dt: Float, outMs: Float = FADE_OUT_MS, inMs: Float = FADE_IN_MS): Float =
+        if (target < current) maxOf(target, current - dt / outMs)
+        else minOf(target, current + dt / inMs)
 
     private fun smoothstep(e0: Float, e1: Float, x: Float): Float {
         val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
@@ -669,6 +678,12 @@ internal class FaceTimeline {
         private val EYE_FADE = floatArrayOf(0.35f, 0.8f)
         /** 外推量 / 脸椭圆横半径：0.15 起渐出，0.35 完全渐出。 */
         private val FACE_FADE = floatArrayOf(0.15f, 0.35f)
+        /** 精细眼妆（眼影/眼线/卧蚕）速度渐出区间（画面宽 / 秒）：静止与轻点头满强度，快速转头/平移软隐消残影。 */
+        private val EYE_MAKEUP_MOTION = floatArrayOf(0.14f, 0.42f)
+        /** 精细眼妆外推渐出区间（外推量 / 眼半径）：约 5 px 即起衰、15 px 归零。 */
+        private val EYE_MAKEUP_EXTRAP = floatArrayOf(0.12f, 0.35f)
+        private const val EYE_MAKEUP_OUT_MS = 35f
+        private const val EYE_MAKEUP_IN_MS = 160f
         /** 脸部运动速度（画面宽 / 秒，已去抖动）：0.05 起渐出降噪，0.12 完全停用。 */
         private val DENOISE_FADE = floatArrayOf(0.05f, 0.12f)
         private const val FADE_OUT_MS = 80f

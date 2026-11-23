@@ -385,9 +385,9 @@ internal class FaceMeshFilter {
         const val POSE_DCUT = 5f
         const val K_POSE = 1.8f
         const val C_POSE = 0.25f
-        // 慢层（残差）One-Euro：中上脸 / 眼 / 下半脸各一个截止频率；区域速度先按 RES_DCUT 低通。
+        // 慢层（残差）One-Euro：中上脸 / 眼（含上睑眼影区） / 下半脸各一个截止频率；区域速度先按 RES_DCUT 低通。
         val RES_FC_MIN = floatArrayOf(0.9f, 1.6f, 1.6f)
-        val RES_BETA = floatArrayOf(30f, 40f, 80f)
+        val RES_BETA = floatArrayOf(30f, 75f, 80f)
         const val RES_DCUT = 1.5f
         const val K_RES = 1.4f
         const val C_RES = 0.20f
@@ -491,9 +491,11 @@ internal class FaceMeshFilter {
                 return t * t * (3f - 2f * t)
             }
             fun eyeMember(i: Int, a: Int, b: Int): Float {
-                val cu = 0.5f * (uv[a * 2] + uv[b * 2]); val cv = 0.5f * (uv[a * 2 + 1] + uv[b * 2 + 1])
+                val cu = 0.5f * (uv[a * 2] + uv[b * 2])
+                // 微上移覆盖上睑折痕至眉骨下缘，避免眼影画布跨区拉扯滞后。
                 val ew = abs(uv[b * 2] - uv[a * 2])
-                val dd = hypot((uv[i * 2] - cu) / ew, (uv[i * 2 + 1] - cv) / (0.75f * ew))
+                val cv = 0.5f * (uv[a * 2 + 1] + uv[b * 2 + 1]) - 0.14f * ew
+                val dd = hypot((uv[i * 2] - cu) / ew, (uv[i * 2 + 1] - cv) / (0.95f * ew))
                 return 1f - smooth(0.65f, 1.05f, dd)
             }
             val vSub = uv[2 * 2 + 1]

@@ -81,8 +81,9 @@ void main() {
 
     /**
      * 实时美妆通用层片元着色器（腮红 / 修容 / 高光 / 眉妆 / 眼影 / 眼线 / 卧蚕，仅 5 个 uniform）。
-     * uMode.x: 0 = SoftLight (blush), 1 = Multiply (contour/brow/shadow/liner), 2 = ScreenLift (highlight/aegyo).
+     * uMode.x: 0 = SoftLight (blush), 1 = Multiply (contour/brow/liner), 2 = ScreenLift (highlight/aegyo).
      * uMode.y > 0.5: 启用上下分屏局部放大高清眉眼 UV（上半右眉眼 [0.18..0.48, 0.21..0.45]，下半左眉眼 [0.52..0.82, 0.21..0.45]）。
+     * uMode.z > 0.5: 启用眼睑皮肤保护门 + 柔粉混合（眼影专用：过滤白眼球巩膜、深色瞳孔/睫毛/眉毛与非肤色背景，避免移动滞后拖出脏残影）。
      */
     const val MAKEUP_LAYER_FRAGMENT = """$PRECISION
 uniform sampler2D uBase;
@@ -92,7 +93,7 @@ uniform vec4 uChannel;
 uniform vec4 uMode;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
-// SoftLight / Multiply / ScreenLift blending with optional high-DPI split-eye local UV projection.
+// SoftLight / Multiply / ScreenLift blending with optional split-eye UV and eyelid-skin shadow protection.
 vec3 softLightBlend(vec3 b, vec3 s) {
     return (1.0 - 2.0 * s) * b * b + 2.0 * s * b;
 }
@@ -109,11 +110,19 @@ void main() {
     float alpha = clamp(mask * uColor.a, 0.0, 1.0);
     if (alpha <= 0.001) { discard; }
     vec3 base = texture2D(uBase, clamp(vScreenUv, 0.0, 1.0)).rgb;
+    if (uMode.z > 0.5) {
+        float baseY = dot(base, vec3(0.299, 0.587, 0.114));
+        float darkGate = smoothstep(0.14, 0.30, baseY);
+        float skinGate = smoothstep(0.025, 0.095, base.r - base.b) * smoothstep(0.015, 0.065, base.r - base.g);
+        alpha *= darkGate * skinGate;
+        if (alpha <= 0.001) { discard; }
+    }
     vec3 result;
     if (uMode.x < 0.5) {
         result = mix(softLightBlend(base, uColor.rgb), base * mix(vec3(1.0), uColor.rgb, 0.68), 0.45);
     } else if (uMode.x < 1.5) {
-        result = base * mix(vec3(1.0), uColor.rgb, 0.92);
+        vec3 mult = base * mix(vec3(1.0), uColor.rgb, uMode.z > 0.5 ? 0.78 : 0.92);
+        result = uMode.z > 0.5 ? mix(mult, softLightBlend(base, uColor.rgb), 0.45) : mult;
     } else {
         result = 1.0 - (1.0 - base) * (1.0 - uColor.rgb * 0.58);
     }

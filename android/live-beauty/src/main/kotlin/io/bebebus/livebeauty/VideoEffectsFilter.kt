@@ -200,6 +200,7 @@ class VideoEffectsFilter(
     private var makeupPresence = 0f
     private var makeupSteadyFace = 1f
     private var makeupSteadyEye = 1f
+    private var makeupEyeKeep = 1f
     private var makeupRightIrisGate = 0f
     private var makeupLeftIrisGate = 0f
     private val makeupLandmarks = FloatArray(FaceMeshFrame.COORD_COUNT)
@@ -450,6 +451,7 @@ class VideoEffectsFilter(
                     presence = makeupPresence,
                     steadyFace = makeupSteadyFace,
                     steadyEye = makeupSteadyEye,
+                    eyeMakeupKeep = makeupEyeKeep,
                     config = makeupConfig,
                 )
             } catch (_: Exception) {
@@ -1166,6 +1168,7 @@ class VideoEffectsFilter(
                 makeupPresence = presence
                 makeupSteadyFace = steadyFace
                 makeupSteadyEye = steadyEye
+                makeupEyeKeep = timeline.eyeMakeupKeep
                 makeupRightIrisGate = mesh.rightIrisGate
                 makeupLeftIrisGate = mesh.leftIrisGate
                 makeupPending = true

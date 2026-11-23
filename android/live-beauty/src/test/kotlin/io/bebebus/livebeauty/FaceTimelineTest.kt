@@ -469,4 +469,39 @@ class FaceTimelineTest {
         timeline.update(300 + FaceTimeline.CLEAR_AFTER_MS + 1)
         assertFalse(timeline.poseAt(300, pose))
     }
+
+    @Test fun eyeMakeupKeepStaysFullWhenStillAndFadesFastOnPan() {
+        val timeline = FaceTimeline()
+        // 1) 静止 20 帧：eyeMakeupKeep 恒为 1，不影响正常静帧显色。
+        for (k in 0 until 20) {
+            val ts = k * 33L
+            timeline.add(ts, state(0.5f, 0.5f))
+            timeline.update(ts)
+            timeline.at(maxOf(0L, ts - 33L))
+        }
+        assertEquals("静止时 eyeMakeupKeep 应保持 1", 1f, timeline.eyeMakeupKeep, 0.01f)
+        // 2) 突然以 0.5 画面宽/秒横向快速移动（即使 FrameDelay 已对齐、steadyEye 仍为 1）：
+        //    eyeMakeupKeep 必须在 2 帧内急速压低到 0.35 以下，防止 MediaPipe 内部 OneEuro 滞后拖出眼影残影。
+        var panMin = 1f
+        for (k in 20 until 35) {
+            val ts = k * 33L
+            val x = 0.5f + 0.0005f * (ts - 19 * 33L)
+            timeline.add(ts, state(x, 0.5f))
+            timeline.update(ts)
+            timeline.at(ts - 33L)
+            if (k >= 23) panMin = minOf(panMin, timeline.eyeMakeupKeep)
+        }
+        assertEquals("对齐横移时原 steadyEye 契约保持不变", 1f, timeline.steadyEye, 0f)
+        assertTrue("快速横移时 eyeMakeupKeep 应迅速淡出至 < 0.30（实际 $panMin）", panMin < 0.30f)
+        // 3) 停稳后 15 帧内柔和渐入回到接近 1。
+        val stoppedX = 0.5f + 0.0005f * (34 - 19) * 33L
+        for (k in 35 until 55) {
+            val ts = k * 33L
+            timeline.add(ts, state(stoppedX, 0.5f))
+            timeline.update(ts)
+            timeline.at(ts - 33L)
+        }
+        assertTrue("停稳后 eyeMakeupKeep 应平滑回升至 > 0.90（实际 ${timeline.eyeMakeupKeep}）",
+            timeline.eyeMakeupKeep > 0.90f)
+    }
 }

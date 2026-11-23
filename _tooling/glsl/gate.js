@@ -929,6 +929,22 @@ void main() {
     gl.uniform4f(at('uChannel'), 1, 0, 0, 0);
     gl.uniform4f(at('uMode'), 1, 1, 0, 0);
   });
+  // E1–E4: 眼影皮肤门控 (uMode.z = 1) —— 真实眼皮自然显色，眼白/暗部眼白/瞳孔睫毛/中性背景零染色。
+  const eyelidSkinBaseTex = solidTex([200, 160, 140, 255]);
+  const scleraBaseTex = solidTex([210, 206, 204, 255]);
+  const shadowScleraBaseTex = solidTex([165, 162, 164, 255]);
+  const darkIrisBaseTex = solidTex([38, 30, 28, 255]);
+  const greyBgBaseTex = solidTex([190, 192, 196, 255]);
+  const setEyeshadowUniforms = (at) => {
+    gl.uniform4f(at('uColor'), 0.50, 0.22, 0.28, 0.65);
+    gl.uniform4f(at('uChannel'), 1, 0, 0, 0);
+    gl.uniform4f(at('uMode'), 1, 0, 1, 0);
+  };
+  out.results.makeupEyeshadowSkin = runMakeup(P.makeupLayer, eyelidSkinBaseTex, fullMaskTex, setEyeshadowUniforms);
+  out.results.makeupEyeshadowSclera = runMakeup(P.makeupLayer, scleraBaseTex, fullMaskTex, setEyeshadowUniforms);
+  out.results.makeupEyeshadowShadowSclera = runMakeup(P.makeupLayer, shadowScleraBaseTex, fullMaskTex, setEyeshadowUniforms);
+  out.results.makeupEyeshadowDarkIris = runMakeup(P.makeupLayer, darkIrisBaseTex, fullMaskTex, setEyeshadowUniforms);
+  out.results.makeupEyeshadowGreyBg = runMakeup(P.makeupLayer, greyBgBaseTex, fullMaskTex, setEyeshadowUniforms);
   out.results.makeupIrisClosed = runMakeup(P.makeupIris, eyeBaseTex, irisAtlasTex, (at) => {
     gl.uniform4f(at('uIris'), 0.5, 0.5, 0.25, W / H);
     gl.uniform4f(at('uIrisTile'), 0.0, 0.0, 0.08, 0.0);

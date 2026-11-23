@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [1.1.3] - 2026-11-23
+
+### Fixed
+- **Zero-Ghosting Eyeshadow Tracking & Eyelid-Skin Pixel Gate (`MAKEUP_LAYER_FRAGMENT`, `MakeupPass`, `FaceTimeline`, `FaceMeshFilter`, `eye_makeup.png`)**:
+  - Added a zero-extra-uniform eyelid-skin protection gate (`uMode.z > 0.5`) to `MAKEUP_LAYER_FRAGMENT` combining `darkGate` (shields dark iris, lashes, and eyebrows) and `skinGate` (shields white/shadowed sclera and neutral background walls), alongside a soft-powder `Multiply + SoftLight` blend that replaces muddy double-`Multiply` darkening.
+  - Replaced the 1-pixel binary eye-hole cutout in `eye_makeup.png` with smooth exterior eye-contour feathering (`0.0005..0.0075` UV), strict upper-eyelid containment (`upper_only`), browbone fade-out (`brow_guard`), and tighter crease-hugging Gaussian radii (`σ = 0.0165 / 0.010`).
+  - Added a dedicated `FaceTimeline.eyeMakeupKeep` anti-ghosting gain for fine eye makeup (`eyeshadow`, `eyeliner`, `aegyoSal`) driven by both face speed (`0.14..0.42 sw/s`) and tight extrapolation distance (`0.12..0.35 * eye`), with 1-frame fast fade-out (`35 ms`) and smooth recovery (`160 ms`) while keeping the existing `steadyEye` contract intact.
+  - Raised `FaceMeshFilter` `EYE_REGION` velocity gain (`RES_BETA[1] = 40f → 75f`) while keeping `RES_DCUT = 1.5f` calibrated so stationary jitter stays `≤ 0.8 px@720`, and shifted `eyeMember` upward to cover the upper-eyelid crease and browbone canvas as a single unified filter region.
+  - Added WebGL shader regression probes `E1–E4` (`_tooling/glsl/`) verifying natural eyelid powder tinting (`E1`) and exact `0/255` staining on bright/shadowed sclera (`E2`), dark iris/lashes (`E3`), and neutral grey backgrounds (`E4`), plus `FaceTimelineTest.eyeMakeupKeepStaysFullWhenStillAndFadesFastOnPan`.
+
 ## [1.1.2] - 2026-11-23
 
 ### Improved
