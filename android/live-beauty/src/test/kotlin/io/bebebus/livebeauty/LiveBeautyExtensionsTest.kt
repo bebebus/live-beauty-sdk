@@ -25,7 +25,7 @@ class LiveBeautyExtensionsTest {
 
     @Test
     fun perfStatsUnpacksRawEightFloatTelemetry() {
-        val raw = floatArrayOf(4.25f, 4.10f, 30.0f, 1f, 0.98f, 0.85f, 645f, 120f)
+        val raw = floatArrayOf(4.25f, 4.10f, 30.0f, 1f, 0.98f, 0.85f, 645f, 120f, 2f, 5000f)
         val st = BeautyPerfStats.fromRaw(raw)
         assertEquals(4.25f, st.lastFrameMs, 1e-5f)
         assertEquals(4.10f, st.emaFrameMs, 1e-5f)
@@ -35,6 +35,7 @@ class LiveBeautyExtensionsTest {
         assertEquals(0.85f, st.hairShown, 1e-5f)
         assertEquals(645, st.activePassesMask)
         assertEquals(120L, st.frameCount)
+        assertEquals(2, st.activeFaces)
         assertEquals(BeautyPerfStats(), BeautyPerfStats.fromRaw(floatArrayOf(1f, 2f)))
     }
 
@@ -47,6 +48,7 @@ class LiveBeautyExtensionsTest {
         assertEquals(0.2f, sub.left, 1e-6f)
 
         val engine = LiveBeautyCppEngine(clockMs = { 2000L })
+        engine.setPipelineOptions(maxFaces = 2, frameDelayFrames = 1)
         engine.setVirtualBackgroundTexture(glTextureId = 7, aspect = 0.5625f, mode = VirtualBackgroundMode.VIRTUAL_IMAGE)
         engine.setSticker(0, LiveBeautySticker(anchor = StickerAnchor.EYES_BRIDGE, glTextureId = 9))
         engine.resetTracking()

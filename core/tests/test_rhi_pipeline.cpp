@@ -264,12 +264,79 @@ void testHairProtectionVirtualBgStickersAndTelemetry() {
     EXPECT_TRUE((st.activePassesMask & kPassSticker) != 0);
 }
 
+void testHairWeightedGuidedDualFaceAndFrameDelayRing() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId hairMask = dev.createTexture2D(216, 384, TextureFormat::kR8, nullptr);
+
+    auto cfg = BeautyConfig::koreanWaterGlow();
+    cfg.maxFaces = 2;
+    cfg.frameDelayFrames = 2;
+    engine.setConfig(cfg);
+
+    auto makeFaceMp = [](float cx, float fw) {
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = fw / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            const float mx = cx + xyz[i * 3] * scale;
+            const float my = (0.5f / aspect) + xyz[i * 3 + 1] * scale;
+            mpXy[i * 2] = mx;
+            mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mpXy[i * 2] = cx;
+            mpXy[i * 2 + 1] = 0.45f;
+        }
+        return mpXy;
+    };
+    const auto faceLeft = makeFaceMp(0.28f, 0.28f);
+    const auto faceRight = makeFaceMp(0.72f, 0.26f);
+    math::MultiFaceTracker::RawFaceInput pair[2] = {{faceLeft.data(), 478}, {faceRight.data(), 478}};
+
+    TextureId out = kInvalidTexture;
+    int64_t lastTs = 0;
+    for (int f = 0; f < 10; ++f) {
+        lastTs = 5000 + f * 33;
+        dev.calls.clear();
+        EXPECT_TRUE(engine.submitMultiFaceLandmarks(lastTs, pair, 2, 720, 1280, lastTs) == 2);
+        out = engine.processFrame(inputTex, 720, 1280, lastTs, lastTs, kInvalidTexture, 0.30f, 1.0f, hairMask, lastTs);
+    }
+
+    EXPECT_TRUE(out != kInvalidTexture && out != inputTex);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+
+    bool sawWeightBlur = false, sawWeightDiff = false, sawWeightCoeff = false;
+    int skinMaskDraws = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kGuidedWeightBlur) sawWeightBlur = true;
+        if (c.shader == ShaderId::kGuidedWeightDiff) sawWeightDiff = true;
+        if (c.shader == ShaderId::kGuidedWeightCoeff) sawWeightCoeff = true;
+        if (c.shader == ShaderId::kSkinMask) ++skinMaskDraws;
+    }
+    EXPECT_TRUE(sawWeightBlur);
+    EXPECT_TRUE(sawWeightDiff);
+    EXPECT_TRUE(sawWeightCoeff);
+    // Primary + Secondary face each issue feather + inner skin-mask draws = 4 draws
+    EXPECT_TRUE(skinMaskDraws == 4);
+
+    const auto& st = engine.stats();
+    EXPECT_TRUE(st.activeFaces == 2);
+    EXPECT_TRUE((st.activePassesMask & kPassDualFace) != 0);
+    EXPECT_TRUE((st.activePassesMask & kPassFrameDelay) != 0);
+    // FrameDelayRing with delayFrames=2 must display the frame from 2 frames earlier (66 ms lag)
+    EXPECT_TRUE(st.displayedTimestampMs == lastTs - 66);
+}
+
 }  // namespace
 
 int main() {
     testPassThroughZeroCost();
     testFullBeautyPipelineOrderingAndNoFeedbackLoop();
     testHairProtectionVirtualBgStickersAndTelemetry();
+    testHairWeightedGuidedDualFaceAndFrameDelayRing();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

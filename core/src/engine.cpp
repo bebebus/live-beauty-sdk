@@ -12,7 +12,7 @@ void LiveBeautyEngine::setConfig(const BeautyConfig& config) {
 }
 
 void LiveBeautyEngine::resetTracking() {
-    timeline_.reset();
+    faces_.reset();
     roiSelector_.reset();
     bodySmoother_.reset();
     guidedSpread_.reset();
@@ -42,37 +42,36 @@ void LiveBeautyEngine::clearStickers() {
 bool LiveBeautyEngine::submitFaceLandmarks(
     int64_t sampleTsMs, const float* mpXy, int pointCount,
     int frameWidth, int frameHeight, int64_t receivedMs) {
-    if (frameWidth <= 0 || frameHeight <= 0) return false;
+    math::MultiFaceTracker::RawFaceInput raw{mpXy, pointCount};
+    return submitMultiFaceLandmarks(sampleTsMs, &raw, 1, frameWidth, frameHeight, receivedMs) > 0;
+}
+
+int LiveBeautyEngine::submitMultiFaceLandmarks(
+    int64_t sampleTsMs, const math::MultiFaceTracker::RawFaceInput* faces, int faceCount,
+    int frameWidth, int frameHeight, int64_t receivedMs) {
+    if (frameWidth <= 0 || frameHeight <= 0) return 0;
     const float aspect = static_cast<float>(frameWidth) / static_cast<float>(frameHeight);
     if (frameWidth != lastWidth_ || frameHeight != lastHeight_) {
-        timeline_.setAspect(aspect);
+        faces_.setAspect(aspect);
         lastWidth_ = frameWidth;
         lastHeight_ = frameHeight;
     }
 
-    math::FaceMeshFrame mesh{};
-    if (!math::FaceMeshFrame::fromMediaPipe(mpXy, pointCount, aspect, mesh)) {
-        submitFaceMiss(sampleTsMs);
-        return false;
+    const int cappedCount = std::min(faceCount, std::clamp(config_.maxFaces, 1, math::MultiFaceTracker::kMaxFaces));
+    float cx = 0.0f, cy = 0.0f, fw = 0.0f;
+    const int valid = faces_.submitFaces(
+        sampleTsMs, faces, cappedCount, frameWidth, frameHeight, receivedMs, &cx, &cy, &fw);
+    if (valid > 0 && fw > 0.0f && cappedCount == 1) {
+        roiSelector_.onFace(cx, cy, fw, sampleTsMs, receivedMs);
+    } else if (valid == 0 || cappedCount > 1) {
+        // Multi-face mode uses full frame so secondary faces outside primary ROI remain visible
+        roiSelector_.onMiss();
     }
-
-    float state41[math::FaceGeometryConstants::kStateSize];
-    if (!math::FaceMeshFrame::faceGeometryFromMediaPipe(mpXy, pointCount, aspect, state41)) {
-        if (!math::FaceMeshFrame::fillGeometryState(
-                mesh.landmarks.data(), math::FaceMeshFrame::kCoordCount,
-                mesh.axisX(), mesh.axisY(), aspect, 0.0f, state41)) {
-            submitFaceMiss(sampleTsMs);
-            return false;
-        }
-    }
-
-    timeline_.add(sampleTsMs, state41, &mesh);
-    roiSelector_.onFace(mesh.centerX(), mesh.centerY(), mesh.faceWidth(), sampleTsMs, receivedMs);
-    return true;
+    return valid;
 }
 
 void LiveBeautyEngine::submitFaceMiss(int64_t sampleTsMs) {
-    timeline_.addMiss(sampleTsMs);
+    faces_.submitAllMiss(sampleTsMs);
     roiSelector_.onMiss();
 }
 
@@ -97,6 +96,7 @@ void LiveBeautyEngine::submitBodyMiss(int64_t /*sampleTsMs*/) {
 }
 
 CropRect LiveBeautyEngine::selectFaceRoi(int frameWidth, int frameHeight, int64_t nowMs) {
+    if (config_.maxFaces >= 2) return CropRect::full();
     return roiSelector_.select(frameWidth, frameHeight, nowMs);
 }
 
@@ -113,7 +113,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     if (width <= 0 || height <= 0 || inputTexture == rhi::kInvalidTexture) return inputTexture;
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     if (width != lastWidth_ || height != lastHeight_) {
-        timeline_.setAspect(aspect);
+        faces_.setAspect(aspect);
         lastWidth_ = width;
         lastHeight_ = height;
     }
@@ -122,23 +122,38 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const bool processing = config_.isProcessing() || (config_.enabled && !config_.compareOriginal && stickerCount_ > 0);
     loadFades_.update(governor_.level(), nowMs);
 
-    timeline_.update(nowMs);
-    const float* state41 = timeline_.at(frameTimestampMs);
+    // Optional cross-backend FrameDelayRing (aligns displayed camera frame with async MediaPipe landmarks)
+    rhi::TextureId displayTex = inputTexture;
+    int64_t displayTsMs = frameTimestampMs;
+    const int delayFrames = processing ? std::clamp(config_.frameDelayFrames, 0, 2) : 0;
+    if (delayFrames > 0) {
+        pipeline_.pushFrameDelay(inputTexture, frameTimestampMs, delayFrames, width, height, displayTex, displayTsMs);
+    }
+
+    faces_.update(nowMs);
+    auto& primaryTl = faces_.slot(0);
+    const float* state41 = primaryTl.at(displayTsMs);
     math::FaceTimeline::SmoothedMeshView meshView{};
-    const bool hasMesh = timeline_.meshAt(frameTimestampMs, meshView);
+    const bool hasMesh = primaryTl.meshAt(displayTsMs, meshView);
     if (hasMesh) {
         guidedSpread_.update(meshView.faceWidth() * static_cast<float>(width));
     }
 
+    // Optional secondary face (slot 1)
+    auto& secondaryTl = faces_.slot(1);
+    const float* secState41 = (config_.maxFaces >= 2) ? secondaryTl.at(displayTsMs) : nullptr;
+    math::FaceTimeline::SmoothedMeshView secMeshView{};
+    const bool hasSecMesh = (config_.maxFaces >= 2) && secondaryTl.meshAt(displayTsMs, secMeshView);
+
     const float* bodyState = bodySmoother_.update(
         hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
 
-    // Hair semantic temporal gate & rigid head-motion compensation affine
+    // Hair semantic temporal gate & rigid head-motion compensation affine (using aligned displayTsMs)
     const bool hasHairTex = (hairMaskTex != rhi::kInvalidTexture);
-    const int64_t effHairStamp = (hairMaskStampMs != kTimeInvalid) ? hairMaskStampMs : frameTimestampMs;
+    const int64_t effHairStamp = (hairMaskStampMs != kTimeInvalid) ? hairMaskStampMs : displayTsMs;
     const float hairLevel = hairGate_.update(
-        hasHairTex, effHairStamp, frameTimestampMs,
-        loadFades_.body(), timeline_.latest(), timeline_.missSince(), nowMs);
+        hasHairTex, effHairStamp, displayTsMs,
+        loadFades_.body(), primaryTl.latest(), primaryTl.missSince(), nowMs);
     const float neckWeight = (bodyState != nullptr && config_.neckLengthen > 0.0f) ? bodySmoother_.presence() : 0.0f;
     const float hairShown = hasHairTex ? hairGate_.shown(neckWeight) : 0.0f;
     const float hairBgShown = hasHairTex ? hairLevel : 0.0f;
@@ -151,15 +166,15 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             poseDisplay[i] = state41[22 + i];
         }
         float poseMask[math::HairMaskTuning::kPoseSize];
-        const int64_t newest = timeline_.latest();
+        const int64_t newest = primaryTl.latest();
         bool hasMaskPose = false;
         if (newest != kTimeInvalid) {
             if (effHairStamp <= newest) {
-                hasMaskPose = timeline_.poseAt(effHairStamp, poseMask);
-            } else if (timeline_.poseAt(newest, poseMask)) {
-                if (frameTimestampMs > newest) {
+                hasMaskPose = primaryTl.poseAt(effHairStamp, poseMask);
+            } else if (primaryTl.poseAt(newest, poseMask)) {
+                if (displayTsMs > newest) {
                     const float g = std::min(1.0f,
-                        static_cast<float>(effHairStamp - newest) / static_cast<float>(frameTimestampMs - newest));
+                        static_cast<float>(effHairStamp - newest) / static_cast<float>(displayTsMs - newest));
                     for (int i = 0; i < math::HairMaskTuning::kPoseSize; ++i) {
                         poseMask[i] += g * (poseDisplay[i] - poseMask[i]);
                     }
@@ -173,7 +188,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
 
     rhi::FrameInputs in{};
-    in.inputTexture = inputTexture;
+    in.inputTexture = displayTex;
     in.width = width;
     in.height = height;
     in.nowMs = nowMs;
@@ -183,11 +198,23 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.landmarks478x2 = hasMesh ? meshView.landmarks : nullptr;
     in.faceMeta15 = hasMesh ? meshView.meta : nullptr;
     in.hasIris = hasMesh && meshView.hasIris;
-    in.facePresence = timeline_.presence();
-    in.steadyFace = timeline_.steadyFace();
-    in.steadyEye = timeline_.steadyEye();
-    in.eyeMakeupKeep = timeline_.eyeMakeupKeep();
-    in.denoiseKeep = timeline_.denoiseKeep();
+    in.facePresence = primaryTl.presence();
+    in.steadyFace = primaryTl.steadyFace();
+    in.steadyEye = primaryTl.steadyEye();
+    in.eyeMakeupKeep = primaryTl.eyeMakeupKeep();
+    in.denoiseKeep = primaryTl.denoiseKeep();
+
+    in.secondaryFace.hasState = (secState41 != nullptr);
+    in.secondaryFace.state41 = secState41;
+    in.secondaryFace.hasMesh = hasSecMesh;
+    in.secondaryFace.landmarks478x2 = hasSecMesh ? secMeshView.landmarks : nullptr;
+    in.secondaryFace.meta15 = hasSecMesh ? secMeshView.meta : nullptr;
+    in.secondaryFace.hasIris = hasSecMesh && secMeshView.hasIris;
+    in.secondaryFace.presence = (config_.maxFaces >= 2) ? secondaryTl.presence() : 0.0f;
+    in.secondaryFace.steadyFace = secondaryTl.steadyFace();
+    in.secondaryFace.steadyEye = secondaryTl.steadyEye();
+    in.secondaryFace.eyeMakeupKeep = secondaryTl.eyeMakeupKeep();
+
     in.hasBody = (bodyState != nullptr);
     in.bodyState7 = bodyState;
     in.bodyPresence = bodySmoother_.presence();
@@ -211,7 +238,6 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const int64_t workNs = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
     governor_.onFrame(frameTimestampMs * 1000000LL, workNs, processing, nowMs);
 
-    // Update real-time telemetry
     const float frameMs = static_cast<float>(workNs) * 1e-6f;
     stats_.lastFrameMs = frameMs;
     stats_.emaFrameMs = (stats_.frameCount == 0) ? frameMs : (stats_.emaFrameMs * 0.9f + frameMs * 0.1f);
@@ -221,10 +247,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
     lastStatsNowMs_ = nowMs;
     stats_.loadLevel = governor_.level();
-    stats_.facePresence = timeline_.presence();
+    stats_.facePresence = std::max(primaryTl.presence(), (config_.maxFaces >= 2) ? secondaryTl.presence() : 0.0f);
     stats_.hairShown = hairShown;
-    stats_.activePassesMask = pipeline_.lastActivePassesMask();
+    stats_.activePassesMask = pipeline_.lastActivePassesMask() | (delayFrames > 0 ? rhi::kPassFrameDelay : 0u);
     stats_.frameCount++;
+    stats_.activeFaces = faces_.activeFaceCount();
+    stats_.displayedTimestampMs = displayTsMs;
 
     return outTex;
 }

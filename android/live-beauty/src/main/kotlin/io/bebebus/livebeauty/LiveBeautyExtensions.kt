@@ -49,12 +49,13 @@ data class BeautyPerfStats(
     val hairShown: Float = 0f,
     val activePassesMask: Int = 0,
     val frameCount: Long = 0L,
+    val activeFaces: Int = 0,
 ) {
     companion object {
-        const val RAW_SIZE = 8
+        const val RAW_SIZE = 10
 
         fun fromRaw(raw: FloatArray): BeautyPerfStats {
-            if (raw.size < RAW_SIZE) return BeautyPerfStats()
+            if (raw.size < 8) return BeautyPerfStats()
             return BeautyPerfStats(
                 lastFrameMs = raw[0],
                 emaFrameMs = raw[1],
@@ -64,6 +65,7 @@ data class BeautyPerfStats(
                 hairShown = raw[5],
                 activePassesMask = raw[6].toInt(),
                 frameCount = raw[7].toLong(),
+                activeFaces = if (raw.size >= 9) raw[8].toInt() else 0,
             )
         }
     }

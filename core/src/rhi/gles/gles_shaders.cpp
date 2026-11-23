@@ -156,6 +156,58 @@ void main() {
 }
 )";
 
+constexpr const char* kGuidedWeightBlurFrag = LB_GLSL_BLUR_COMMON R"(
+uniform sampler2D uTex1;
+vec4 weightedSample(vec2 uv) {
+    float w = clamp(texture2D(uTex1, uv).a * 1.04 - 0.02, 0.0, 1.0);
+    return vec4(texture2D(uTex0, uv).rgb * w, w);
+}
+void main() {
+    gl_FragColor = weightedSample(vC) * 0.2042 +
+                   (weightedSample(vA1) + weightedSample(vB1)) * 0.3040 +
+                   (weightedSample(vA2) + weightedSample(vB2)) * 0.0939;
+}
+)";
+
+constexpr const char* kGuidedWeightDiffFrag = LB_GLSL_BLUR_COMMON R"(
+uniform sampler2D uTex1;
+void main() {
+    vec4 sum = blur5();
+    vec3 mean = clamp(sum.rgb / max(sum.a, 0.02), 0.0, 1.0);
+    vec3 diff = texture2D(uTex1, vC).rgb - mean;
+    gl_FragColor = vec4(mean, clamp(length(diff) * 2.5, 0.0, 1.0));
+}
+)";
+
+constexpr const char* kGuidedWeightCoeffFrag = LB_GLSL_BLUR_COMMON R"(
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform vec4 uU0;
+float guidedCoeff(float s, float eps) {
+    float e = max(eps, 0.005);
+    float r = s * s / e;
+    float rp = r * sqrt(r);
+    float lo = clamp(sqrt(e) - 0.09, 0.12, 0.18);
+    return max(rp / (1.0 + rp), smoothstep(lo, 0.30, s));
+}
+vec3 evenMean(vec3 fineMean, float s, float evenness, float maskW) {
+    if (evenness <= 0.0) return fineMean;
+    vec3 macroMean = texture2D(uTex1, vC).rgb;
+    float dy = abs(dot(macroMean - fineMean, vec3(0.2126, 0.7152, 0.0722))) / 0.068;
+    float dy2 = dy * dy;
+    float boneKeep = 1.0 / (1.0 + dy2 * dy2);
+    float flatKeep = 1.0 - smoothstep(0.05, 0.14, s);
+    return mix(fineMean, macroMean, evenness * boneKeep * flatKeep * maskW);
+}
+void main() {
+    float s = blur5().a;
+    float w = clamp(texture2D(uTex2, vC).a * 1.04 - 0.02, 0.0, 1.0);
+    vec3 mean = evenMean(texture2D(uTex0, vC).rgb, s, uU0.w, w);
+    float a = mix(1.0, guidedCoeff(s, uU0.z), w);
+    gl_FragColor = vec4((1.0 - a) * mean, a);
+}
+)";
+
 constexpr const char* kSkinMaskFrag = LB_GLSL_PREC R"(
 varying vec3 vMaskWeights;
 void main() { gl_FragColor = vec4(clamp(vMaskWeights, 0.0, 1.0), 1.0); }
@@ -756,8 +808,11 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kDownsample:      return {kDownVert, kDownFrag};
         case ShaderId::kBlurRgb:         return {kBlurVert, kBlurRgbFrag};
         case ShaderId::kBlurAlpha:       return {kBlurVert, kBlurAlphaFrag};
-        case ShaderId::kGuidedDiff:      return {kBlurVert, kGuidedDiffFrag};
-        case ShaderId::kGuidedCoeff:     return {kBlurVert, kGuidedCoeffFrag};
+        case ShaderId::kGuidedDiff:         return {kBlurVert, kGuidedDiffFrag};
+        case ShaderId::kGuidedCoeff:        return {kBlurVert, kGuidedCoeffFrag};
+        case ShaderId::kGuidedWeightBlur:   return {kBlurVert, kGuidedWeightBlurFrag};
+        case ShaderId::kGuidedWeightDiff:   return {kBlurVert, kGuidedWeightDiffFrag};
+        case ShaderId::kGuidedWeightCoeff:  return {kBlurVert, kGuidedWeightCoeffFrag};
         case ShaderId::kMeshWarp:        return {kQuadVert, kPassThroughFrag};
         case ShaderId::kSkinMask:        return {kSkinMaskVert, kSkinMaskFrag};
         case ShaderId::kRetouchSkin:     return {kRetouchVert, kRetouchSkinFrag};

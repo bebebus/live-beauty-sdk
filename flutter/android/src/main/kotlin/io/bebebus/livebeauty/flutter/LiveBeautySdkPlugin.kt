@@ -4,7 +4,10 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import io.bebebus.livebeauty.LiveBeautyProcessor
+import io.bebebus.livebeauty.LiveBeautySticker
+import io.bebebus.livebeauty.StickerAnchor
 import io.bebebus.livebeauty.VideoEffectsConfig
+import io.bebebus.livebeauty.VirtualBackgroundMode
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -85,6 +88,70 @@ class LiveBeautySdkPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Strea
                 "resetTracking" -> {
                     LiveBeautyEngineRegistry.sharedProcessor?.resetTracking()
                     result.success(null)
+                }
+                "setPipelineOptions" -> {
+                    val map = call.arguments as? Map<*, *>
+                        ?: return result.error("invalid_args", "Expected options map.", null)
+                    val maxFaces = (map["maxFaces"] as? Number)?.toInt() ?: 1
+                    val frameDelayFrames = (map["frameDelayFrames"] as? Number)?.toInt() ?: 0
+                    ensureProcessor().setPipelineOptions(maxFaces, frameDelayFrames)
+                    result.success(null)
+                }
+                "setVirtualBackgroundTexture" -> {
+                    val map = call.arguments as? Map<*, *>
+                        ?: return result.error("invalid_args", "Expected virtual background map.", null)
+                    val glTex = (map["glTextureId"] as? Number)?.toInt() ?: 0
+                    val aspect = (map["aspect"] as? Number)?.toFloat() ?: 0f
+                    val modeStr = map["mode"] as? String ?: "none"
+                    val mode = VirtualBackgroundMode.entries.firstOrNull { it.wireName == modeStr }
+                        ?: VirtualBackgroundMode.NONE
+                    val strength = (map["strength"] as? Number)?.toFloat() ?: 1f
+                    ensureProcessor().setVirtualBackgroundTexture(glTex, aspect, mode, strength)
+                    result.success(null)
+                }
+                "setSticker" -> {
+                    val map = call.arguments as? Map<*, *>
+                        ?: return result.error("invalid_args", "Expected sticker payload.", null)
+                    val slot = (map["slot"] as? Number)?.toInt() ?: 0
+                    val stickerMap = map["sticker"] as? Map<*, *>
+                    val sticker = stickerMap?.let { sm ->
+                        val anchorId = (sm["anchor"] as? Number)?.toInt() ?: 0
+                        val anchor = StickerAnchor.entries.firstOrNull { it.id == anchorId }
+                            ?: StickerAnchor.FOREHEAD_CROWN
+                        LiveBeautySticker(
+                            enabled = sm["enabled"] as? Boolean ?: true,
+                            anchor = anchor,
+                            glTextureId = (sm["glTextureId"] as? Number)?.toInt() ?: 0,
+                            scale = (sm["scale"] as? Number)?.toFloat() ?: 1f,
+                            offsetX = (sm["offsetX"] as? Number)?.toFloat() ?: 0f,
+                            offsetY = (sm["offsetY"] as? Number)?.toFloat() ?: 0f,
+                            rotationRad = (sm["rotationRad"] as? Number)?.toFloat() ?: 0f,
+                            opacity = (sm["opacity"] as? Number)?.toFloat() ?: 1f,
+                            textureAspect = (sm["textureAspect"] as? Number)?.toFloat() ?: 1f,
+                        )
+                    }
+                    ensureProcessor().setSticker(slot, sticker)
+                    result.success(null)
+                }
+                "clearStickers" -> {
+                    LiveBeautyEngineRegistry.sharedProcessor?.clearStickers()
+                    result.success(null)
+                }
+                "getPerfStats" -> {
+                    val st = LiveBeautyEngineRegistry.sharedProcessor?.perfStats()
+                    result.success(
+                        mapOf(
+                            "lastFrameMs" to (st?.lastFrameMs ?: 0f),
+                            "emaFrameMs" to (st?.emaFrameMs ?: 0f),
+                            "fps" to (st?.fps ?: 0f),
+                            "loadLevel" to (st?.loadLevel ?: 0),
+                            "facePresence" to (st?.facePresence ?: 0f),
+                            "hairShown" to (st?.hairShown ?: 0f),
+                            "activePassesMask" to (st?.activePassesMask ?: 0),
+                            "frameCount" to (st?.frameCount ?: 0L),
+                            "activeFaces" to (st?.activeFaces ?: 0),
+                        ),
+                    )
                 }
                 "dispose" -> {
                     LiveBeautyEngineRegistry.sharedProcessor = null

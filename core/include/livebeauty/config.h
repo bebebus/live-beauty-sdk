@@ -121,6 +121,8 @@ struct BeautyConfig {
     float backgroundBlur = 0.0f;
     BackgroundMode backgroundMode = BackgroundMode::kNone;
     float virtualBgStrength = 1.0f;
+    int maxFaces = 1;           // 1 = single primary face (default), 2 = dual-face co-streaming
+    int frameDelayFrames = 0;   // 0 = lowest latency, 1..2 = FrameDelayRing zero-lag alignment
     std::string lutUrl;
     float lutIntensity = 1.0f;
 

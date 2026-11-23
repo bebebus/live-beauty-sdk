@@ -19,6 +19,8 @@ struct JniEngineHandle {
     livebeauty::rhi::PipelineAssets assets{};
     livebeauty::BackgroundMode bgModeOverride = livebeauty::BackgroundMode::kNone;
     float virtualBgStrengthOverride = 1.0f;
+    int maxFacesOverride = 1;
+    int frameDelayFramesOverride = 0;
 
     JniEngineHandle() : device(), engine(device) {}
 };
@@ -214,6 +216,8 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     cfg.contactLensStyle = livebeauty::parseContactLensStyle(toStdString(env, lensStyleStr));
     cfg.backgroundMode = handle->bgModeOverride;
     cfg.virtualBgStrength = handle->virtualBgStrengthOverride;
+    cfg.maxFaces = handle->maxFacesOverride;
+    cfg.frameDelayFrames = handle->frameDelayFramesOverride;
 
     handle->engine.setConfig(cfg);
 }
@@ -328,12 +332,50 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeProcessOesFrame(
 }
 
 JNIEXPORT void JNICALL
-Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
-    JNIEnv* env, jclass, jlong ptr, jfloatArray outStats8) {
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetPipelineOptions(
+    JNIEnv*, jclass, jlong ptr, jint maxFaces, jint frameDelayFrames) {
     auto* handle = fromHandle(ptr);
-    if (!handle || !outStats8 || env->GetArrayLength(outStats8) < 8) return;
+    if (!handle) return;
+    handle->maxFacesOverride = (maxFaces >= 2) ? 2 : 1;
+    handle->frameDelayFramesOverride = (frameDelayFrames < 0) ? 0 : (frameDelayFrames > 2 ? 2 : frameDelayFrames);
+    auto cfg = handle->engine.config();
+    cfg.maxFaces = handle->maxFacesOverride;
+    cfg.frameDelayFrames = handle->frameDelayFramesOverride;
+    handle->engine.setConfig(cfg);
+}
+
+JNIEXPORT jint JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitMultiFaceLandmarks(
+    JNIEnv* env, jclass, jlong ptr, jlong sampleTsMs, jfloatArray flatMpXy,
+    jint faceCount, jint pointsPerFace, jint width, jint height, jlong receivedMs) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !flatMpXy || faceCount <= 0 || pointsPerFace < 468) return 0;
+    const int nFaces = (faceCount > livebeauty::math::MultiFaceTracker::kMaxFaces)
+        ? livebeauty::math::MultiFaceTracker::kMaxFaces : faceCount;
+    const jsize needed = static_cast<jsize>(nFaces * pointsPerFace * 2);
+    if (env->GetArrayLength(flatMpXy) < needed) return 0;
+    jfloat* data = env->GetFloatArrayElements(flatMpXy, nullptr);
+    if (!data) return 0;
+    livebeauty::math::MultiFaceTracker::RawFaceInput inputs[livebeauty::math::MultiFaceTracker::kMaxFaces];
+    for (int i = 0; i < nFaces; ++i) {
+        inputs[i].mpXy = data + static_cast<size_t>(i * pointsPerFace * 2);
+        inputs[i].pointCount = pointsPerFace;
+    }
+    const int accepted = handle->engine.submitMultiFaceLandmarks(
+        sampleTsMs, inputs, nFaces, width, height, receivedMs);
+    env->ReleaseFloatArrayElements(flatMpXy, data, JNI_ABORT);
+    return accepted;
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
+    JNIEnv* env, jclass, jlong ptr, jfloatArray outStats) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !outStats) return;
+    const jsize len = env->GetArrayLength(outStats);
+    if (len < 8) return;
     const auto& st = handle->engine.stats();
-    const jfloat vals[8] = {
+    jfloat vals[10] = {
         st.lastFrameMs,
         st.emaFrameMs,
         st.fps,
@@ -342,8 +384,10 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
         st.hairShown,
         static_cast<float>(st.activePassesMask),
         static_cast<float>(st.frameCount),
+        static_cast<float>(st.activeFaces),
+        static_cast<float>(st.displayedTimestampMs >= 0 ? st.displayedTimestampMs : 0),
     };
-    env->SetFloatArrayRegion(outStats8, 0, 8, vals);
+    env->SetFloatArrayRegion(outStats, 0, len >= 10 ? 10 : 8, vals);
 }
 
 }  // extern "C"

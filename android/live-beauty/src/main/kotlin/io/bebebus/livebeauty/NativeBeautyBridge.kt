@@ -51,6 +51,19 @@ object NativeBeautyBridge {
         textureAspect: Float,
     )
     @JvmStatic external fun nativeClearStickers(handle: Long)
+    /** 配置高级管线选项：maxFaces (1..2 双人同屏) 与 frameDelayFrames (0..2 零滞后帧对齐环)。 */
+    @JvmStatic external fun nativeSetPipelineOptions(handle: Long, maxFaces: Int, frameDelayFrames: Int)
+    /** 批量提交 1..2 张人脸原始 468/478 点坐标（flatMpXy = faceCount * pointsPerFace * 2）。 */
+    @JvmStatic external fun nativeSubmitMultiFaceLandmarks(
+        handle: Long,
+        sampleTsMs: Long,
+        flatMpXy: FloatArray,
+        faceCount: Int,
+        pointsPerFace: Int,
+        width: Int,
+        height: Int,
+        receivedMs: Long,
+    ): Int
     @JvmStatic external fun nativeSetConfig(
         handle: Long,
         enabled: Boolean,

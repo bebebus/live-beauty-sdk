@@ -267,6 +267,55 @@ fragment float4 fs_guided_coeff(BlurOut in [[stage_in]],
     return float4((1.0f - a) * mean, a);
 }
 
+inline float4 weightedSampleMtl(texture2d<float> tex0, texture2d<float> weightTex, float2 uv) {
+    float2 muv = toMtlUv(uv);
+    float w = clamp(weightTex.sample(kLinearClamp, muv).a * 1.04f - 0.02f, 0.0f, 1.0f);
+    return float4(tex0.sample(kLinearClamp, muv).rgb * w, w);
+}
+
+fragment float4 fs_guided_weight_blur(BlurOut in [[stage_in]],
+                                      texture2d<float> tex0 [[texture(0)]],
+                                      texture2d<float> tex1 [[texture(1)]]) {
+    return weightedSampleMtl(tex0, tex1, in.c) * 0.2042f +
+           (weightedSampleMtl(tex0, tex1, in.a1) + weightedSampleMtl(tex0, tex1, in.b1)) * 0.3040f +
+           (weightedSampleMtl(tex0, tex1, in.a2) + weightedSampleMtl(tex0, tex1, in.b2)) * 0.0939f;
+}
+
+fragment float4 fs_guided_weight_diff(BlurOut in [[stage_in]],
+                                      texture2d<float> tex0 [[texture(0)]],
+                                      texture2d<float> tex1 [[texture(1)]]) {
+    float4 sum = blur5Sample(tex0, in);
+    float3 mean = clamp(sum.rgb / max(sum.a, 0.02f), 0.0f, 1.0f);
+    float3 diff = tex1.sample(kLinearClamp, toMtlUv(in.c)).rgb - mean;
+    return float4(mean, clamp(length(diff) * 2.5f, 0.0f, 1.0f));
+}
+
+fragment float4 fs_guided_weight_coeff(BlurOut in [[stage_in]],
+                                       texture2d<float> tex0 [[texture(0)]],
+                                       texture2d<float> tex1 [[texture(1)]],
+                                       texture2d<float> tex2 [[texture(2)]],
+                                       constant Uniforms& uni [[buffer(1)]]) {
+    float s = blur5Sample(tex0, in).a;
+    float w = clamp(tex2.sample(kLinearClamp, toMtlUv(in.c)).a * 1.04f - 0.02f, 0.0f, 1.0f);
+    float eps = max(uni.u[0].z, 0.005f);
+    float evenness = uni.u[0].w;
+    float3 fineMean = tex0.sample(kLinearClamp, toMtlUv(in.c)).rgb;
+    float3 mean = fineMean;
+    if (evenness > 0.0f) {
+        float3 macroMean = tex1.sample(kLinearClamp, toMtlUv(in.c)).rgb;
+        float dy = abs(luma709(macroMean - fineMean)) / 0.068f;
+        float dy2 = dy * dy;
+        float boneKeep = 1.0f / (1.0f + dy2 * dy2);
+        float flatKeep = 1.0f - smoothstep(0.05f, 0.14f, s);
+        mean = mix(fineMean, macroMean, evenness * boneKeep * flatKeep * w);
+    }
+    float r = s * s / eps;
+    float rp = r * sqrt(r);
+    float lo = clamp(sqrt(eps) - 0.09f, 0.12f, 0.18f);
+    float a = mix(1.0f, max(rp / (1.0f + rp), smoothstep(lo, 0.30f, s)), w);
+    return float4((1.0f - a) * mean, a);
+}
+
 fragment float4 fs_skin_mask(SkinMaskOut in [[stage_in]]) {
     return float4(clamp(in.w, 0.0f, 1.0f), 1.0f);
 }

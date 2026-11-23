@@ -122,8 +122,11 @@ struct MetalDevice::Impl {
             case ShaderId::kDownsample:      vsName = @"vs_down";      fsName = @"fs_down"; break;
             case ShaderId::kBlurRgb:         vsName = @"vs_blur";      fsName = @"fs_blur_rgb"; break;
             case ShaderId::kBlurAlpha:       vsName = @"vs_blur";      fsName = @"fs_blur_alpha"; break;
-            case ShaderId::kGuidedDiff:      vsName = @"vs_blur";      fsName = @"fs_guided_diff"; break;
-            case ShaderId::kGuidedCoeff:     vsName = @"vs_blur";      fsName = @"fs_guided_coeff"; break;
+            case ShaderId::kGuidedDiff:         vsName = @"vs_blur";      fsName = @"fs_guided_diff"; break;
+            case ShaderId::kGuidedCoeff:        vsName = @"vs_blur";      fsName = @"fs_guided_coeff"; break;
+            case ShaderId::kGuidedWeightBlur:   vsName = @"vs_blur";      fsName = @"fs_guided_weight_blur"; break;
+            case ShaderId::kGuidedWeightDiff:   vsName = @"vs_blur";      fsName = @"fs_guided_weight_diff"; break;
+            case ShaderId::kGuidedWeightCoeff:  vsName = @"vs_blur";      fsName = @"fs_guided_weight_coeff"; break;
             case ShaderId::kMeshWarp:        vsName = @"vs_quad";      fsName = @"fs_pass_through"; break;
             case ShaderId::kSkinMask:        vsName = @"vs_skin_mask"; fsName = @"fs_skin_mask"; break;
             case ShaderId::kRetouchSkin:     vsName = @"vs_retouch";   fsName = @"fs_retouch_skin"; break;

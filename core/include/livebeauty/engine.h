@@ -11,6 +11,7 @@
 #include "livebeauty/math/face_roi_selector.h"
 #include "livebeauty/math/face_timeline.h"
 #include "livebeauty/math/hair_mask_tuning.h"
+#include "livebeauty/math/multi_face_tracker.h"
 #include "livebeauty/math/sticker_transform.h"
 #include "livebeauty/rhi/render_pipeline.h"
 
@@ -26,12 +27,15 @@ struct PerfStats {
     float hairShown = 0.0f;
     uint32_t activePassesMask = 0;
     int64_t frameCount = 0;
+    int activeFaces = 0;
+    int64_t displayedTimestampMs = kTimeInvalid;
 };
 
 /**
  * Unified cross-platform C++17 beauty engine facade.
- * Combines timeline smoothing, ROI selection, hair motion compensation, 2D AR stickers,
- * load governor, body/face geometry, telemetry and RHI RenderPipeline.
+ * Combines multi-face timeline smoothing (up to 2 simultaneous faces), ROI selection,
+ * hair motion compensation + hair-weighted guided filter, FrameDelayRing zero-lag alignment,
+ * 2D AR stickers, virtual background replacement, load governor, telemetry and RHI RenderPipeline.
  */
 class LiveBeautyEngine {
 public:
@@ -49,9 +53,12 @@ public:
     void setSticker(int slot, const math::StickerLayerConfig& layer);
     void clearStickers();
 
-    /** Feed asynchronous MediaPipe 468/478-pt face landmarks (y-down normalized). */
+    /** Feed asynchronous MediaPipe 468/478-pt single primary face landmarks (y-down normalized). */
     bool submitFaceLandmarks(int64_t sampleTsMs, const float* mpXy, int pointCount,
                              int frameWidth, int frameHeight, int64_t receivedMs);
+    /** Feed 0..2 simultaneous MediaPipe 468/478-pt faces (minimum-cost ID-preserving association). */
+    int submitMultiFaceLandmarks(int64_t sampleTsMs, const math::MultiFaceTracker::RawFaceInput* faces,
+                                 int faceCount, int frameWidth, int frameHeight, int64_t receivedMs);
     void submitFaceMiss(int64_t sampleTsMs);
 
     /** Feed asynchronous MediaPipe 33-pt pose landmarks. */
@@ -78,13 +85,14 @@ public:
         int64_t hairMaskStampMs = kTimeInvalid);
 
     int loadLevel() const { return governor_.level(); }
-    float facePresence() const { return timeline_.presence(); }
+    float facePresence() const { return faces_.slot(0).presence(); }
+    int activeFaceCount() const { return faces_.activeFaceCount(); }
     const PerfStats& stats() const { return stats_; }
 
 private:
     BeautyConfig config_;
     rhi::RenderPipeline pipeline_;
-    math::FaceTimeline timeline_;
+    math::MultiFaceTracker faces_;
     math::FaceRoiSelector roiSelector_;
     math::BodyGeometrySmoother bodySmoother_;
     math::EffectsLoadGovernor governor_;

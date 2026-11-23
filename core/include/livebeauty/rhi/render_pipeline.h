@@ -30,6 +30,8 @@ enum PassBit : uint32_t {
     kPassMakeup    = 1u << 8,
     kPassSticker   = 1u << 9,
     kPassDenoise   = 1u << 10,
+    kPassDualFace  = 1u << 11,
+    kPassFrameDelay = 1u << 12,
 };
 
 /** Static makeup atlases, virtual background & 3D LUT texture handles uploaded once by platform host. */
@@ -81,6 +83,20 @@ struct FrameInputs {
     std::array<math::StickerLayerConfig, math::kMaxStickerLayers> stickers{};
     int stickerCount = 0;
 
+    // Optional secondary tracked face (when config.maxFaces == 2)
+    struct SecondaryFace {
+        bool hasState = false;
+        const float* state41 = nullptr;
+        bool hasMesh = false;
+        const float* landmarks478x2 = nullptr;
+        const float* meta15 = nullptr;
+        bool hasIris = false;
+        float presence = 0.0f;
+        float steadyFace = 1.0f;
+        float steadyEye = 1.0f;
+        float eyeMakeupKeep = 1.0f;
+    } secondaryFace{};
+
     // Load fades & tuning
     float loadFadeBody = 1.0f;
     float loadFadeFace = 1.0f;
@@ -106,6 +122,15 @@ public:
     void resetTemporal();
     void releaseGpuResources();
 
+    /**
+     * Cross-backend FrameDelayRing (0..2 frames): copies inputTex into a small ring buffer and
+     * returns the texture & timestamp from `delayFrames` frames ago so rendering aligns strictly
+     * with asynchronous MediaPipe face inference. Zero allocation when delayFrames == 0.
+     */
+    void pushFrameDelay(
+        TextureId inputTex, int64_t inputTsMs, int delayFrames, int width, int height,
+        TextureId& outTex, int64_t& outTsMs);
+
     /** Execute full beauty RenderGraph and return output RGBA texture handle. */
     TextureId render(const BeautyConfig& config, const FrameInputs& in);
     uint32_t lastActivePassesMask() const { return lastActivePassesMask_; }
@@ -113,17 +138,19 @@ public:
 private:
     void ensureResources(int width, int height);
     void ensureStaticBuffers();
-    void renderGuidedFilter(TextureId srcTex, int width, int height, float eps, float evenness, float spread);
-    void renderSkinMask(const float* landmarks478x2, bool frontFaceCw, int width, int height);
+    void renderGuidedFilter(TextureId srcTex, int width, int height, float eps, float evenness, float spread,
+                            TextureId hairWeightTex = kInvalidTexture);
+    void renderSkinMask(const float* landmarks478x2, bool frontFaceCw, int width, int height, bool clearFirst = true);
     void renderHairAlpha(TextureId hairMaskTex, float hairShown, const float* hairAffine8,
                          const float* ovalState41, float aspect, bool clearRgbToZero);
-    void renderStickers(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
-                        int width, int height, const FrameInputs& in,
-                        const float* landmarks478x2, float presence);
     void renderMakeup(
         RenderTargetId targetRt, TextureId baseTex, int width, int height,
         const BeautyConfig& cfg, const float* landmarks478x2, const float* meta15,
-        bool hasIris, bool frontFaceCw, float presence, float steadyEye, float eyeMakeupKeep);
+        bool hasIris, bool frontFaceCw, float presence, float steadyEye, float eyeMakeupKeep,
+        bool copyBaseFirst = true);
+    void renderStickers(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
+                        int width, int height, const FrameInputs& in,
+                        const float* landmarks478x2, const float* meta15, float presence);
 
     IRhiDevice& device_;
     PipelineAssets assets_{};
@@ -181,8 +208,18 @@ private:
     BufferId ibLeftEye_ = kInvalidBuffer;
     BufferId ibSticker_ = kInvalidBuffer;
 
+    // Cross-backend FrameDelayRing (allocated lazily only when frameDelayFrames > 0)
+    static constexpr int kMaxDelaySlots = 3;
+    RenderTargetId rtDelay_[kMaxDelaySlots] = {kInvalidRenderTarget, kInvalidRenderTarget, kInvalidRenderTarget};
+    int64_t delayStamps_[kMaxDelaySlots] = {kTimeInvalid, kTimeInvalid, kTimeInvalid};
+    int delayW_ = 0;
+    int delayH_ = 0;
+    int delayWriteIdx_ = 0;
+    int delayCount_ = 0;
+
     // Reusable CPU staging buffers (zero per-frame heap allocation)
     math::FaceMeshDeformer deformer_;
+    math::FaceMeshDeformer deformer2_;
     std::array<float, math::FaceMeshFrame::kCoordCount> liftedLandmarks_{};
     std::array<float, math::FaceGeometryConstants::kStateSize> liftedState_{};
     std::array<float, (math::FaceMeshTopology::kFaceVertexCount + math::FaceMeshTopology::kOvalVertexCount) * 5> skinMaskVerts_{};

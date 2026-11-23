@@ -33,6 +33,10 @@ SDK 与推流 / RTC 传输层**彻底解耦**——不绑定任何特定推流�
   - 内置 **10 张 `512×512`（`64³`）专业直播间 3D LUT**（`natural_studio`、`clear_white`、`peach_milk`、`pure_pink`、`korean_glow`、`japanese_airy`、`soft_film`、`night_vibe`、`champagne_glam`、`sweet_berry`），同时支持 `https://` 远端 LUT 动态缓存热切换。
 - **5 轴美体微整、人像背景虚化 & 无绿幕虚拟背景替换**
   - 基于 33 点姿态估计支持细腰、丰胸、长腿、瘦肩、天鹅颈；结合人像分割 + 头发语义飞发合并遮罩，同时支持 **人像虚化（Portrait Bokeh）** 与 **无绿幕虚拟背景图片替换（自动居中 Aspect-Fill / 虚拟背景柔化）**。
+- **双人同屏独立美颜 & 发际线加权导向滤波 & 跨后端 `FrameDelayRing`**
+  - 内置最优最小代价匹配多人脸关联器（`MultiFaceTracker`，支持 `maxFaces = 2` 双人连麦/合拍同屏独立 478 点微整、原位精修、合并皮肤遮罩、6 层美妆与 2D 贴纸，零额外 1080p FBO 且交叉走位不互跳 ID）。
+  - 头发加权双频导向滤波（`kGuidedWeightBlur/Diff/Coeff`）在 GLES 与 Metal 双端对齐落地，彻底消除刘海/发际线紧邻白皙皮肤时的渗黑发灰光晕。
+  - 更多 **CameraX (OES) / WebRTC / Agora / Zego / Tencent TRTC** 完整接入代码配方见 [docs/integration-recipes.md](./docs/integration-recipes.md)。
 - **人脸锚定 2D AR 挂件贴纸 & CameraX OES 一步直入 & 实时遥测**
   - C++17 管线内置最多 **4 层同屏 2D AR 贴纸**（支持 `FOREHEAD_CROWN` 头饰 / `EYES_BRIDGE` 眼镜 / `NOSE_TIP` 鼻贴 / `CHEEKS` 颊贴 / `FULL_FACE` 面具），直接锁定变形后 478 点人脸姿态随头平移缩放旋转，零额外 1080p FBO 开销。
   - 支持 Android `GL_TEXTURE_EXTERNAL_OES` + `SurfaceTexture` 4×4 矩阵一步直入（`LiveBeautyProcessor.processOes(...)`），并提供实时性能遥测 `BeautyPerfStats`（帧耗时、EMA、FPS、负载档位、活跃 Pass 掩码）。

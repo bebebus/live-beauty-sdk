@@ -15,6 +15,7 @@
 #include "livebeauty/math/face_roi_selector.h"
 #include "livebeauty/math/face_timeline.h"
 #include "livebeauty/math/hair_mask_tuning.h"
+#include "livebeauty/math/multi_face_tracker.h"
 #include "livebeauty/math/sticker_transform.h"
 
 using namespace livebeauty;
@@ -364,6 +365,54 @@ void testStickerTransformAnchorsAndRotation() {
     EXPECT_TRUE(!StickerTransform::buildQuadVertices(cfg, frame.landmarks.data(), frame.meta.data(), aspect, quad));
 }
 
+void testMultiFaceTrackerStableAssociationAndCrossing() {
+    const float aspect = 9.0f / 16.0f;
+    auto makeMp = [&](float cx, float cy, float fw) {
+        std::array<float, FaceMeshFrame::kCoordCount> glPts{}, mp{};
+        makeCanonicalFace(aspect, cx, cy, fw, 0.0f, 0.0f, 0.0f, glPts);
+        for (int i = 0; i < 478; ++i) {
+            mp[i * 2] = glPts[i * 2];
+            mp[i * 2 + 1] = 1.0f - glPts[i * 2 + 1];
+        }
+        return mp;
+    };
+
+    MultiFaceTracker tracker;
+    tracker.setAspect(aspect);
+
+    // Frame 0: Face A (left, larger fw=0.34) & Face B (right, smaller fw=0.28)
+    auto fA0 = makeMp(0.30f, 0.50f, 0.34f);
+    auto fB0 = makeMp(0.70f, 0.50f, 0.28f);
+    MultiFaceTracker::RawFaceInput pair0[2] = {{fB0.data(), 478}, {fA0.data(), 478}};
+    EXPECT_TRUE(tracker.submitFaces(1000, pair0, 2, 720, 1280, 1000) == 2);
+    tracker.update(1000);
+    // Larger face (A at x=0.30) must enter primary slot 0, smaller face (B at x=0.70) enters slot 1.
+    FaceTimeline::SmoothedMeshView mv0{}, mv1{};
+    EXPECT_TRUE(tracker.slot(0).meshAt(1000, mv0));
+    EXPECT_TRUE(tracker.slot(1).meshAt(1000, mv1));
+    EXPECT_NEAR(mv0.centerX(), 0.30f, 0.02f);
+    EXPECT_NEAR(mv1.centerX(), 0.70f, 0.02f);
+
+    // Frame 1: Detector returns faces in reversed array order after slight motion; slot IDs must NOT swap!
+    auto fA1 = makeMp(0.32f, 0.50f, 0.34f);
+    auto fB1 = makeMp(0.68f, 0.50f, 0.28f);
+    MultiFaceTracker::RawFaceInput pair1[2] = {{fB1.data(), 478}, {fA1.data(), 478}};
+    EXPECT_TRUE(tracker.submitFaces(1033, pair1, 2, 720, 1280, 1033) == 2);
+    tracker.update(1033);
+    EXPECT_TRUE(tracker.slot(0).meshAt(1033, mv0));
+    EXPECT_TRUE(tracker.slot(1).meshAt(1033, mv1));
+    EXPECT_TRUE(mv0.centerX() < 0.40f);  // Still Face A
+    EXPECT_TRUE(mv1.centerX() > 0.60f);  // Still Face B
+
+    // Ramp presence over 6 frames so both faces are active
+    for (int k = 2; k < 8; ++k) {
+        const int64_t ts = 1000 + k * 33;
+        EXPECT_TRUE(tracker.submitFaces(ts, pair1, 2, 720, 1280, ts) == 2);
+        tracker.update(ts);
+    }
+    EXPECT_TRUE(tracker.activeFaceCount() == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -374,6 +423,7 @@ int main() {
     testBodyAndLoadGovernor();
     testHairMaskTuningAndMotionComp();
     testStickerTransformAnchorsAndRotation();
+    testMultiFaceTrackerStableAssociationAndCrossing();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

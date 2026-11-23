@@ -120,6 +120,19 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall call) async {
         calls.add(call);
+        if (call.method == 'getPerfStats') {
+          return <String, Object>{
+            'lastFrameMs': 3.5,
+            'emaFrameMs': 3.8,
+            'fps': 30.0,
+            'loadLevel': 0,
+            'facePresence': 1.0,
+            'hairShown': 0.9,
+            'activePassesMask': 2245,
+            'frameCount': 90,
+            'activeFaces': 2,
+          };
+        }
         return null;
       });
     });
@@ -145,6 +158,54 @@ void main() {
         equals(<String>['initialize', 'setConfig', 'resetTracking', 'dispose']),
       );
       expect(() => controller.resetTracking(), throwsStateError);
+    });
+
+    test('dispatches v2.2.0 pipeline options, virtual background, stickers and perfStats', () async {
+      final LiveBeautyController controller = LiveBeautyController();
+      await controller.initialize();
+      await controller.setPipelineOptions(
+        const LiveBeautyPipelineOptions(maxFaces: 2, frameDelayFrames: 1),
+      );
+      await controller.setVirtualBackgroundTexture(
+        glTextureId: 42,
+        aspect: 9 / 16,
+        mode: LiveBeautyVirtualBackgroundMode.virtualImage,
+        strength: 0.95,
+      );
+      await controller.setSticker(
+        0,
+        const LiveBeautySticker(
+          anchor: LiveBeautyStickerAnchor.foreheadCrown,
+          glTextureId: 77,
+          scale: 1.1,
+        ),
+      );
+      final LiveBeautyPerfStats stats = await controller.getPerfStats();
+      expect(stats.activeFaces, equals(2));
+      expect(stats.fps, closeTo(30.0, 1e-6));
+      expect(stats.emaFrameMs, closeTo(3.8, 1e-6));
+      expect(stats.frameCount, equals(90));
+
+      await controller.clearStickers();
+      expect(
+        calls.map((MethodCall c) => c.method).toList(),
+        equals(<String>[
+          'initialize',
+          'setPipelineOptions',
+          'setVirtualBackgroundTexture',
+          'setSticker',
+          'getPerfStats',
+          'clearStickers',
+        ]),
+      );
+      expect(
+        () => controller.setPipelineOptions(const LiveBeautyPipelineOptions(maxFaces: 3)),
+        throwsRangeError,
+      );
+      expect(
+        () => controller.setSticker(4, null),
+        throwsRangeError,
+      );
     });
 
     test('parses native telemetry events cleanly', () {

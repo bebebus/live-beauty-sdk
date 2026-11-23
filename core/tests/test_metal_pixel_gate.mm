@@ -395,6 +395,143 @@ void testStickerOverlayProbeS1(MetalDevice& dev) {
     dev.destroyTexture(baseTex);
 }
 
+// H2: Hair-weighted guided filter prevents dark hair pixels (alpha=0) from bleeding gray halo into adjacent fair skin (alpha=255).
+void testHairWeightedGuidedNoBleedProbeH2(MetalDevice& dev) {
+    constexpr int kW = 64, kH = 64;
+    // Left half = pitch-black hair (10,10,10), Right half = fair warm skin (215,175,155)
+    std::vector<uint8_t> imgPx(kW * kH * 4);
+    std::vector<uint8_t> weightPx(kW * kH * 4);
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            const int i = (y * kW + x) * 4;
+            if (x < 32) {
+                imgPx[i+0] = 10; imgPx[i+1] = 10; imgPx[i+2] = 10; imgPx[i+3] = 255;
+                weightPx[i+0] = 0; weightPx[i+1] = 0; weightPx[i+2] = 0; weightPx[i+3] = 0;  // hair
+            } else {
+                imgPx[i+0] = 215; imgPx[i+1] = 175; imgPx[i+2] = 155; imgPx[i+3] = 255;
+                weightPx[i+0] = 255; weightPx[i+1] = 0; weightPx[i+2] = 0; weightPx[i+3] = 255;  // skin
+            }
+        }
+    }
+    const TextureId imgTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, imgPx.data());
+    const TextureId weightTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, weightPx.data());
+    const RenderTargetId rtBlur = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+    const RenderTargetId rtDiff = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+    const RenderTargetId rtUnwBlur = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+    const RenderTargetId rtUnwDiff = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+    // 1. Hair-weighted guided filter (kGuidedWeightBlur -> kGuidedWeightDiff)
+    {
+        RenderState st{};
+        TextureBindings tb{}; tb.bind(0, imgTex); tb.bind(1, weightTex);
+        UniformBlock ub{}; ub.push(1.25f / kW, 0.0f, 0.0f, 0.0f);
+        dev.beginPass(rtBlur, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kGuidedWeightBlur, st, tb, ub);
+        dev.endPass();
+    }
+    {
+        RenderState st{};
+        TextureBindings tb{}; tb.bind(0, dev.textureOf(rtBlur)); tb.bind(1, imgTex);
+        UniformBlock ub{}; ub.push(0.0f, 1.25f / kH, 0.0f, 0.0f);
+        dev.beginPass(rtDiff, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kGuidedWeightDiff, st, tb, ub);
+        dev.endPass();
+    }
+    // 2. Unweighted reference (kBlurRgb -> kGuidedDiff)
+    {
+        RenderState st{};
+        TextureBindings tb{}; tb.bind(0, imgTex);
+        UniformBlock ub{}; ub.push(1.25f / kW, 0.0f, 0.0f, 0.0f);
+        dev.beginPass(rtUnwBlur, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kBlurRgb, st, tb, ub);
+        dev.endPass();
+    }
+    {
+        RenderState st{};
+        TextureBindings tb{}; tb.bind(0, dev.textureOf(rtUnwBlur)); tb.bind(1, imgTex);
+        UniformBlock ub{}; ub.push(0.0f, 1.25f / kH, 0.0f, 0.0f);
+        dev.beginPass(rtUnwDiff, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kGuidedDiff, st, tb, ub);
+        dev.endPass();
+    }
+
+    std::vector<uint8_t> outW(kW * kH * 4, 0), outU(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rtDiff), outW.data(), kW, kH));
+    EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rtUnwDiff), outU.data(), kW, kH));
+    // Adjacent to black hair boundary: hair-weighted mean dramatically eliminates dark-hair bleed vs unweighted!
+    const int adj1 = (32 * kW + 33) * 4;
+    const int adj2 = (32 * kW + 34) * 4;
+    EXPECT_TRUE(static_cast<int>(outW[adj1 + 0]) - static_cast<int>(outU[adj1 + 0]) >= 35);
+    EXPECT_TRUE(outW[adj2 + 0] >= 205);
+    EXPECT_TRUE(outW[adj2 + 1] >= 168);
+
+    dev.destroyRenderTarget(rtUnwDiff);
+    dev.destroyRenderTarget(rtUnwBlur);
+    dev.destroyRenderTarget(rtDiff);
+    dev.destroyRenderTarget(rtBlur);
+    dev.destroyTexture(weightTex);
+    dev.destroyTexture(imgTex);
+}
+
+// M1: Dual-face co-streaming independently brightens/beautifies both faces simultaneously on Metal GPU.
+void testDualFaceCoStreamingMetalProbeM1(MetalDevice& dev) {
+    constexpr int kW = 160, kH = 240;
+    std::vector<uint8_t> framePx(kW * kH * 4);
+    for (int i = 0; i < kW * kH; ++i) {
+        framePx[i * 4 + 0] = 178;
+        framePx[i * 4 + 1] = 142;
+        framePx[i * 4 + 2] = 122;
+        framePx[i * 4 + 3] = 255;
+    }
+    const TextureId inputTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, framePx.data());
+    LiveBeautyEngine engine(dev);
+    BeautyConfig cfg = BeautyConfig::naturalStudio();
+    cfg.maxFaces = 2;
+    cfg.whiten = 0.70f;
+    cfg.lutUrl = "";
+    engine.setConfig(cfg);
+
+    auto makeFace = [](float cx, float fw) {
+        std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+        const float aspect = static_cast<float>(kW) / static_cast<float>(kH);
+        const float scale = fw / FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+            const float mx = cx + xyz[i * 3] * scale;
+            const float my = (0.5f / aspect) + xyz[i * 3 + 1] * scale;
+            mpXy[i * 2] = mx;
+            mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mpXy[i * 2] = cx;
+            mpXy[i * 2 + 1] = 0.45f;
+        }
+        return mpXy;
+    };
+    const auto fL = makeFace(0.27f, 0.30f);
+    const auto fR = makeFace(0.73f, 0.30f);
+    MultiFaceTracker::RawFaceInput pair[2] = {{fL.data(), 478}, {fR.data(), 478}};
+
+    TextureId outTex = kInvalidTexture;
+    for (int f = 0; f < 6; ++f) {
+        const int64_t ts = 3000 + f * 33;
+        EXPECT_TRUE(engine.submitMultiFaceLandmarks(ts, pair, 2, kW, kH, ts) == 2);
+        outTex = engine.processFrame(inputTex, kW, kH, ts, ts);
+    }
+    EXPECT_TRUE(outTex != kInvalidTexture && outTex != inputTex);
+    EXPECT_TRUE(engine.activeFaceCount() == 2);
+
+    std::vector<uint8_t> outPx(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(outTex, outPx.data(), kW, kH));
+    const int leftFaceIdx = ((kH / 2) * kW + static_cast<int>(kW * 0.27f)) * 4;
+    const int rightFaceIdx = ((kH / 2) * kW + static_cast<int>(kW * 0.73f)) * 4;
+    EXPECT_TRUE(outPx[leftFaceIdx] > framePx[leftFaceIdx]);
+    EXPECT_TRUE(outPx[rightFaceIdx] > framePx[rightFaceIdx]);
+
+    engine.releaseGpuResources();
+    dev.destroyTexture(inputTex);
+}
+
 }  // namespace
 
 int main() {
@@ -410,9 +547,11 @@ int main() {
         testEndToEndMetalBeautyEngine(dev);
         testVirtualBackgroundAndHairFlyawayProbeV1H1(dev);
         testStickerOverlayProbeS1(dev);
+        testHairWeightedGuidedNoBleedProbeH2(dev);
+        testDualFaceCoStreamingMetalProbeM1(dev);
 
         if (gFailures == 0) {
-            std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, S1, E2E) passed!\n";
+            std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, E2E) passed!\n";
             return 0;
         }
         std::cerr << "FAIL  " << gFailures << " Metal GPU pixel gate assertion(s) failed.\n";

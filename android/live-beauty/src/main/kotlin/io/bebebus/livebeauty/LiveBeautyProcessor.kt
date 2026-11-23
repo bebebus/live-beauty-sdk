@@ -74,6 +74,11 @@ class LiveBeautyProcessor(
         activeCppEngine?.clearStickers()
     }
 
+    /** 配置双人同屏人数上限（1..2）与 C++ 零滞后帧对齐环帧数（0..2）。 */
+    fun setPipelineOptions(maxFaces: Int = 1, frameDelayFrames: Int = 0) {
+        activeCppEngine?.setPipelineOptions(maxFaces, frameDelayFrames)
+    }
+
     /** 读取 C++17 内核实时性能遥测快照。 */
     fun perfStats(): BeautyPerfStats = activeCppEngine?.perfStats() ?: BeautyPerfStats()
 

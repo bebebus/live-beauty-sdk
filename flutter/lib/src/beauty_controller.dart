@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 import 'beauty_config.dart';
+import 'beauty_extensions.dart';
 
 /// Asynchronous runtime events emitted by the native Live Beauty engine.
 sealed class LiveBeautyEvent {
@@ -121,6 +122,66 @@ class LiveBeautyController {
   Future<void> resetTracking() async {
     _ensureNotDisposed();
     await _methodChannel.invokeMethod<void>('resetTracking');
+  }
+
+  /// Configures dual-face co-streaming (`maxFaces` 1..2) and zero-lag `FrameDelayRing` (0..2).
+  Future<void> setPipelineOptions(LiveBeautyPipelineOptions options) async {
+    _ensureNotDisposed();
+    options.validate();
+    await _methodChannel.invokeMethod<void>('setPipelineOptions', options.toMap());
+  }
+
+  /// Configures green-screen-free virtual background replacement using a host GL texture ID.
+  Future<void> setVirtualBackgroundTexture({
+    required int glTextureId,
+    double aspect = 0.0,
+    LiveBeautyVirtualBackgroundMode mode =
+        LiveBeautyVirtualBackgroundMode.virtualImage,
+    double strength = 1.0,
+  }) async {
+    _ensureNotDisposed();
+    if (strength < 0.0 || strength > 1.0) {
+      throw RangeError('strength must be in [0.0, 1.0], got $strength');
+    }
+    await _methodChannel.invokeMethod<void>(
+      'setVirtualBackgroundTexture',
+      <String, Object>{
+        'glTextureId': glTextureId,
+        'aspect': aspect,
+        'mode': mode.wireName,
+        'strength': strength,
+      },
+    );
+  }
+
+  /// Sets or clears one of up to 4 face-anchored 2D AR sticker slots (`slot` 0..3).
+  Future<void> setSticker(int slot, LiveBeautySticker? sticker) async {
+    _ensureNotDisposed();
+    if (slot < 0 || slot > 3) {
+      throw RangeError('slot must be in [0, 3], got $slot');
+    }
+    sticker?.validate();
+    await _methodChannel.invokeMethod<void>(
+      'setSticker',
+      <String, Object?>{
+        'slot': slot,
+        'sticker': sticker?.toMap(),
+      },
+    );
+  }
+
+  /// Clears all active 2D AR sticker layers.
+  Future<void> clearStickers() async {
+    _ensureNotDisposed();
+    await _methodChannel.invokeMethod<void>('clearStickers');
+  }
+
+  /// Reads real-time performance & tracking telemetry from the native C++17 core.
+  Future<LiveBeautyPerfStats> getPerfStats() async {
+    _ensureNotDisposed();
+    final Map<Object?, Object?>? raw = await _methodChannel
+        .invokeMethod<Map<Object?, Object?>>('getPerfStats');
+    return LiveBeautyPerfStats.fromMap(raw);
   }
 
   /// Releases the controller instance on the Dart side and notifies native registry.

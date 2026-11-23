@@ -103,6 +103,9 @@ internal class LiveBeautyCppEngine(
 
     private val stickers = arrayOfNulls<LiveBeautySticker>(MAX_STICKERS)
     private var stickersDirty = false
+    @Volatile private var maxFaces = 1
+    @Volatile private var frameDelayFrames = 0
+    private var pipelineOptionsDirty = false
 
     private val light = LowLightDetector()
     private var lastLightSampleMs = Long.MIN_VALUE
@@ -145,6 +148,7 @@ internal class LiveBeautyCppEngine(
         invalidateBoundAssets()
         virtualBgDirty = (virtualBgMode != VirtualBackgroundMode.NONE || virtualBgTex != 0)
         stickersDirty = stickers.any { it != null }
+        pipelineOptionsDirty = (maxFaces != 1 || frameDelayFrames != 0)
     }
 
     override fun configure(config: VideoEffectsConfig) {
@@ -200,6 +204,18 @@ internal class LiveBeautyCppEngine(
     fun clearStickers() {
         stickers.fill(null)
         stickersDirty = true
+    }
+
+    /** 配置双人同屏人数上限（1..2）与零滞后帧对齐环帧数（0..2）。 */
+    fun setPipelineOptions(maxFaces: Int = 1, frameDelayFrames: Int = 0) {
+        val clampedFaces = maxFaces.coerceIn(1, 2)
+        val clampedDelay = frameDelayFrames.coerceIn(0, 2)
+        if (this.maxFaces != clampedFaces) {
+            this.maxFaces = clampedFaces
+            faceWorker?.setMaxFaces(clampedFaces)
+        }
+        this.frameDelayFrames = clampedDelay
+        pipelineOptionsDirty = true
     }
 
     fun perfStats(): BeautyPerfStats = cachedStats
@@ -331,6 +347,10 @@ internal class LiveBeautyCppEngine(
                 strength = virtualBgStrength,
             )
         }
+        if (pipelineOptionsDirty) {
+            pipelineOptionsDirty = false
+            NativeBeautyBridge.nativeSetPipelineOptions(h, maxFaces, frameDelayFrames)
+        }
         if (stickersDirty) {
             stickersDirty = false
             NativeBeautyBridge.nativeClearStickers(h)
@@ -400,10 +420,16 @@ internal class LiveBeautyCppEngine(
         val res = faceWorker?.pollResult() ?: return
         if (!wantFace) return
         val pts = res.mpXy
-        if (pts != null && res.pointCount >= 468) {
-            NativeBeautyBridge.nativeSubmitFaceLandmarks(
-                h, res.sampleTsMs, pts, res.pointCount, res.width, res.height, res.receivedMs,
-            )
+        if (pts != null && res.faceCount > 0 && res.pointsPerFace >= 468) {
+            if (res.faceCount == 1) {
+                NativeBeautyBridge.nativeSubmitFaceLandmarks(
+                    h, res.sampleTsMs, pts, res.pointsPerFace, res.width, res.height, res.receivedMs,
+                )
+            } else {
+                NativeBeautyBridge.nativeSubmitMultiFaceLandmarks(
+                    h, res.sampleTsMs, pts, res.faceCount, res.pointsPerFace, res.width, res.height, res.receivedMs,
+                )
+            }
         } else {
             NativeBeautyBridge.nativeSubmitFaceMiss(h, res.sampleTsMs)
         }
@@ -468,7 +494,7 @@ internal class LiveBeautyCppEngine(
     ) {
         val ctx = appContext ?: return
         if (wantFace && faceWorker == null) {
-            faceWorker = RawFaceWorker(ctx) {
+            faceWorker = RawFaceWorker(ctx, maxFaces) {
                 faceHealthy = false
                 if (faceFailureSent.compareAndSet(false, true)) onFaceFailure()
             }
@@ -660,8 +686,8 @@ internal class LiveBeautyCppEngine(
         return tex
     }
 
-    private class RawFaceWorker(context: Context, private val onFailure: () -> Unit) {
-        class Result(val epoch: Long, val sampleTsMs: Long, val receivedMs: Long, val width: Int, val height: Int, val mpXy: FloatArray?, val pointCount: Int)
+    private class RawFaceWorker(context: Context, initialMaxFaces: Int, private val onFailure: () -> Unit) {
+        class Result(val epoch: Long, val sampleTsMs: Long, val receivedMs: Long, val width: Int, val height: Int, val mpXy: FloatArray?, val faceCount: Int, val pointsPerFace: Int)
         private val appContext = context.applicationContext
         private val closed = AtomicBoolean(false)
         private val inFlight = AtomicBoolean(false)
@@ -669,10 +695,13 @@ internal class LiveBeautyCppEngine(
         private val latest = AtomicReference<Result?>(null)
         private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "lb-sdk-face").apply { isDaemon = true } }
         private var detector: FaceLandmarker? = null
+        private var detectorNumFaces = initialMaxFaces.coerceIn(1, 2)
+        @Volatile private var desiredNumFaces = detectorNumFaces
         private val policy = sharedGpuPolicy(appContext)
         @Volatile var gpu = policy.allowGpu(); private set
         private var gpuConfirmed = false
 
+        fun setMaxFaces(n: Int) { desiredNumFaces = n.coerceIn(1, 2) }
         fun canAccept() = !closed.get() && !inFlight.get()
         fun reset() { epoch.incrementAndGet(); latest.set(null) }
         fun pollResult(): Result? = latest.getAndSet(null)?.takeIf { it.epoch == epoch.get() }
@@ -685,7 +714,10 @@ internal class LiveBeautyCppEngine(
             try {
                 if (closed.get()) return
                 val img = ByteBufferImageBuilder(sample.pixels, sample.width, sample.height, MPImage.IMAGE_FORMAT_RGBA).build()
-                val raw = try {
+                var outFlat: FloatArray? = null
+                var outFaces = 0
+                var outPtsPerFace = 0
+                try {
                     val faces = try { task().detectForVideo(img, ts).faceLandmarks() } catch (e: Throwable) {
                         if (!gpu) throw e
                         gpu = false; policy.onGpuJavaFailure(); try { detector?.close() } catch (_: Throwable) {}; detector = null
@@ -693,33 +725,54 @@ internal class LiveBeautyCppEngine(
                     }
                     if (gpu && !gpuConfirmed) { gpuConfirmed = true; policy.onGpuSuccess() }
                     val crop = sample.crop
-                    faces.firstOrNull()?.let { f ->
-                        val n = f.size; val out = FloatArray(n * 2)
-                        for (i in 0 until n) {
-                            val lm = f[i]
-                            out[i * 2] = if (crop.isFullFrame) lm.x() else crop.unprojectX(lm.x())
-                            out[i * 2 + 1] = if (crop.isFullFrame) lm.y() else crop.unprojectY(lm.y())
+                    val takeFaces = minOf(faces.size, desiredNumFaces)
+                    if (takeFaces > 0) {
+                        val ptsPer = faces[0].size
+                        if (ptsPer >= 468) {
+                            val flat = FloatArray(takeFaces * ptsPer * 2)
+                            var validFaces = 0
+                            for (fi in 0 until takeFaces) {
+                                val f = faces[fi]
+                                if (f.size < ptsPer) continue
+                                val base = validFaces * ptsPer * 2
+                                for (i in 0 until ptsPer) {
+                                    val lm = f[i]
+                                    flat[base + i * 2] = if (crop.isFullFrame) lm.x() else crop.unprojectX(lm.x())
+                                    flat[base + i * 2 + 1] = if (crop.isFullFrame) lm.y() else crop.unprojectY(lm.y())
+                                }
+                                validFaces++
+                            }
+                            if (validFaces > 0) {
+                                outFlat = flat
+                                outFaces = validFaces
+                                outPtsPerFace = ptsPer
+                            }
                         }
-                        out to n
                     }
                 } finally { img.close() }
                 if (!closed.get() && ep == epoch.get()) {
-                    latest.set(Result(ep, ts, SystemClock.uptimeMillis(), w, h, raw?.first, raw?.second ?: 0))
+                    latest.set(Result(ep, ts, SystemClock.uptimeMillis(), w, h, outFlat, outFaces, outPtsPerFace))
                 }
             } catch (_: Throwable) { if (!closed.get()) onFailure() } finally { inFlight.set(false) }
         }
         private fun task(): FaceLandmarker {
+            val wanted = desiredNumFaces
+            if (detector != null && detectorNumFaces != wanted) {
+                try { detector?.close() } catch (_: Throwable) {}
+                detector = null
+            }
             detector?.let { return it }
+            detectorNumFaces = wanted
             if (gpu && policy.allowGpu()) {
                 policy.beforeGpuAttempt()
-                try { return create(Delegate.GPU).also { detector = it } } catch (_: Throwable) { gpu = false; policy.onGpuJavaFailure() }
+                try { return create(Delegate.GPU, wanted).also { detector = it } } catch (_: Throwable) { gpu = false; policy.onGpuJavaFailure() }
             }
-            gpu = false; return create(Delegate.CPU).also { detector = it }
+            gpu = false; return create(Delegate.CPU, wanted).also { detector = it }
         }
-        private fun create(d: Delegate) = FaceLandmarker.createFromOptions(appContext,
+        private fun create(d: Delegate, numFaces: Int) = FaceLandmarker.createFromOptions(appContext,
             FaceLandmarker.FaceLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").setDelegate(d).build())
-                .setRunningMode(RunningMode.VIDEO).setNumFaces(FaceLandmarkTracker.NUM_FACES)
+                .setRunningMode(RunningMode.VIDEO).setNumFaces(numFaces)
                 .setMinFaceDetectionConfidence(0.6f).setMinFacePresenceConfidence(0.6f).setMinTrackingConfidence(0.5f).build())
         fun close() {
             if (!closed.compareAndSet(false, true)) return

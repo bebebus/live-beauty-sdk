@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [2.2.0] - 2026-11-23
+
+### Added
+- **Hair-Weighted Dual-Band Guided Filter in C++17 Core (`kGuidedWeightBlur`, `kGuidedWeightDiff`, `kGuidedWeightCoeff`)**:
+  - Completed hair-weighted guided smoothing in both GLES and Apple Metal shaders: premultiplies 1/3 box blur by `nonHair` alpha weight and blends guided coefficients toward identity `(a=1, b=0)` over hair pixels, eliminating dark hairline/bangs gray-bleed halo into adjacent fair skin.
+- **Dual-Face Simultaneous Co-Streaming (`MultiFaceTracker`, `maxFaces = 2`)**:
+  - Added optimal minimum-cost 2×2 Euclidean face-slot association (`MultiFaceTracker`) preventing timeline ID swaps when two hosts cross in frame.
+  - Added zero-extra-1080p-FBO secondary face rendering across `RenderPipeline` (independent 15-axis diffeomorphic warp, 468-pt anatomical retouch, merged polygon skin mask, 6-layer UV makeup, and 2D AR stickers for both faces simultaneously) + dynamic `numFaces` MediaPipe inference & `nativeSubmitMultiFaceLandmarks`.
+- **Cross-Backend Zero-Lag `FrameDelayRing` (`frameDelayFrames = 0..2`)**:
+  - Added lazy-allocated RHI `FrameDelayRing` in `RenderPipeline::pushFrameDelay` so both GLES and Metal hosts can delay display frames by 1–2 frames to strictly match asynchronous MediaPipe inference timestamps with zero-allocation passthrough when disabled.
+- **Flutter Plugin `v2.2.0` Feature Parity (`live_beauty_sdk`)**:
+  - Exposed `LiveBeautyPipelineOptions`, `LiveBeautyVirtualBackgroundMode`, `LiveBeautyStickerAnchor`, `LiveBeautySticker`, `LiveBeautyPerfStats`, and corresponding `LiveBeautyController` + `LiveBeautySdkPlugin` MethodChannel endpoints (`setPipelineOptions`, `setVirtualBackgroundTexture`, `setSticker`, `clearStickers`, `getPerfStats`).
+- **Integration Recipes & Expanded GPU Pixel Gates (`H2`, `M1`)**:
+  - Added [docs/integration-recipes.md](./docs/integration-recipes.md) covering CameraX OES, WebRTC, Agora, Zego, and Tencent TRTC.
+  - Added Apple Metal real GPU pixel probes `H2` (hair-weighted guided filter zero dark-hair bleed) and `M1` (simultaneous dual-face whitening & skin mask).
+
 ## [2.1.0] - 2026-11-23
 
 ### Added
