@@ -379,9 +379,9 @@ void main() {
     if (vis <= 0.002) { discard; }
     vec3 base = texture2D(uTex0, uv).rgb;
     float baseY = dot(base, vec3(0.299, 0.587, 0.114));
-    float darkGate = smoothstep(0.06, 0.20, baseY);
+    float darkGate = smoothstep(0.08, 0.22, baseY);
     float redExcess = base.r - max(base.g, base.b);
-    float teethLike = smoothstep(0.52, 0.74, baseY) * (1.0 - smoothstep(0.035, 0.115, redExcess));
+    float teethLike = smoothstep(0.42, 0.66, baseY) * (1.0 - smoothstep(0.025, 0.095, redExcess));
     float teethGate = 1.0 - teethLike;
     float lipHue = (base.r - base.g) - 0.75 * max(base.g - base.b, 0.0);
     float rimZone = 1.0 - smoothstep(0.35, 0.92, feather);
@@ -415,17 +415,21 @@ void main() {
     vec3 result = mix(multLip, pigmentLip, coverage);
     result = clamp(result + vec3(lipDetail * mix(1.15, 0.75, isGlossy)), 0.0, 1.0);
     if (isGlossy > 0.5) {
-        float lumaDrive = smoothstep(0.24, 0.58, baseY);
-        float centerBelly = 1.0 - smoothstep(0.015, 0.085, abs(vMakeupUv.x - 0.5));
-        float ridgeMask = clamp(0.85 + lipDetail * 5.0, 0.20, 1.40);
+        float lumaDrive = smoothstep(0.22, 0.56, baseY);
+        float centerBelly = 1.0 - smoothstep(0.015, 0.090, abs(vMakeupUv.x - 0.5));
+        float ridgeMask = clamp(0.88 + lipDetail * 5.2, 0.20, 1.45);
         float dyLo = (vMakeupUv.y - 0.714) * 145.0;
         float dyHi = (vMakeupUv.y - 0.673) * 165.0;
         float lowerBand = exp(-(dyLo * dyLo));
-        float upperBand = exp(-(dyHi * dyHi)) * 0.38;
-        float naturalHot = smoothstep(0.78, 0.95, baseY) * 0.24;
-        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.78 + naturalHot) * ridgeMask * effFeather, 0.0, 0.68);
-        vec3 specCol = vec3(1.0, 0.99, 0.97);
-        result = clamp(result + (specCol - result) * (spec * 0.52), 0.0, 1.0);
+        float upperBand = exp(-(dyHi * dyHi)) * 0.44;
+        float microGlint = smoothstep(0.014, 0.048, lipDetail) * centerBelly * 0.26;
+        float naturalHot = smoothstep(0.76, 0.94, baseY) * 0.26;
+        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.82 + microGlint + naturalHot) * ridgeMask * effFeather, 0.0, 0.74);
+        vec3 specCol = clamp(vec3(1.0, 0.99, 0.97) * mix(vec3(1.0), amb, 0.35), 0.0, 1.0);
+        result = clamp(result + (specCol - result) * (spec * 0.56), 0.0, 1.0);
+    } else {
+        float velvetSoft = smoothstep(0.68, 0.92, baseY) * 0.08 * effFeather;
+        result = clamp(mix(result, lipPigment * 0.92 + vec3(0.04), velvetSoft), 0.0, 1.0);
     }
     gl_FragColor = vec4(clamp(result, 0.0, 1.0), alpha);
 }
@@ -860,13 +864,25 @@ float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
 }
 void main() {
     vec4 color = texture2D(uTex0, vTextureCoord);
-    vec2 bgUv = vec2(vTextureCoord.x * uU1.x + uU1.z, (1.0 - vTextureCoord.y) * uU1.y + uU1.w);
-    vec3 vbg = texture2D(uTex1, clamp(bgUv, 0.0, 1.0)).rgb;
+    vec2 bgUv = clamp(vec2(vTextureCoord.x * uU1.x + uU1.z, (1.0 - vTextureCoord.y) * uU1.y + uU1.w), 0.0, 1.0);
+    vec3 vbg = texture2D(uTex1, bgUv).rgb;
     float person = texture2D(uTex2, vec2(vTextureCoord.x, 1.0 - vTextureCoord.y)).r;
     float head = 1.0 - smoothstep(2.0, 2.8, sqrt(ellipseE(vTextureCoord, uU2, uU3.xy, max(uU3.z, 0.0001))));
     float fg = smoothstep(0.06, 0.16, person) * head;
     float keep = clamp(max(smoothstep(uU0.y, uU0.z, person), uU0.w * 0.45 * fg), 0.0, 1.0);
-    gl_FragColor = vec4(mix(color.rgb, mix(vbg, color.rgb, keep), uU0.x), color.a);
+    // Light Wrap / Edge Color Spill along translucent hair & shoulder boundary
+    vec2 wrapD = vec2(0.024, 0.024);
+    vec3 vbgAmb = 0.20 * (
+        vbg +
+        texture2D(uTex1, clamp(bgUv + vec2( wrapD.x, 0.0), 0.0, 1.0)).rgb +
+        texture2D(uTex1, clamp(bgUv + vec2(-wrapD.x, 0.0), 0.0, 1.0)).rgb +
+        texture2D(uTex1, clamp(bgUv + vec2(0.0,  wrapD.y), 0.0, 1.0)).rgb +
+        texture2D(uTex1, clamp(bgUv + vec2(0.0, -wrapD.y), 0.0, 1.0)).rgb
+    );
+    float edgeBand = smoothstep(0.04, 0.42, keep) * (1.0 - smoothstep(0.52, 0.94, keep));
+    vec3 rimGlow = max(color.rgb, vbgAmb * 0.92);
+    vec3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.22), edgeBand * 0.28);
+    gl_FragColor = vec4(mix(color.rgb, mix(vbg, fgWrapped, keep), uU0.x), color.a);
 }
 )";
 

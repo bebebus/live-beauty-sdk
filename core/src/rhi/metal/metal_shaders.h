@@ -480,9 +480,9 @@ fragment float4 fs_makeup_lip(MakeupOut in [[stage_in]],
     if (vis <= 0.002f) discard_fragment();
     float3 base = tex0.sample(kLinearClamp, toMtlUv(uv)).rgb;
     float baseY = luma601(base);
-    float darkGate = smoothstep(0.06f, 0.20f, baseY);
+    float darkGate = smoothstep(0.08f, 0.22f, baseY);
     float redExcess = base.r - max(base.g, base.b);
-    float teethLike = smoothstep(0.52f, 0.74f, baseY) * (1.0f - smoothstep(0.035f, 0.115f, redExcess));
+    float teethLike = smoothstep(0.42f, 0.66f, baseY) * (1.0f - smoothstep(0.025f, 0.095f, redExcess));
     float teethGate = 1.0f - teethLike;
     float lipHue = (base.r - base.g) - 0.75f * max(base.g - base.b, 0.0f);
     float rimZone = 1.0f - smoothstep(0.35f, 0.92f, feather);
@@ -515,17 +515,21 @@ fragment float4 fs_makeup_lip(MakeupOut in [[stage_in]],
     float3 result = mix(multLip, pigmentLip, coverage);
     result = clamp(result + float3(lipDetail * mix(1.15f, 0.75f, isGlossy)), 0.0f, 1.0f);
     if (isGlossy > 0.5f) {
-        float lumaDrive = smoothstep(0.24f, 0.58f, baseY);
-        float centerBelly = 1.0f - smoothstep(0.015f, 0.085f, abs(in.makeupUv.x - 0.5f));
-        float ridgeMask = clamp(0.85f + lipDetail * 5.0f, 0.20f, 1.40f);
+        float lumaDrive = smoothstep(0.22f, 0.56f, baseY);
+        float centerBelly = 1.0f - smoothstep(0.015f, 0.090f, abs(in.makeupUv.x - 0.5f));
+        float ridgeMask = clamp(0.88f + lipDetail * 5.2f, 0.20f, 1.45f);
         float dyLo = (in.makeupUv.y - 0.714f) * 145.0f;
         float dyHi = (in.makeupUv.y - 0.673f) * 165.0f;
         float lowerBand = exp(-(dyLo * dyLo));
-        float upperBand = exp(-(dyHi * dyHi)) * 0.38f;
-        float naturalHot = smoothstep(0.78f, 0.95f, baseY) * 0.24f;
-        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.78f + naturalHot) * ridgeMask * effFeather, 0.0f, 0.68f);
-        float3 specCol = float3(1.0f, 0.99f, 0.97f);
-        result = clamp(result + (specCol - result) * (spec * 0.52f), 0.0f, 1.0f);
+        float upperBand = exp(-(dyHi * dyHi)) * 0.44f;
+        float microGlint = smoothstep(0.014f, 0.048f, lipDetail) * centerBelly * 0.26f;
+        float naturalHot = smoothstep(0.76f, 0.94f, baseY) * 0.26f;
+        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.82f + microGlint + naturalHot) * ridgeMask * effFeather, 0.0f, 0.74f);
+        float3 specCol = clamp(float3(1.0f, 0.99f, 0.97f) * mix(float3(1.0f), amb, 0.35f), 0.0f, 1.0f);
+        result = clamp(result + (specCol - result) * (spec * 0.56f), 0.0f, 1.0f);
+    } else {
+        float velvetSoft = smoothstep(0.68f, 0.92f, baseY) * 0.08f * effFeather;
+        result = clamp(mix(result, lipPigment * 0.92f + float3(0.04f), velvetSoft), 0.0f, 1.0f);
     }
     return float4(clamp(result, 0.0f, 1.0f), alpha);
 }
@@ -857,13 +861,24 @@ fragment float4 fs_bg_virtual_mix(QuadOut in [[stage_in]],
                                   constant Uniforms& uni [[buffer(1)]]) {
     float2 muv = toMtlUv(in.uv);
     float4 color = tex0.sample(kLinearClamp, muv);
-    float2 bgUv = float2(in.uv.x * uni.u[1].x + uni.u[1].z, (1.0f - in.uv.y) * uni.u[1].y + uni.u[1].w);
-    float3 vbg = tex1.sample(kLinearClamp, clamp(bgUv, 0.0f, 1.0f)).rgb;
+    float2 bgUv = clamp(float2(in.uv.x * uni.u[1].x + uni.u[1].z, (1.0f - in.uv.y) * uni.u[1].y + uni.u[1].w), 0.0f, 1.0f);
+    float3 vbg = tex1.sample(kLinearClamp, bgUv).rgb;
     float person = tex2.sample(kLinearClamp, muv).r;
     float head = 1.0f - smoothstep(2.0f, 2.8f, sqrt(ellipseE(in.uv, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f))));
     float fg = smoothstep(0.06f, 0.16f, person) * head;
     float keep = clamp(max(smoothstep(uni.u[0].y, uni.u[0].z, person), uni.u[0].w * 0.45f * fg), 0.0f, 1.0f);
-    return float4(mix(color.rgb, mix(vbg, color.rgb, keep), uni.u[0].x), color.a);
+    float2 wrapD = float2(0.024f, 0.024f);
+    float3 vbgAmb = 0.20f * (
+        vbg +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2( wrapD.x, 0.0f), 0.0f, 1.0f)).rgb +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2(-wrapD.x, 0.0f), 0.0f, 1.0f)).rgb +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f,  wrapD.y), 0.0f, 1.0f)).rgb +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f, -wrapD.y), 0.0f, 1.0f)).rgb
+    );
+    float edgeBand = smoothstep(0.04f, 0.42f, keep) * (1.0f - smoothstep(0.52f, 0.94f, keep));
+    float3 rimGlow = max(color.rgb, vbgAmb * 0.92f);
+    float3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.22f), edgeBand * 0.28f);
+    return float4(mix(color.rgb, mix(vbg, fgWrapped, keep), uni.u[0].x), color.a);
 }
 
 fragment float4 fs_sticker_quad(QuadOut in [[stage_in]],
