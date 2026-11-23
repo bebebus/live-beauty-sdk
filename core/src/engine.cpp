@@ -122,17 +122,24 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const bool processing = config_.isProcessing() || (config_.enabled && !config_.compareOriginal && stickerCount_ > 0);
     loadFades_.update(governor_.level(), nowMs);
 
-    // Optional cross-backend FrameDelayRing (aligns displayed camera frame with async MediaPipe landmarks)
+    // Optional cross-backend FrameDelayRing (0..4 frames; aligns displayed camera frame with async MediaPipe landmarks)
     rhi::TextureId displayTex = inputTexture;
     int64_t displayTsMs = frameTimestampMs;
-    const int delayFrames = processing ? std::clamp(config_.frameDelayFrames, 0, 2) : 0;
+    const int delayFrames = processing ? std::clamp(config_.frameDelayFrames, 0, 4) : 0;
     if (delayFrames > 0) {
         pipeline_.pushFrameDelay(inputTexture, frameTimestampMs, delayFrames, width, height, displayTex, displayTsMs);
     }
 
     faces_.update(nowMs);
     auto& primaryTl = faces_.slot(0);
+    if (primaryTl.runId() != deformerRunId_) {
+        deformerRunId_ = primaryTl.runId();
+        pipeline_.resetDeformerTemporal();
+    }
     const float* state41 = primaryTl.at(displayTsMs);
+    const float* dilatedState41 = (state41 != nullptr)
+        ? primaryTl.dilate(state41, dilatedState_.data())
+        : nullptr;
     math::FaceTimeline::SmoothedMeshView meshView{};
     const bool hasMesh = primaryTl.meshAt(displayTsMs, meshView);
     if (hasMesh) {
@@ -194,6 +201,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.nowMs = nowMs;
     in.hasFaceState = (state41 != nullptr);
     in.faceState41 = state41;
+    in.dilatedFaceState41 = dilatedState41;
     in.hasFaceMesh = hasMesh;
     in.landmarks478x2 = hasMesh ? meshView.landmarks : nullptr;
     in.faceMeta15 = hasMesh ? meshView.meta : nullptr;

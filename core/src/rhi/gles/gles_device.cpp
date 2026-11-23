@@ -368,8 +368,11 @@ void GlesDevice::restoreSharedState() {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    // Unbind all 4 sampler units so no FBO color attachment stays bound on another unit in subsequent passes.
+    for (int i = 3; i >= 0; --i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
 }
 
 void GlesDevice::drawFullScreenQuad(

@@ -105,8 +105,10 @@ private:
 
     int lastWidth_ = 0;
     int lastHeight_ = 0;
+    int deformerRunId_ = -1;
     bool hasPendingBody_ = false;
     std::array<float, math::BodyGeometry::kStateSize> pendingBodyState_{};
+    std::array<float, math::FaceGeometryConstants::kStateSize> dilatedState_{};
     int64_t pendingBodyTs_ = kTimeInvalid;
 
     PerfStats stats_{};

@@ -13,6 +13,7 @@ if [[ "$(uname -s)" == Darwin && -x "/Applications/Google Chrome.app/Contents/Ma
   GLSL_TMP="$(mktemp -d "${TMPDIR:-/tmp}/livebeauty-glsl.XXXXXX")"
   trap 'rm -rf "$GLSL_TMP"' EXIT
   python3 -I -B "$ROOT_DIR/_tooling/glsl/glsl_gate.py" "$SHADERS_KT" "$VECTORS" "$GLSL_TMP" "$WIRING_DIR"
+  python3 -I -B "$ROOT_DIR/_tooling/verify-cpp-gles-shaders.py" "$ROOT_DIR/core/src/rhi/gles/gles_shaders.cpp"
 else
   echo "SKIP  未检测到 macOS Google Chrome，跳过无头 WebGL1 光栅探针；继续校验 3D LUT 资产。"
 fi

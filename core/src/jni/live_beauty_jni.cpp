@@ -337,7 +337,7 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetPipelineOptions(
     auto* handle = fromHandle(ptr);
     if (!handle) return;
     handle->maxFacesOverride = (maxFaces >= 2) ? 2 : 1;
-    handle->frameDelayFramesOverride = (frameDelayFrames < 0) ? 0 : (frameDelayFrames > 2 ? 2 : frameDelayFrames);
+    handle->frameDelayFramesOverride = (frameDelayFrames < 0) ? 0 : (frameDelayFrames > 4 ? 4 : frameDelayFrames);
     auto cfg = handle->engine.config();
     cfg.maxFaces = handle->maxFacesOverride;
     cfg.frameDelayFrames = handle->frameDelayFramesOverride;

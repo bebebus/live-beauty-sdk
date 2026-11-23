@@ -86,6 +86,10 @@ void RenderPipeline::resetTemporal() {
     for (int i = 0; i < kMaxDelaySlots; ++i) delayStamps_[i] = kTimeInvalid;
 }
 
+void RenderPipeline::resetDeformerTemporal() {
+    deformer_.resetTemporal();
+}
+
 void RenderPipeline::releaseGpuResources() {
     auto killRt = [&](RenderTargetId& rt) {
         if (rt != kInvalidRenderTarget) {
@@ -102,6 +106,7 @@ void RenderPipeline::releaseGpuResources() {
     for (auto& rt : rtGuided_) killRt(rt);
     for (auto& rt : rtMacro_) killRt(rt);
     killRt(rtSkinMask_);
+    killRt(rtSkinMaskTmp_);
     for (auto& rt : rtBg_) killRt(rt);
     killRt(rtBgHair_);
     killRt(rtBgOut_);
@@ -212,6 +217,7 @@ void RenderPipeline::ensureResources(int width, int height) {
     for (int i = 0; i < 3; ++i) recreate(rtGuided_[i], guidedW_, guidedH_);
     for (int i = 0; i < 2; ++i) recreate(rtMacro_[i], macroW_, macroH_);
     recreate(rtSkinMask_, skinW_, skinH_);
+    recreate(rtSkinMaskTmp_, skinW_, skinH_);
     for (int i = 0; i < 2; ++i) recreate(rtBg_[i], bgW_, bgH_);
     recreate(rtBgHair_, bgW_, bgH_);
     recreate(rtBgOut_, width_, height_);
@@ -304,14 +310,14 @@ void RenderPipeline::renderGuidedFilter(
 
         tb.clear(); ub.clear();
         tb.bind(0, device_.textureOf(rtMacro_[0]));
-        ub.push(1.25f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
+        ub.push(1.55f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
         device_.beginPass(rtMacro_[1], macroW_, macroH_, false);
         device_.drawFullScreenQuad(ShaderId::kBlurRgb, st, tb, ub);
         device_.endPass();
 
         tb.clear(); ub.clear();
         tb.bind(0, device_.textureOf(rtMacro_[1]));
-        ub.push(0.0f, 1.25f / static_cast<float>(macroH_), 0.0f, 0.0f);
+        ub.push(0.0f, 1.55f / static_cast<float>(macroH_), 0.0f, 0.0f);
         device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
         device_.drawFullScreenQuad(ShaderId::kBlurRgb, st, tb, ub);
         device_.endPass();
@@ -326,12 +332,14 @@ void RenderPipeline::renderGuidedFilter(
     device_.endPass();
 
     // P5: Guided coeff + macro evenness folded into (1-a)*evenMean -> rtGuided_[0]
+    // Keep vertex uU0 (dir) and fragment uU1 (eps, evenness) strictly stage-disjoint so GLES2 mediump drivers always link.
     // Always bind isolated rtMacro_[0] texture even when evenness==0 to prevent GLES feedback loop.
     tb.clear(); ub.clear();
     tb.bind(0, device_.textureOf(rtGuided_[1]));
     tb.bind(1, device_.textureOf(rtMacro_[0]));
     if (hairWeighted) tb.bind(2, hairWeightTex);
-    ub.push(0.0f, spread / static_cast<float>(guidedH_), eps, evenness);
+    ub.push(0.0f, spread / static_cast<float>(guidedH_), 0.0f, 0.0f);
+    ub.push(eps, evenness, 0.0f, 0.0f);
     device_.beginPass(rtGuided_[0], guidedW_, guidedH_, false);
     device_.drawFullScreenQuad(hairWeighted ? ShaderId::kGuidedWeightCoeff : ShaderId::kGuidedCoeff, st, tb, ub);
     device_.endPass();
@@ -353,17 +361,23 @@ void RenderPipeline::renderGuidedFilter(
 }
 
 void RenderPipeline::renderSkinMask(
-    const float* landmarks478x2, bool frontFaceCw, int width, int height, bool clearFirst) {
+    const float* landmarks478x2, float axisX, float axisY,
+    bool frontFaceCw, int width, int height, bool clearFirst) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    // Pack 468 face vertices + 36 outer feather vertices.
-    float cx = 0.0f, cy = 0.0f;
-    for (int k = 0; k < math::FaceMeshTopology::kOvalVertexCount; ++k) {
-        const int oi = math::FaceMeshTopology::kFaceOval[k];
-        cx += landmarks478x2[oi * 2];
-        cy += landmarks478x2[oi * 2 + 1];
-    }
-    cx /= static_cast<float>(math::FaceMeshTopology::kOvalVertexCount);
-    cy /= static_cast<float>(math::FaceMeshTopology::kOvalVertexCount);
+    const float axisNorm = std::hypot(axisX, axisY);
+    const float ux = (axisNorm > 1e-4f) ? (axisX / axisNorm) : 1.0f;
+    const float uy = (axisNorm > 1e-4f) ? (axisY / axisNorm) : 0.0f;
+    const float vx = -uy;
+    const float vy = ux;
+
+    const float m234x = landmarks478x2[234 * 2], m234y = landmarks478x2[234 * 2 + 1] / aspect;
+    const float m454x = landmarks478x2[454 * 2], m454y = landmarks478x2[454 * 2 + 1] / aspect;
+    const float m10x = landmarks478x2[10 * 2], m10y = landmarks478x2[10 * 2 + 1] / aspect;
+    const float m152x = landmarks478x2[152 * 2], m152y = landmarks478x2[152 * 2 + 1] / aspect;
+    const float fw = std::max(std::hypot(m454x - m234x, m454y - m234y), 0.03f);
+    const float fh = std::max(std::hypot(m10x - m152x, m10y - m152y), 0.03f);
+    const float cx = 0.25f * (m234x + m454x + m10x + m152x);
+    const float cy = 0.25f * (m234y + m454y + m10y + m152y);
 
     for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
         const int k = i * 5;
@@ -373,16 +387,38 @@ void RenderPipeline::renderSkinMask(
         skinMaskVerts_[k + 3] = staticSkinWeights_[i * 3 + 1];
         skinMaskVerts_[k + 4] = staticSkinWeights_[i * 3 + 2];
     }
+
+    // Match SkinMaskPass.kt outer crown feather ring: canonical-radial hybrid direction + forehead crown extension.
+    const float mirrorSign = frontFaceCw ? -1.0f : 1.0f;
+    const auto& canonicalUv = math::FaceMeshTopology::kCanonicalUv;
     for (int j = 0; j < math::FaceMeshTopology::kOvalVertexCount; ++j) {
         const int oi = math::FaceMeshTopology::kFaceOval[j];
         const float ox = landmarks478x2[oi * 2];
-        const float oy = landmarks478x2[oi * 2 + 1];
+        const float oy = landmarks478x2[oi * 2 + 1] / aspect;
+        const float cNu = (canonicalUv[oi * 2] - 0.5f) * 2.0f * mirrorSign;
+        const float cNv = (0.5f - canonicalUv[oi * 2 + 1]) * 2.0f;
+        const float cLen = std::max(std::hypot(cNu, cNv), 1e-4f);
+        const float cxDir = (cNu * ux + cNv * vx) / cLen;
+        const float cyDir = (cNu * uy + cNv * vy) / cLen;
         const float dx = ox - cx;
-        const float dy = (oy - cy) / aspect;
-        const float len = std::max(std::hypot(dx, dy), 1e-4f);
-        const float pad = 0.03f;
-        const float fx = ox + (dx / len) * pad;
-        const float fy = oy + (dy / len) * pad * aspect;
+        const float dy = oy - cy;
+        const float len = std::hypot(dx, dy);
+        const float radX = (len > 1e-4f) ? (dx / len) : cxDir;
+        const float radY = (len > 1e-4f) ? (dy / len) : cyDir;
+        const float align = detail::clampf(radX * cxDir + radY * cyDir, 0.0f, 1.0f);
+        const float wRad = 0.65f * align;
+        const float mx = cxDir * (1.0f - wRad) + radX * wRad;
+        const float my = cyDir * (1.0f - wRad) + radY * wRad;
+        const float mNorm = std::max(std::hypot(mx, my), 1e-4f);
+        const float rx = mx / mNorm, ry = my / mNorm;
+        const float dv = dx * vx + dy * vy;
+        const float crownMix = detail::clampf((dv / fh - 0.22f) / 0.22f, 0.0f, 1.0f);
+        const float pad = (1.0f - crownMix) * (0.045f * fw) + crownMix * (0.08f * fh);
+        const float dirX = (1.0f - crownMix * 0.50f) * rx + (crownMix * 0.50f) * vx;
+        const float dirY = (1.0f - crownMix * 0.50f) * ry + (crownMix * 0.50f) * vy;
+        const float dirNorm = std::max(std::hypot(dirX, dirY), 1e-4f);
+        const float fx = ox + (dirX / dirNorm) * pad;
+        const float fy = (oy + (dirY / dirNorm) * pad) * aspect;
         const int vi = math::FaceMeshTopology::kMidBufferOffset + j;
         const int k = vi * 5;
         skinMaskVerts_[k + 0] = fx * 2.0f - 1.0f;
@@ -412,6 +448,25 @@ void RenderPipeline::renderSkinMask(
         ShaderId::kSkinMask, innerState, vbSkinMask_, ibFullMesh_,
         0, kCanonicalIndexCount, VertexLayout::kSkinMaskPos2W3, tb, ub);
 
+    device_.endPass();
+}
+
+void RenderPipeline::blurSkinMask() {
+    // 2-pass H+V Gaussian anti-alias feathering matching SkinMaskPass.kt (1.10 / skinW, 1.10 / skinH).
+    RenderState st{};
+    TextureBindings tb{};
+    UniformBlock ub{};
+    tb.bind(0, device_.textureOf(rtSkinMask_));
+    ub.push(1.10f / static_cast<float>(skinW_), 0.0f, 0.0f, 0.0f);
+    device_.beginPass(rtSkinMaskTmp_, skinW_, skinH_, false);
+    device_.drawFullScreenQuad(ShaderId::kBlurRgb, st, tb, ub);
+    device_.endPass();
+
+    tb.clear(); ub.clear();
+    tb.bind(0, device_.textureOf(rtSkinMaskTmp_));
+    ub.push(0.0f, 1.10f / static_cast<float>(skinH_), 0.0f, 0.0f);
+    device_.beginPass(rtSkinMask_, skinW_, skinH_, false);
+    device_.drawFullScreenQuad(ShaderId::kBlurRgb, st, tb, ub);
     device_.endPass();
 }
 
@@ -552,7 +607,8 @@ void RenderPipeline::renderMakeup(
 
 void RenderPipeline::renderHairAlpha(
     TextureId hairMaskTex, float hairShown, const float* hairAffine8,
-    const float* ovalState41, float aspect, bool clearRgbToZero) {
+    const float* ovalState41, float aspect, bool clearRgbToZero,
+    bool meshWarped, bool frontFaceCw) {
     RenderState st{};
     st.colorMaskAlphaOnly = !clearRgbToZero;
     TextureBindings tb{};
@@ -569,6 +625,23 @@ void RenderPipeline::renderHairAlpha(
     }
     device_.beginPass(rtSkinMask_, skinW_, skinH_, clearRgbToZero, {0.0f, 0.0f, 0.0f, 1.0f});
     device_.drawFullScreenQuad(ShaderId::kHairAlpha, st, tb, ub);
+    if (meshWarped) {
+        // Follow primary face mesh deformation in alpha channel (matching SemanticAlphaPass.kt).
+        RenderState outerSt = st;
+        outerSt.colorMaskAlphaOnly = true;
+        outerSt.cullBack = false;
+        const int totalIndices = static_cast<int>(math::FaceMeshTopology::kFullIndices.size());
+        device_.drawIndexed(
+            ShaderId::kHairAlpha, outerSt, vbMeshWarp_, ibFullMesh_,
+            kCanonicalIndexCount, totalIndices - kCanonicalIndexCount,
+            VertexLayout::kMeshPos2Uv2, tb, ub);
+        RenderState innerSt = outerSt;
+        innerSt.cullBack = true;
+        innerSt.frontFaceCw = frontFaceCw;
+        device_.drawIndexed(
+            ShaderId::kHairAlpha, innerSt, vbMeshWarp_, ibFullMesh_,
+            0, kCanonicalIndexCount, VertexLayout::kMeshPos2Uv2, tb, ub);
+    }
     device_.endPass();
 }
 
@@ -627,6 +700,42 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     ensureResources(in.width, in.height);
     const float aspect = static_cast<float>(in.width) / static_cast<float>(in.height);
     TextureId currentTex = in.inputTexture;
+
+    // 0. Adaptive Temporal Denoise (Stage 0 pre-warp, matching VideoEffectsFilter.kt; strict 8/255 motion cutoff + 0.18 cap)
+    const float lumaDenoise = (config.smoothing > 0.0f && std::isfinite(in.lightLuma))
+        ? detail::clampf((0.18f - in.lightLuma) / 0.10f, 0.0f, 1.0f) * 0.18f
+        : 0.0f;
+    const float denoiseWeight = detail::clampf(
+        std::max(lumaDenoise, math::BitrateEffectsTuning::denoise(in.bitratePressure)) *
+            in.denoiseKeep * in.loadFadeSmooth,
+        0.0f, 0.18f);
+    if (denoiseWeight > 0.01f && denoiseHistoryValid_) {
+        const int dstIdx = 1 - denoiseParity_;
+        RenderState st{};
+        TextureBindings tb{};
+        UniformBlock ub{};
+        tb.bind(0, currentTex);
+        tb.bind(1, device_.textureOf(rtDenoise_[denoiseParity_]));
+        ub.push(denoiseWeight, 0.010f, 0.032f, 0.0f);
+        device_.beginPass(rtDenoise_[dstIdx], in.width, in.height, false);
+        device_.drawFullScreenQuad(ShaderId::kTemporalDenoise, st, tb, ub);
+        device_.endPass();
+        denoiseParity_ = dstIdx;
+        currentTex = device_.textureOf(rtDenoise_[dstIdx]);
+        lastActivePassesMask_ |= kPassDenoise;
+    } else if (denoiseWeight > 0.01f) {
+        RenderState st{};
+        TextureBindings tb{};
+        UniformBlock ub{};
+        tb.bind(0, currentTex);
+        device_.beginPass(rtDenoise_[denoiseParity_], in.width, in.height, false);
+        device_.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
+        device_.endPass();
+        denoiseHistoryValid_ = true;
+    } else {
+        // Invalidate history whenever denoise pauses (e.g. head moving) so stale frames are never blended later.
+        denoiseHistoryValid_ = false;
+    }
 
     // 1. Optional Background Bokeh / Virtual Background Replacement (with optional hair-merge flyaway preservation)
     const float bgBlur = config.backgroundBlur * in.loadFadeBody;
@@ -826,6 +935,13 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     if (meshWarped) {
         frontFaceCw = deformer_.frontFaceCw();
         postWarpLandmarks = deformer_.warpedLandmarks();
+        if (in.faceMeta15 && math::FaceMeshFrame::fillGeometryState(
+                postWarpLandmarks, math::FaceMeshFrame::kCoordCount,
+                in.faceMeta15[math::FaceMeshFrame::kMetaAxisX],
+                in.faceMeta15[math::FaceMeshFrame::kMetaAxisY],
+                aspect, 0.0f, warpedState_.data())) {
+            activeFaceState = warpedState_.data();
+        }
     } else if (in.hasFaceMesh && activeLandmarks) {
         frontFaceCw = math::FaceMeshFrame::isFrontFaceCw(activeLandmarks, math::FaceMeshFrame::kCoordCount);
     }
@@ -833,6 +949,14 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     if (meshWarped || wantRetouch) {
         const TextureId sourceBeforeWarp = currentTex;
         device_.beginPass(rtWarp_, in.width, in.height, false);
+        // Always draw unwarped fullscreen base first so back-face-culled triangles never expose stale previous-frame pixels.
+        {
+            RenderState copySt{};
+            TextureBindings tb{};
+            UniformBlock ub{};
+            tb.bind(0, sourceBeforeWarp);
+            device_.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+        }
         if (meshWarped) {
             device_.updateVertexBuffer(
                 vbMeshWarp_, deformer_.vertexData(),
@@ -856,12 +980,6 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             device_.drawIndexed(
                 ShaderId::kMeshWarp, innerSt, vbMeshWarp_, ibFullMesh_,
                 0, kCanonicalIndexCount, VertexLayout::kMeshPos2Uv2, tb, ub);
-        } else {
-            RenderState copySt{};
-            TextureBindings tb{};
-            UniformBlock ub{};
-            tb.bind(0, sourceBeforeWarp);
-            device_.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
         }
 
         // In-place 468-pt anatomical sub-mesh retouch directly on rtWarp_ (zero extra 1080p FBO).
@@ -953,6 +1071,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             const RenderTargetId secDstRt = (currentTex == device_.textureOf(rtBody_)) ? rtWarp_ : rtBody_;
             const TextureId srcBeforeSec = currentTex;
             device_.beginPass(secDstRt, in.width, in.height, false);
+            {
+                RenderState copySt{}; TextureBindings tb{}; UniformBlock ub{}; tb.bind(0, srcBeforeSec);
+                device_.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+            }
             if (secWarped) {
                 device_.updateVertexBuffer(
                     vbMeshWarp_, deformer2_.vertexData(),
@@ -967,9 +1089,6 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 device_.drawIndexed(ShaderId::kMeshWarp, innerSt, vbMeshWarp_, ibFullMesh_,
                                     0, kCanonicalIndexCount, VertexLayout::kMeshPos2Uv2, tb, ub);
                 lastActivePassesMask_ |= kPassFaceWarp;
-            } else {
-                RenderState copySt{}; TextureBindings tb{}; UniformBlock ub{}; tb.bind(0, srcBeforeSec);
-                device_.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
             }
             if (wantSecRetouch) {
                 const float dc = detail::clampf(config.darkCircles * effSecPresence * sec.steadyFace, 0.0f, 1.0f);
@@ -1016,26 +1135,41 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         }
     }
 
-    // 4. Polygon Skin Mask (468+36 vertices; overlays secondary face onto same rtSkinMask_) + Hair Semantic Alpha
+    // 4. Polygon Skin Mask (468+36 vertices + 2-pass H+V feather blur) + Hair Semantic Alpha (mesh-warped)
     bool polySkinMaskReady = false;
     bool hasSemanticTex = false;
-    if (in.hasFaceMesh && postWarpLandmarks && effFacePresence > 1e-4f) {
-        renderSkinMask(postWarpLandmarks, frontFaceCw, in.width, in.height, /*clearFirst=*/true);
+    if (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) {
+        renderSkinMask(postWarpLandmarks,
+                       in.faceMeta15[math::FaceMeshFrame::kMetaAxisX],
+                       in.faceMeta15[math::FaceMeshFrame::kMetaAxisY],
+                       frontFaceCw, in.width, in.height, /*clearFirst=*/true);
         polySkinMaskReady = true;
         hasSemanticTex = true;
         lastActivePassesMask_ |= kPassSkinMask;
     }
     if (secActive && postSecLandmarks) {
-        renderSkinMask(postSecLandmarks, secFrontCw, in.width, in.height, /*clearFirst=*/!polySkinMaskReady);
+        renderSkinMask(postSecLandmarks,
+                       sec.meta15[math::FaceMeshFrame::kMetaAxisX],
+                       sec.meta15[math::FaceMeshFrame::kMetaAxisY],
+                       secFrontCw, in.width, in.height, /*clearFirst=*/!polySkinMaskReady);
         polySkinMaskReady = true;
         hasSemanticTex = true;
         lastActivePassesMask_ |= kPassSkinMask;
     }
+    if (polySkinMaskReady) {
+        blurSkinMask();
+    }
     TextureId hairWeightTex = kInvalidTexture;
     if (in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) {
+        // Re-upload primary mesh VBO if secondary face overwrote vbMeshWarp_ so hair alpha follows primary face warp.
+        if (meshWarped && secWarped) {
+            device_.updateVertexBuffer(
+                vbMeshWarp_, deformer_.vertexData(),
+                sizeof(float) * static_cast<size_t>(deformer_.vertexDataFloatCount()));
+        }
         renderHairAlpha(
             in.hairMaskTex, in.hairShown, in.hairAffine.data(),
-            activeFaceState, aspect, !polySkinMaskReady);
+            activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
         hasSemanticTex = true;
         hairWeightTex = device_.textureOf(rtSkinMask_);
         lastActivePassesMask_ |= kPassHairAlpha;
@@ -1070,25 +1204,30 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         const float maxFacePresence = std::max(effFacePresence, effSecPresence);
         const float framePresence = (polySkinMaskReady && maxFacePresence > 0.0f)
             ? (maxFacePresence + 4.0f) : maxFacePresence;
-        const float stylePacked = static_cast<float>(static_cast<int>(config.filter)) + (config.skinOnly ? 16.0f : 0.0f);
+        // Disable legacy constant RGB color filter when 3D LUT is active (prevents double grading, matching VideoEffectsFilter.kt).
+        const float activeStyle = (lutStrength > 0.0f) ? 0.0f : static_cast<float>(static_cast<int>(config.filter));
+        const float activeFilterIntensity = (lutStrength > 0.0f) ? 0.0f : config.filterIntensity;
+        const float stylePacked = activeStyle + (config.skinOnly ? 16.0f : 0.0f);
         const float effTexture = math::BitrateEffectsTuning::texture(config.skinTexture, in.bitratePressure);
         const float effSharpness = math::BitrateEffectsTuning::sharpness(config.sharpness, in.bitratePressure);
         const float coreThresh = math::BeautyQualityTuning::coreThreshold(in.lightLuma, in.bitratePressure);
+        const float* fallbackEllipseState = (!meshWarped && appliedNeck <= 0.0f && in.dilatedFaceState41)
+            ? in.dilatedFaceState41 : activeFaceState;
 
         // Uniform layout matching FRAGMENT_PRO (11 vec4 + 4 samplers = 15 active uniforms):
         // [0] uFrame, [1] uParams, [2] uDetails, [3] uTone, [4..5] uEyes[2],
         // [6] uOval, [7] uMouth, [8..9] uEyeMask[2], [10] uGrade
         ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), aspect, framePresence);
         ub.push(stylePacked, effSmooth, config.brightness, effTexture);
-        ub.push(config.radiance, effSharpness, config.saturation, config.filterIntensity);
+        ub.push(config.radiance, effSharpness, config.saturation, activeFilterIntensity);
         ub.push(config.whiten, config.rosy, 0.0f, 0.0f);
-        if (activeFaceState) {
-            ub.push(activeFaceState[16], activeFaceState[17], activeFaceState[18], activeFaceState[26]);
-            ub.push(activeFaceState[19], activeFaceState[20], activeFaceState[21], activeFaceState[27]);
-            ub.push(activeFaceState[22], activeFaceState[23], activeFaceState[24], activeFaceState[25]);
-            ub.push(activeFaceState[28], activeFaceState[29], activeFaceState[30], activeFaceState[31]);
-            ub.push(activeFaceState[32], activeFaceState[33], activeFaceState[34], activeFaceState[35]);
-            ub.push(activeFaceState[36], activeFaceState[37], activeFaceState[38], activeFaceState[39]);
+        if (fallbackEllipseState) {
+            ub.push(fallbackEllipseState[16], fallbackEllipseState[17], fallbackEllipseState[18], fallbackEllipseState[26]);
+            ub.push(fallbackEllipseState[19], fallbackEllipseState[20], fallbackEllipseState[21], fallbackEllipseState[27]);
+            ub.push(fallbackEllipseState[22], fallbackEllipseState[23], fallbackEllipseState[24], fallbackEllipseState[25]);
+            ub.push(fallbackEllipseState[28], fallbackEllipseState[29], fallbackEllipseState[30], fallbackEllipseState[31]);
+            ub.push(fallbackEllipseState[32], fallbackEllipseState[33], fallbackEllipseState[34], fallbackEllipseState[35]);
+            ub.push(fallbackEllipseState[36], fallbackEllipseState[37], fallbackEllipseState[38], fallbackEllipseState[39]);
         } else {
             for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
         }
@@ -1136,33 +1275,6 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                        postSecLandmarks, sec.meta15, effSecPresence);
         currentTex = device_.textureOf(rtMakeup_);
         lastActivePassesMask_ |= kPassSticker;
-    }
-
-    // 8. Adaptive Temporal Denoise
-    const float denoiseWeight = math::BitrateEffectsTuning::denoise(in.bitratePressure) * in.denoiseKeep * in.loadFadeSmooth;
-    if (denoiseWeight > 0.01f && denoiseHistoryValid_) {
-        const int dstIdx = 1 - denoiseParity_;
-        RenderState st{};
-        TextureBindings tb{};
-        UniformBlock ub{};
-        tb.bind(0, currentTex);
-        tb.bind(1, device_.textureOf(rtDenoise_[denoiseParity_]));
-        ub.push(denoiseWeight, 0.03f, 0.10f, 0.0f);
-        device_.beginPass(rtDenoise_[dstIdx], in.width, in.height, false);
-        device_.drawFullScreenQuad(ShaderId::kTemporalDenoise, st, tb, ub);
-        device_.endPass();
-        denoiseParity_ = dstIdx;
-        currentTex = device_.textureOf(rtDenoise_[dstIdx]);
-        lastActivePassesMask_ |= kPassDenoise;
-    } else if (denoiseWeight > 0.01f) {
-        RenderState st{};
-        TextureBindings tb{};
-        UniformBlock ub{};
-        tb.bind(0, currentTex);
-        device_.beginPass(rtDenoise_[denoiseParity_], in.width, in.height, false);
-        device_.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
-        device_.endPass();
-        denoiseHistoryValid_ = true;
     }
 
     return currentTex;

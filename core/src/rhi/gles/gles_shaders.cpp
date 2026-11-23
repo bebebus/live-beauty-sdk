@@ -86,6 +86,18 @@ void main() {
 }
 )";
 
+constexpr const char* kSemanticVert = R"(
+attribute vec2 aPosition;
+attribute vec2 aTextureCoord;
+varying vec2 vSrc;
+varying vec2 vDst;
+void main() {
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+    vSrc = aTextureCoord;
+    vDst = aPosition * 0.5 + 0.5;
+}
+)";
+
 #define LB_GLSL_PREC \
     "#ifdef GL_ES\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#endif\n"
 
@@ -131,7 +143,7 @@ void main() {
 
 constexpr const char* kGuidedCoeffFrag = LB_GLSL_BLUR_COMMON R"(
 uniform sampler2D uTex1;
-uniform vec4 uU0;
+uniform vec4 uU1;
 float guidedCoeff(float s, float eps) {
     float e = max(eps, 0.005);
     float r = s * s / e;
@@ -150,8 +162,8 @@ vec3 evenMean(vec3 fineMean, float s, float evenness) {
 }
 void main() {
     float s = blur5().a;
-    vec3 mean = evenMean(texture2D(uTex0, vC).rgb, s, uU0.w);
-    float a = guidedCoeff(s, uU0.z);
+    vec3 mean = evenMean(texture2D(uTex0, vC).rgb, s, uU1.y);
+    float a = guidedCoeff(s, uU1.x);
     gl_FragColor = vec4((1.0 - a) * mean, a);
 }
 )";
@@ -182,7 +194,7 @@ void main() {
 constexpr const char* kGuidedWeightCoeffFrag = LB_GLSL_BLUR_COMMON R"(
 uniform sampler2D uTex1;
 uniform sampler2D uTex2;
-uniform vec4 uU0;
+uniform vec4 uU1;
 float guidedCoeff(float s, float eps) {
     float e = max(eps, 0.005);
     float r = s * s / e;
@@ -202,8 +214,8 @@ vec3 evenMean(vec3 fineMean, float s, float evenness, float maskW) {
 void main() {
     float s = blur5().a;
     float w = clamp(texture2D(uTex2, vC).a * 1.04 - 0.02, 0.0, 1.0);
-    vec3 mean = evenMean(texture2D(uTex0, vC).rgb, s, uU0.w, w);
-    float a = mix(1.0, guidedCoeff(s, uU0.z), w);
+    vec3 mean = evenMean(texture2D(uTex0, vC).rgb, s, uU1.y, w);
+    float a = mix(1.0, guidedCoeff(s, uU1.x), w);
     gl_FragColor = vec4((1.0 - a) * mean, a);
 }
 )";
@@ -702,9 +714,9 @@ void main() {
 )";
 
 // uU0=(a00, a01, a02, shown), uU1=(a10, a11, a12, 0), uU2=oval(cx,cy,rx,ry), uU3=(ax,ay,aspect,hasFace)
-const char* kHairAlphaFrag = R"(
-precision mediump float;
-varying vec2 vTextureCoord;
+constexpr const char* kHairAlphaFrag = LB_GLSL_PREC R"(
+varying vec2 vSrc;
+varying vec2 vDst;
 uniform sampler2D uTex0;
 uniform vec4 uU0;
 uniform vec4 uU1;
@@ -712,16 +724,16 @@ uniform vec4 uU2;
 uniform vec4 uU3;
 float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
     vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
-    float u = dot(d, a) / max(o.z, 0.0001);
-    float v = dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001);
+    float u = clamp(dot(d, a) / max(o.z, 0.0001), -4.0, 4.0);
+    float v = clamp(dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001), -4.0, 4.0);
     return u * u + v * v;
 }
 void main() {
-    vec2 muv = vec2(uU0.x * vTextureCoord.x + uU0.y * vTextureCoord.y + uU0.z,
-                    uU1.x * vTextureCoord.x + uU1.y * vTextureCoord.y + uU1.z);
+    vec2 muv = vec2(uU0.x * vSrc.x + uU0.y * vSrc.y + uU0.z,
+                    uU1.x * vSrc.x + uU1.y * vSrc.y + uU1.z);
     float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
     float hair = texture2D(uTex0, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
-    float inFace = uU3.w > 0.5 ? (1.0 - smoothstep(0.85, 1.15, ellipseE(vTextureCoord, uU2, uU3.xy, max(uU3.z, 0.0001)))) : 0.0;
+    float inFace = uU3.w > 0.5 ? (1.0 - smoothstep(0.50, 1.0, ellipseE(vDst, uU2, uU3.xy, max(uU3.z, 0.0001)))) : 0.0;
     float bias = 0.15 * inFace;
     float h = smoothstep(0.35 + bias, 0.65 + bias, hair);
     float nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
@@ -731,8 +743,7 @@ void main() {
 
 // Renders in top-down mask space matching personMaskTex so downstream BgPremask/BgMix/BgVirtualMix sample identically.
 // uU0=(a00, a01, a02, shown), uU1=(a10, a11, a12, 0), uU2=oval, uU3=(ax,ay,aspect,hasFace)
-const char* kBgHairMergeFrag = R"(
-precision mediump float;
+constexpr const char* kBgHairMergeFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
 uniform sampler2D uTex1;
@@ -742,8 +753,8 @@ uniform vec4 uU2;
 uniform vec4 uU3;
 float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
     vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
-    float u = dot(d, a) / max(o.z, 0.0001);
-    float v = dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001);
+    float u = clamp(dot(d, a) / max(o.z, 0.0001), -4.0, 4.0);
+    float v = clamp(dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001), -4.0, 4.0);
     return u * u + v * v;
 }
 void main() {
@@ -760,8 +771,7 @@ void main() {
 )";
 
 // uU0=(strength, lo, hi, detailKeep), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY), uU2=oval, uU3=(ax,ay,aspect,0)
-const char* kBgVirtualMixFrag = R"(
-precision mediump float;
+constexpr const char* kBgVirtualMixFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
 uniform sampler2D uTex1;
@@ -773,8 +783,8 @@ uniform vec4 uU3;
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
     vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
-    float u = dot(d, a) / max(o.z, 0.0001);
-    float v = dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001);
+    float u = clamp(dot(d, a) / max(o.z, 0.0001), -4.0, 4.0);
+    float v = clamp(dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001), -4.0, 4.0);
     return u * u + v * v;
 }
 void main() {
@@ -790,8 +800,7 @@ void main() {
 )";
 
 // uU0=(opacity, 0, 0, 0)
-const char* kStickerQuadFrag = R"(
-precision mediump float;
+constexpr const char* kStickerQuadFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
 uniform vec4 uU0;
@@ -826,7 +835,7 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kBgPremask:       return {kQuadVert, kBgPremaskFrag};
         case ShaderId::kBgBlur:          return {kQuadVert, kBgBlurFrag};
         case ShaderId::kBgMix:           return {kQuadVert, kBgMixFrag};
-        case ShaderId::kHairAlpha:       return {kQuadVert, kHairAlphaFrag};
+        case ShaderId::kHairAlpha:       return {kSemanticVert, kHairAlphaFrag};
         case ShaderId::kBgHairMerge:     return {kQuadVert, kBgHairMergeFrag};
         case ShaderId::kBgVirtualMix:    return {kQuadVert, kBgVirtualMixFrag};
         case ShaderId::kStickerQuad:     return {kQuadVert, kStickerQuadFrag};

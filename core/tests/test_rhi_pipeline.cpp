@@ -310,17 +310,42 @@ void testHairWeightedGuidedDualFaceAndFrameDelayRing() {
 
     bool sawWeightBlur = false, sawWeightDiff = false, sawWeightCoeff = false;
     int skinMaskDraws = 0;
-    for (const auto& c : dev.calls) {
+    int hairAlphaIndexedDraws = 0;
+    int blurCallsAfterSkinMask = 0;
+    int lastSkinMaskIdx = -1;
+    int firstHairAlphaIdx = -1;
+    for (int i = 0; i < static_cast<int>(dev.calls.size()); ++i) {
+        const auto& c = dev.calls[i];
         if (c.shader == ShaderId::kGuidedWeightBlur) sawWeightBlur = true;
         if (c.shader == ShaderId::kGuidedWeightDiff) sawWeightDiff = true;
-        if (c.shader == ShaderId::kGuidedWeightCoeff) sawWeightCoeff = true;
-        if (c.shader == ShaderId::kSkinMask) ++skinMaskDraws;
+        if (c.shader == ShaderId::kGuidedWeightCoeff) {
+            sawWeightCoeff = true;
+            // Verify vertex uU0 (dir) and fragment uU1 (eps, evenness) are strictly disjoint.
+            EXPECT_TRUE(c.uniforms.count == 2);
+            EXPECT_TRUE(c.uniforms.v[0].z == 0.0f && c.uniforms.v[0].w == 0.0f);
+            EXPECT_TRUE(c.uniforms.v[1].x > 0.0f && c.uniforms.v[1].y > 0.0f);
+        }
+        if (c.shader == ShaderId::kSkinMask) {
+            ++skinMaskDraws;
+            lastSkinMaskIdx = i;
+        }
+        if (c.shader == ShaderId::kHairAlpha) {
+            if (firstHairAlphaIdx < 0) firstHairAlphaIdx = i;
+            if (c.indexed) ++hairAlphaIndexedDraws;
+        }
+    }
+    for (int i = lastSkinMaskIdx + 1; i < firstHairAlphaIdx; ++i) {
+        if (dev.calls[i].shader == ShaderId::kBlurRgb) ++blurCallsAfterSkinMask;
     }
     EXPECT_TRUE(sawWeightBlur);
     EXPECT_TRUE(sawWeightDiff);
     EXPECT_TRUE(sawWeightCoeff);
     // Primary + Secondary face each issue feather + inner skin-mask draws = 4 draws
     EXPECT_TRUE(skinMaskDraws == 4);
+    // SkinMask must execute 2-pass H+V Gaussian feathering BEFORE HairAlpha writes alpha
+    EXPECT_TRUE(blurCallsAfterSkinMask == 2);
+    // HairAlpha must follow primary face mesh warp (outer + inner indexed passes)
+    EXPECT_TRUE(hairAlphaIndexedDraws == 2);
 
     const auto& st = engine.stats();
     EXPECT_TRUE(st.activeFaces == 2);
@@ -330,6 +355,50 @@ void testHairWeightedGuidedDualFaceAndFrameDelayRing() {
     EXPECT_TRUE(st.displayedTimestampMs == lastTs - 66);
 }
 
+void testFourFrameDelayStage0DenoiseAndLutFilterSuppression() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId lutTex = dev.createTexture2D(512, 512, TextureFormat::kRgba8, nullptr);
+    PipelineAssets assets{};
+    assets.lutTex = lutTex;
+    engine.setAssets(assets);
+
+    auto cfg = BeautyConfig::naturalStudio();
+    cfg.filter = ColorFilterStyle::kWarm;
+    cfg.filterIntensity = 0.8f;
+    cfg.frameDelayFrames = 4;
+    engine.setConfig(cfg);
+
+    int64_t lastTs = 0;
+    for (int f = 0; f < 8; ++f) {
+        lastTs = 9000 + f * 33;
+        dev.calls.clear();
+        // Low light (0.06) triggers Stage 0 temporal denoise
+        engine.processFrame(inputTex, 720, 1280, lastTs, lastTs, kInvalidTexture, 0.06f, 1.0f);
+    }
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    EXPECT_TRUE(engine.stats().displayedTimestampMs == lastTs - 132);
+
+    int idxDenoise = -1, idxComposite = -1;
+    for (int i = 0; i < static_cast<int>(dev.calls.size()); ++i) {
+        const auto& c = dev.calls[i];
+        if (c.shader == ShaderId::kTemporalDenoise) {
+            idxDenoise = i;
+            EXPECT_TRUE(c.uniforms.v[0].x <= 0.181f);
+            EXPECT_TRUE(std::fabs(c.uniforms.v[0].y - 0.010f) < 1e-4f);
+            EXPECT_TRUE(std::fabs(c.uniforms.v[0].z - 0.032f) < 1e-4f);
+        }
+        if (c.shader == ShaderId::kCompositePro) {
+            idxComposite = i;
+            // LUT active -> legacy style (0) + skinOnly (16) = 16, legacy filterIntensity = 0
+            EXPECT_TRUE(std::fabs(c.uniforms.v[1].x - 16.0f) < 1e-4f);
+            EXPECT_TRUE(c.uniforms.v[2].w == 0.0f);
+        }
+    }
+    EXPECT_TRUE(idxDenoise >= 0 && idxComposite > idxDenoise);
+}
+
 }  // namespace
 
 int main() {
@@ -337,6 +406,7 @@ int main() {
     testFullBeautyPipelineOrderingAndNoFeedbackLoop();
     testHairProtectionVirtualBgStickersAndTelemetry();
     testHairWeightedGuidedDualFaceAndFrameDelayRing();
+    testFourFrameDelayStage0DenoiseAndLutFilterSuppression();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

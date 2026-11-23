@@ -110,6 +110,20 @@ vertex QuadOut vs_quad(QuadIn in [[stage_in]]) {
     return out;
 }
 
+struct SemanticOut {
+    float4 pos [[position]];
+    float2 src;
+    float2 dst;
+};
+
+vertex SemanticOut vs_semantic(QuadIn in [[stage_in]]) {
+    SemanticOut out;
+    out.pos = float4(in.pos, 0.0f, 1.0f);
+    out.src = in.uv;
+    out.dst = in.pos * 0.5f + 0.5f;
+    return out;
+}
+
 struct DownOut {
     float4 pos [[position]];
     float2 tap0;
@@ -248,8 +262,8 @@ fragment float4 fs_guided_coeff(BlurOut in [[stage_in]],
                                 texture2d<float> tex1 [[texture(1)]],
                                 constant Uniforms& uni [[buffer(1)]]) {
     float s = blur5Sample(tex0, in).a;
-    float eps = max(uni.u[0].z, 0.005f);
-    float evenness = uni.u[0].w;
+    float eps = max(uni.u[1].x, 0.005f);
+    float evenness = uni.u[1].y;
     float3 fineMean = tex0.sample(kLinearClamp, toMtlUv(in.c)).rgb;
     float3 mean = fineMean;
     if (evenness > 0.0f) {
@@ -297,8 +311,8 @@ fragment float4 fs_guided_weight_coeff(BlurOut in [[stage_in]],
                                        constant Uniforms& uni [[buffer(1)]]) {
     float s = blur5Sample(tex0, in).a;
     float w = clamp(tex2.sample(kLinearClamp, toMtlUv(in.c)).a * 1.04f - 0.02f, 0.0f, 1.0f);
-    float eps = max(uni.u[0].z, 0.005f);
-    float evenness = uni.u[0].w;
+    float eps = max(uni.u[1].x, 0.005f);
+    float evenness = uni.u[1].y;
     float3 fineMean = tex0.sample(kLinearClamp, toMtlUv(in.c)).rgb;
     float3 mean = fineMean;
     if (evenness > 0.0f) {
@@ -726,15 +740,15 @@ fragment float4 fs_bg_mix(QuadOut in [[stage_in]],
     return float4(mix(color.rgb, mix(blurred, color.rgb, keep), uni.u[0].x), color.a);
 }
 
-fragment float4 fs_hair_alpha(QuadOut in [[stage_in]],
+fragment float4 fs_hair_alpha(SemanticOut in [[stage_in]],
                               texture2d<float> tex0 [[texture(0)]],
                               constant Uniforms& uni [[buffer(1)]]) {
-    float2 muv = float2(uni.u[0].x * in.uv.x + uni.u[0].y * in.uv.y + uni.u[0].z,
-                        uni.u[1].x * in.uv.x + uni.u[1].y * in.uv.y + uni.u[1].z);
+    float2 muv = float2(uni.u[0].x * in.src.x + uni.u[0].y * in.src.y + uni.u[0].z,
+                        uni.u[1].x * in.src.x + uni.u[1].y * in.src.y + uni.u[1].z);
     float inBounds = step(0.0f, muv.x) * step(muv.x, 1.0f) * step(0.0f, muv.y) * step(muv.y, 1.0f);
     float hair = tex0.sample(kLinearClamp, toMtlUv(muv)).r * inBounds;
     float inFace = uni.u[3].w > 0.5f
-        ? (1.0f - smoothstep(0.85f, 1.15f, ellipseE(in.uv, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f))))
+        ? (1.0f - smoothstep(0.50f, 1.0f, ellipseE(in.dst, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f))))
         : 0.0f;
     float bias = 0.15f * inFace;
     float h = smoothstep(0.35f + bias, 0.65f + bias, hair);

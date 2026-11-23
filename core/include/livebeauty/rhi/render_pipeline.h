@@ -56,6 +56,7 @@ struct FrameInputs {
     // Optional tracked face mesh & 41-D state
     bool hasFaceState = false;
     const float* faceState41 = nullptr;
+    const float* dilatedFaceState41 = nullptr;  // Motion-dilated fallback ellipses when extrapolating
     bool hasFaceMesh = false;
     const float* landmarks478x2 = nullptr;
     const float* faceMeta15 = nullptr;
@@ -120,12 +121,13 @@ public:
 
     void setAssets(const PipelineAssets& assets) { assets_ = assets; }
     void resetTemporal();
+    void resetDeformerTemporal();
     void releaseGpuResources();
 
     /**
-     * Cross-backend FrameDelayRing (0..2 frames): copies inputTex into a small ring buffer and
+     * Cross-backend FrameDelayRing (0..4 frames): copies inputTex into a ring buffer and
      * returns the texture & timestamp from `delayFrames` frames ago so rendering aligns strictly
-     * with asynchronous MediaPipe face inference. Zero allocation when delayFrames == 0.
+     * with asynchronous MediaPipe face inference (GPU 1-2 frames, CPU 2-4 frames). Zero allocation when delayFrames == 0.
      */
     void pushFrameDelay(
         TextureId inputTex, int64_t inputTsMs, int delayFrames, int width, int height,
@@ -140,9 +142,12 @@ private:
     void ensureStaticBuffers();
     void renderGuidedFilter(TextureId srcTex, int width, int height, float eps, float evenness, float spread,
                             TextureId hairWeightTex = kInvalidTexture);
-    void renderSkinMask(const float* landmarks478x2, bool frontFaceCw, int width, int height, bool clearFirst = true);
+    void renderSkinMask(const float* landmarks478x2, float axisX, float axisY,
+                        bool frontFaceCw, int width, int height, bool clearFirst = true);
+    void blurSkinMask();
     void renderHairAlpha(TextureId hairMaskTex, float hairShown, const float* hairAffine8,
-                         const float* ovalState41, float aspect, bool clearRgbToZero);
+                         const float* ovalState41, float aspect, bool clearRgbToZero,
+                         bool meshWarped, bool frontFaceCw);
     void renderMakeup(
         RenderTargetId targetRt, TextureId baseTex, int width, int height,
         const BeautyConfig& cfg, const float* landmarks478x2, const float* meta15,
@@ -179,8 +184,9 @@ private:
     RenderTargetId rtGuided_[3] = {kInvalidRenderTarget, kInvalidRenderTarget, kInvalidRenderTarget};
     RenderTargetId rtMacro_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
 
-    // Polygon skin mask (1/4 res)
+    // Polygon skin mask (1/4 res + ping-pong feather blur target)
     RenderTargetId rtSkinMask_ = kInvalidRenderTarget;
+    RenderTargetId rtSkinMaskTmp_ = kInvalidRenderTarget;
 
     // Background bokeh / virtual background (1/4 res) & merged person+hair mask
     RenderTargetId rtBg_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
@@ -208,10 +214,15 @@ private:
     BufferId ibLeftEye_ = kInvalidBuffer;
     BufferId ibSticker_ = kInvalidBuffer;
 
-    // Cross-backend FrameDelayRing (allocated lazily only when frameDelayFrames > 0)
-    static constexpr int kMaxDelaySlots = 3;
-    RenderTargetId rtDelay_[kMaxDelaySlots] = {kInvalidRenderTarget, kInvalidRenderTarget, kInvalidRenderTarget};
-    int64_t delayStamps_[kMaxDelaySlots] = {kTimeInvalid, kTimeInvalid, kTimeInvalid};
+    // Cross-backend FrameDelayRing (allocated lazily only when frameDelayFrames > 0; supports 0..4 frames)
+    static constexpr int kMaxDelaySlots = 5;
+    RenderTargetId rtDelay_[kMaxDelaySlots] = {
+        kInvalidRenderTarget, kInvalidRenderTarget, kInvalidRenderTarget,
+        kInvalidRenderTarget, kInvalidRenderTarget,
+    };
+    int64_t delayStamps_[kMaxDelaySlots] = {
+        kTimeInvalid, kTimeInvalid, kTimeInvalid, kTimeInvalid, kTimeInvalid,
+    };
     int delayW_ = 0;
     int delayH_ = 0;
     int delayWriteIdx_ = 0;
@@ -222,6 +233,7 @@ private:
     math::FaceMeshDeformer deformer2_;
     std::array<float, math::FaceMeshFrame::kCoordCount> liftedLandmarks_{};
     std::array<float, math::FaceGeometryConstants::kStateSize> liftedState_{};
+    std::array<float, math::FaceGeometryConstants::kStateSize> warpedState_{};
     std::array<float, (math::FaceMeshTopology::kFaceVertexCount + math::FaceMeshTopology::kOvalVertexCount) * 5> skinMaskVerts_{};
     std::array<float, math::FaceRetouchSubMesh::kVertexDataSize> retouchVerts_{};
     std::array<float, math::FaceMakeupUv::kVertexDataSize> makeupVerts_{};

@@ -46,7 +46,8 @@ internal class LiveBeautyCppEngine(
     private val clockMs: () -> Long = { SystemClock.uptimeMillis() },
 ) : BeautyEngine {
 
-    override val latencyFrames: Int = 0
+    override val latencyFrames: Int
+        get() = frameDelayFrames.coerceIn(0, 4)
 
     private var handle: Long = 0L
     private var appContext: Context? = null
@@ -209,7 +210,7 @@ internal class LiveBeautyCppEngine(
     /** 配置双人同屏人数上限（1..2）与零滞后帧对齐环帧数（0..2）。 */
     fun setPipelineOptions(maxFaces: Int = 1, frameDelayFrames: Int = 0) {
         val clampedFaces = maxFaces.coerceIn(1, 2)
-        val clampedDelay = frameDelayFrames.coerceIn(0, 2)
+        val clampedDelay = frameDelayFrames.coerceIn(0, 4)
         if (this.maxFaces != clampedFaces) {
             this.maxFaces = clampedFaces
             faceWorker?.setMaxFaces(clampedFaces)
@@ -869,8 +870,8 @@ internal class LiveBeautyCppEngine(
     companion object {
         const val SCALAR_COUNT = 45
         const val MAX_STICKERS = 4
-        private const val FACE_GPU_INTERVAL_MS = 33L
-        private const val FACE_CPU_INTERVAL_MS = 55L
+        private const val FACE_GPU_INTERVAL_MS = 1L
+        private const val FACE_CPU_INTERVAL_MS = 45L
         private const val BODY_INTERVAL_MS = VideoEffectsFilter.BODY_INTERVAL_MS
         private const val SEG_INTERVAL_MS = VideoEffectsFilter.SEG_INTERVAL_MS
         private const val PREFS = "livebeauty_face_tracker"
