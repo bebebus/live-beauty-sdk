@@ -144,6 +144,25 @@ void testDeformerInvariantsAndCranialTop() {
     const float crownLiftY = ((v1[crownMid * 4 + 1] + 1.0f) * 0.5f) - v1[crownMid * 4 + 3];
     EXPECT_TRUE(crownLiftY > 0.01f);
 
+    // Pure faceSlim must gently shorten vertical face span (10..152) proportionally to jaw narrowing
+    // so slimming never creates an elongated-head illusion.
+    FaceMeshDeformer defSlim;
+    FaceMeshDeformer::Params pSlim;
+    pSlim.faceSlim = 1.0f;
+    EXPECT_TRUE(defSlim.deform(
+        lm.data(), kAspect, meta[FaceMeshFrame::kMetaAxisX], meta[FaceMeshFrame::kMetaAxisY],
+        meta[FaceMeshFrame::kMetaFaceWidth], meta[FaceMeshFrame::kMetaFaceHeight],
+        meta[FaceMeshFrame::kMetaLeftWeight], meta[FaceMeshFrame::kMetaRightWeight],
+        meta[FaceMeshFrame::kMetaYawWeight], 1.0f, 1.0f, 1.0f, pSlim));
+    const float* wl = defSlim.warpedLandmarks();
+    const float origH = std::fabs(lm[10 * 2 + 1] - lm[152 * 2 + 1]) / kAspect;
+    const float newH = std::fabs(wl[10 * 2 + 1] - wl[152 * 2 + 1]) / kAspect;
+    const float origJaw = std::fabs(lm[397 * 2] - lm[172 * 2]);
+    const float newJaw = std::fabs(wl[397 * 2] - wl[172 * 2]);
+    EXPECT_TRUE(newJaw < origJaw - 0.01f);
+    EXPECT_TRUE(newH < origH - 0.01f);
+    EXPECT_TRUE(newH > origH * 0.90f);
+
     // Forehead bare hairline vertex 10 must NOT be pulled upward by cranialTop.
     EXPECT_TRUE(def1.warpedLandmarks()[10 * 2 + 1] <= def0.warpedLandmarks()[10 * 2 + 1] + 1e-5f);
 

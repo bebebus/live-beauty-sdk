@@ -257,6 +257,8 @@ bool FaceMeshDeformer::deform(
     const float sFaceNarrow = detail::clampf(params.faceNarrow, 0.0f, 1.0f) * faceMod;
     const float sFaceSmall = detail::clampf(params.faceSmall, 0.0f, 1.0f) * symFaceMod;
     const float sCheekbone = detail::clampf(params.cheekboneSlim, 0.0f, 1.0f) * faceMod;
+    // 纵向防拉长比例补偿：纯横向瘦脸/窄脸会拉高脸长宽比、显头长；按收窄幅度温和微收上下轮廓，五官中区零压扁。
+    const float antiLong = detail::clampf(sFaceSlim * 0.85f + sFaceNarrow * 0.55f, 0.0f, 1.0f) * yawWeight;
     const float sChin = detail::clampf(params.chinShape, -1.0f, 1.0f) * symFaceMod;
     const float sForehead = detail::clampf(params.foreheadShape, -1.0f, 1.0f) * symFaceMod;
     const float sCranial = detail::clampf(params.cranialTop, 0.0f, 1.0f) * symFaceMod;
@@ -368,6 +370,18 @@ bool FaceMeshDeformer::deform(
                     const float sc = sFaceSmall * 0.060f;
                     dU -= du * sc * sideW;
                     dV -= dv * sc;
+                }
+                if (antiLong > 1e-4f) {
+                    // 下颌与下巴底部柔和上提，消解瘦脸后的尖长下巴感
+                    const float lowerW = detail::smoothstep(-0.20f, -0.92f, nv);
+                    if (lowerW > 0.0f) {
+                        dV += antiLong * 0.032f * fh * lowerW;
+                    }
+                    // 眉上额部温和微收，不压眼眉，防止瘦脸后显额长头长
+                    const float upperW = detail::smoothstep(0.35f, 0.92f, nv);
+                    if (upperW > 0.0f) {
+                        dV -= antiLong * 0.034f * fh * upperW;
+                    }
                 }
                 if (std::fabs(sChin) > 1e-4f) {
                     const float w = radialFalloff(px, py, srcMx_[152], srcMy_[152], 0.34f * fh);
@@ -535,6 +549,14 @@ bool FaceMeshDeformer::deform(
                 const float fluffU = sCranial * templeW * 0.026f * fw * sideSgn;
                 mdx += fluffU * ux + liftV * vx;
                 mdy += fluffU * uy + liftV * vy;
+            }
+            if (antiLong > 1e-4f) {
+                const float topW = detail::smoothstep(0.15f, 0.82f, cNv);
+                if (topW > 0.0f) {
+                    const float crownTuck = antiLong * topW * 0.028f * fh;
+                    mdx -= crownTuck * vx;
+                    mdy -= crownTuck * vy;
+                }
             }
             dispMx_[mi] = mdx;
             dispMy_[mi] = mdy;

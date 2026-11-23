@@ -1058,7 +1058,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(1, bgSource);
             tb.bind(2, effectiveMaskTex);
             ub.push(detail::clampf(config.virtualBgStrength * in.loadFadeBody, 0.0f, 1.0f),
-                    0.35f, 0.70f, in.hasFaceState ? 0.85f : 0.0f);
+                    0.08f, 0.88f, in.hasFaceState ? 0.65f : 0.0f);
             ub.push(uvScaleX, uvScaleY, uvOffX, uvOffY);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, 0.0f);
@@ -1072,13 +1072,16 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             UniformBlock ub{};
             tb.bind(0, currentTex);
             tb.bind(1, effectiveMaskTex);
-            ub.push(bgBlur, 0.35f, 0.70f, 0.0f);
+            // Wide soft-alpha window (0.08..0.88) preserves RVM/matting fine translucent hair strands
+            // instead of hard-clipping them at 0.35..0.70.
+            ub.push(bgBlur, 0.08f, 0.88f, 0.0f);
             device_.beginPass(rtBg_[0], bgW_, bgH_, false);
             device_.drawFullScreenQuad(ShaderId::kBgPremask, st, tb, ub);
             device_.endPass();
 
+            const float radiusGain = 0.55f + 0.85f * bgBlur;
             for (int pass = 0; pass < 2; ++pass) {
-                const float stepScale = (pass == 0) ? 1.0f : 2.0f;
+                const float stepScale = ((pass == 0) ? 1.25f : 2.65f) * radiusGain;
                 tb.clear(); ub.clear();
                 tb.bind(0, device_.textureOf(rtBg_[0]));
                 ub.push(stepScale / static_cast<float>(bgW_), 0.0f, 0.0f, 0.0f);
@@ -1098,7 +1101,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(0, currentTex);
             tb.bind(1, device_.textureOf(rtBg_[0]));
             tb.bind(2, effectiveMaskTex);
-            ub.push(bgBlur, 0.35f, 0.70f, in.hasFaceState ? 0.85f : 0.0f);
+            ub.push(bgBlur, 0.08f, 0.88f, in.hasFaceState ? 0.65f : 0.0f);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, 0.0f);
             device_.beginPass(rtBgOut_, in.width, in.height, false);
