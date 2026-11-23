@@ -257,7 +257,8 @@ bool FaceMeshDeformer::deform(
     const float sFaceNarrow = detail::clampf(params.faceNarrow, 0.0f, 1.0f) * faceMod;
     const float sFaceSmall = detail::clampf(params.faceSmall, 0.0f, 1.0f) * symFaceMod;
     const float sCheekbone = detail::clampf(params.cheekboneSlim, 0.0f, 1.0f) * faceMod;
-    // 纵向防拉长比例补偿：纯横向瘦脸/窄脸会拉高脸长宽比、显头长；按收窄幅度温和微收上下轮廓，五官中区零压扁。
+    // 纵向防拉长比例补偿：纯横向瘦脸/窄脸会拉高脸长宽比、显头长；在 2D 连续轮廓场内温和微收上下轮廓，
+    // 严格保持保面积微分同胚（零三角翻面/零侧脸重影）且五官中区零压扁。
     const float antiLong = detail::clampf(sFaceSlim * 0.85f + sFaceNarrow * 0.55f, 0.0f, 1.0f) * yawWeight;
     const float sChin = detail::clampf(params.chinShape, -1.0f, 1.0f) * symFaceMod;
     const float sForehead = detail::clampf(params.foreheadShape, -1.0f, 1.0f) * symFaceMod;
@@ -320,30 +321,39 @@ bool FaceMeshDeformer::deform(
         const float outerGate = 1.0f - detail::smoothstep(1.35f, 2.10f, xi);
         const float vertGuard = 1.0f - detail::smoothstep(0.95f, 1.32f, -dv);
         const float eta = innerGate * outerGate;
-        if (eta <= 1e-5f) return {0.0f, 0.0f};
 
         float frac = 0.0f;
         float liftV = 0.0f;
-        if (sFaceSlim > 0.0f) {
-            const float slimVert = detail::smoothstep(-1.18f, -0.76f, dv) * (1.0f - detail::smoothstep(0.15f, 0.42f, dv));
-            frac += sFaceSlim * 0.068f * slimVert;
+        if (eta > 1e-5f) {
+            if (sFaceSlim > 0.0f) {
+                const float slimVert = detail::smoothstep(-1.18f, -0.76f, dv) * (1.0f - detail::smoothstep(0.15f, 0.42f, dv));
+                frac += sFaceSlim * 0.068f * slimVert;
+            }
+            if (sVFace > 0.0f) {
+                const float vVert = gaussian(dv, -0.58f, 0.48f) * vertGuard;
+                frac += sVFace * 0.068f * vVert;
+                liftV += sVFace * 0.012f * fh * sideW * eta * vVert;
+            }
+            if (sFaceNarrow > 0.0f) {
+                frac += sFaceNarrow * 0.065f * gaussian(dv, -0.05f, 0.68f);
+            }
+            if (sCheekbone > 0.0f) {
+                frac += sCheekbone * 0.070f * gaussian(dv, 0.06f, 0.36f) * detail::smoothstep(-0.55f, -0.20f, dv) * vertGuard;
+            }
+            frac *= symW * sideW * eta;
+            const float maxFrac = 0.115f * symW;
+            if (frac > 0.0f && maxFrac > 1e-5f) {
+                frac = (frac * maxFrac) / std::hypot(frac, maxFrac);
+            }
         }
-        if (sVFace > 0.0f) {
-            const float vVert = gaussian(dv, -0.58f, 0.48f) * vertGuard;
-            frac += sVFace * 0.068f * vVert;
-            liftV += sVFace * 0.012f * fh * sideW * eta * vVert;
+        if (antiLong > 1e-4f && outerGate > 1e-5f) {
+            // 2D 连续纵向防拉长场（不依赖 vVis，正反侧重叠点同向连续位移，零翻面零重影）：
+            // 下巴端柔和上收 + 眉上额部及发际线外环温和下敛，五官中区 dv ∈ [-0.25, +0.35] 零位移。
+            const float lowerW = detail::smoothstep(-0.25f, -0.95f, dv) * vertGuard;
+            const float upperW = detail::smoothstep(0.35f, 1.05f, dv) * (1.0f - detail::smoothstep(1.25f, 1.85f, dv));
+            liftV += antiLong * outerGate * fh * (0.036f * lowerW - 0.038f * upperW);
         }
-        if (sFaceNarrow > 0.0f) {
-            frac += sFaceNarrow * 0.065f * gaussian(dv, -0.05f, 0.68f);
-        }
-        if (sCheekbone > 0.0f) {
-            frac += sCheekbone * 0.070f * gaussian(dv, 0.06f, 0.36f) * detail::smoothstep(-0.55f, -0.20f, dv) * vertGuard;
-        }
-        frac *= symW * sideW * eta;
-        const float maxFrac = 0.115f * symW;
-        if (frac > 0.0f && maxFrac > 1e-5f) {
-            frac = (frac * maxFrac) / std::hypot(frac, maxFrac);
-        }
+        if (frac <= 1e-6f && std::fabs(liftV) <= 1e-6f) return {0.0f, 0.0f};
         const float sgn = 2.0f * sideBlend - 1.0f;
         const float cDu = -sgn * wSide * frac;
         return {cDu * ux + liftV * vx, cDu * uy + liftV * vy};
@@ -370,18 +380,6 @@ bool FaceMeshDeformer::deform(
                     const float sc = sFaceSmall * 0.060f;
                     dU -= du * sc * sideW;
                     dV -= dv * sc;
-                }
-                if (antiLong > 1e-4f) {
-                    // 下颌与下巴底部柔和上提，消解瘦脸后的尖长下巴感
-                    const float lowerW = detail::smoothstep(-0.20f, -0.92f, nv);
-                    if (lowerW > 0.0f) {
-                        dV += antiLong * 0.032f * fh * lowerW;
-                    }
-                    // 眉上额部温和微收，不压眼眉，防止瘦脸后显额长头长
-                    const float upperW = detail::smoothstep(0.35f, 0.92f, nv);
-                    if (upperW > 0.0f) {
-                        dV -= antiLong * 0.034f * fh * upperW;
-                    }
                 }
                 if (std::fabs(sChin) > 1e-4f) {
                     const float w = radialFalloff(px, py, srcMx_[152], srcMy_[152], 0.34f * fh);
@@ -549,14 +547,6 @@ bool FaceMeshDeformer::deform(
                 const float fluffU = sCranial * templeW * 0.026f * fw * sideSgn;
                 mdx += fluffU * ux + liftV * vx;
                 mdy += fluffU * uy + liftV * vy;
-            }
-            if (antiLong > 1e-4f) {
-                const float topW = detail::smoothstep(0.15f, 0.82f, cNv);
-                if (topW > 0.0f) {
-                    const float crownTuck = antiLong * topW * 0.028f * fh;
-                    mdx -= crownTuck * vx;
-                    mdy -= crownTuck * vy;
-                }
             }
             dispMx_[mi] = mdx;
             dispMy_[mi] = mdy;
