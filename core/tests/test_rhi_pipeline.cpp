@@ -399,6 +399,103 @@ void testFourFrameDelayStage0DenoiseAndLutFilterSuppression() {
     EXPECT_TRUE(idxDenoise >= 0 && idxComposite > idxDenoise);
 }
 
+void testP1ToP4PassesAndHardwareTierGating() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    engine.setHardwareProfile("Adreno (TM) 750", 8, 12288);  // Ultra tier
+
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId personMask = dev.createTexture2D(256, 256, TextureFormat::kR8, nullptr);
+    const TextureId occMask = dev.createTexture2D(256, 256, TextureFormat::kR8, nullptr);
+    const TextureId aiResTex = dev.createTexture2D(128, 128, TextureFormat::kRgba8, nullptr);
+    const TextureId arTex = dev.createTexture2D(128, 128, TextureFormat::kRgba8, nullptr);
+    const TextureId atlasTex = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+
+    PipelineAssets assets{};
+    assets.blushAtlas = atlasTex;
+    assets.contourHighlightAtlas = atlasTex;
+    engine.setAssets(assets);
+    engine.setAmbientRgb(1.12f, 1.00f, 0.88f);
+    engine.setOcclusionMask(occMask);
+    engine.setAiResidual(aiResTex, {0.2f, 0.2f, 0.6f, 0.6f}, 0.75f);
+
+    math::Ar3dAccessoryConfig ear{};
+    ear.enabled = true;
+    ear.anchor = math::Ar3dAnchor::kLeftEar;
+    ear.texture = arTex;
+    ear.springStiffness = 20.0f;
+    ear.headOcclusion = true;
+    engine.setAr3dAccessory(0, ear);
+
+    auto cfg = BeautyConfig::naturalStudio();
+    cfg.relight = 0.65f;
+    cfg.relightStyle = math::RelightStyle::kStudioSoftbox;
+    cfg.oilControl = 0.55f;
+    cfg.neckTone = 0.60f;
+    cfg.backgroundBlur = 0.70f;
+    cfg.matteTemporal = 0.70f;
+    cfg.blemishRemove = 0.60f;
+    cfg.blush = 0.45f;
+    cfg.lipstick = 0.50f;
+    cfg.performanceTier = math::PerformanceTier::kAuto;
+    engine.setConfig(cfg);
+
+    std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+    const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 720.0f / 1280.0f;
+    const float scale = 0.36f / math::FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+        const float mx = 0.5f + xyz[i * 3] * scale;
+        const float my = (0.5f / aspect) + xyz[i * 3 + 1] * scale;
+        mpXy[i * 2] = mx;
+        mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+    }
+    for (int i = 468; i < 478; ++i) { mpXy[i * 2] = 0.5f; mpXy[i * 2 + 1] = 0.45f; }
+
+    for (int f = 0; f < 6; ++f) {
+        const int64_t ts = 12000 + f * 33;
+        dev.calls.clear();
+        EXPECT_TRUE(engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts));
+        engine.processFrame(inputTex, 720, 1280, ts, ts, personMask, 0.30f, 1.0f);
+    }
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    const auto& stUltra = engine.stats();
+    EXPECT_TRUE(stUltra.resolvedTier == static_cast<int>(math::PerformanceTier::kUltra));
+    EXPECT_TRUE((stUltra.activePassesMask & kPassRelight3d) != 0);
+    EXPECT_TRUE((stUltra.activePassesMask & kPassMatteRefine) != 0);
+    EXPECT_TRUE((stUltra.activePassesMask & kPassBlemishHeal) != 0);
+    EXPECT_TRUE((stUltra.activePassesMask & kPassAiResidual) != 0);
+    EXPECT_TRUE((stUltra.activePassesMask & kPassAr3d) != 0);
+    EXPECT_TRUE((stUltra.activePassesMask & kPassHairAlpha) != 0);
+
+    bool sawMatte = false, sawBlemish = false, sawAiRes = false, sawHeadDepth = false, sawAr3d = false;
+    int skinMaskDraws = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kMatteRefine) sawMatte = true;
+        if (c.shader == ShaderId::kBlemishHeal) sawBlemish = true;
+        if (c.shader == ShaderId::kAiResidualBlend) sawAiRes = true;
+        if (c.shader == ShaderId::kHeadDepthShell) sawHeadDepth = true;
+        if (c.shader == ShaderId::kAr3dMesh) sawAr3d = true;
+        if (c.shader == ShaderId::kSkinMask) ++skinMaskDraws;
+    }
+    EXPECT_TRUE(sawMatte && sawBlemish && sawAiRes && sawHeadDepth && sawAr3d);
+    // SkinMask with neckTone > 0 draws neck apron + outer feather + inner face = 3 draws
+    EXPECT_TRUE(skinMaskDraws == 3);
+
+    // Now force Lite tier: heavy passes (Relight3d, MatteRefine, BlemishHeal, Ar3d) must all cleanly gate off!
+    cfg.performanceTier = math::PerformanceTier::kLite;
+    engine.setConfig(cfg);
+    dev.calls.clear();
+    engine.processFrame(inputTex, 720, 1280, 12231, 12231, personMask, 0.30f, 1.0f);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    const auto& stLite = engine.stats();
+    EXPECT_TRUE(stLite.resolvedTier == static_cast<int>(math::PerformanceTier::kLite));
+    EXPECT_TRUE((stLite.activePassesMask & kPassRelight3d) == 0);
+    EXPECT_TRUE((stLite.activePassesMask & kPassMatteRefine) == 0);
+    EXPECT_TRUE((stLite.activePassesMask & kPassBlemishHeal) == 0);
+    EXPECT_TRUE((stLite.activePassesMask & kPassAr3d) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -407,6 +504,7 @@ int main() {
     testHairProtectionVirtualBgStickersAndTelemetry();
     testHairWeightedGuidedDualFaceAndFrameDelayRing();
     testFourFrameDelayStage0DenoiseAndLutFilterSuppression();
+    testP1ToP4PassesAndHardwareTierGating();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

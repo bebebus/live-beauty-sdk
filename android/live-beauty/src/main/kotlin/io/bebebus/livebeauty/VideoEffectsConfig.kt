@@ -70,6 +70,21 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val catchlight: Float = 0f,
     /** 高颅顶 / 蓬松头包脸（仅 Android，0..1，置于末尾保持位置构造兼容）：外蓬颅顶与上颞发冠且不拉长裸额头。 */
     val cranialTop: Float = 0f,
+    /** P1: 3D 真实法线演播室重打光强度（0..1）与风格（natural/studio_softbox/butterfly/rembrandt）。 */
+    val relight: Float = 0f,
+    val relightStyle: String = "natural",
+    /** P1: T 区去油光/抑高光过曝（0..1）。 */
+    val oilControl: Float = 0f,
+    /** P1: 面颈一体化自然肤色衔接（0..1，严格肤色门控不染衣领）。 */
+    val neckTone: Float = 0f,
+    /** P1: 美妆环境色温白平衡自适应混合系数（0..1）。 */
+    val ambientMakeupBlend: Float = 0.5f,
+    /** P2: 实时人像抠像时域防闪烁与 RGB 引导边缘锐化（0..1）。 */
+    val matteTemporal: Float = 0.6f,
+    /** P3: 多尺度孤立痘印/红斑/色斑自动祛除（0..1，保留毛孔与五官）。 */
+    val blemishRemove: Float = 0f,
+    /** P4: 芯片分级调度档位（auto/lite/standard/ultra）。 */
+    val performanceTier: String = "auto",
 ) {
     /** 任意一项面部与颅顶网格微整处于非零状态。 */
     fun hasFaceReshape(): Boolean =
@@ -93,6 +108,8 @@ data class VideoEffectsConfig @JvmOverloads constructor(
         val EYEBROW_COLORS = setOf("dark_brown", "soft_brown", "grey_black")
         val EYESHADOW_COLORS = setOf("earth", "peach_pink", "rose_wine", "champagne")
         val CONTACT_LENS_STYLES = setOf("hazel", "chocolate", "mist_grey", "sakura_pink")
+        val RELIGHT_STYLES = setOf("natural", "studio_softbox", "butterfly", "rembrandt")
+        val PERFORMANCE_TIERS = setOf("auto", "lite", "standard", "ultra")
         val original = VideoEffectsConfig(false, 0f, 0f, "none")
 
         fun isValidLutUrl(url: String): Boolean {
@@ -161,7 +178,15 @@ data class VideoEffectsConfig @JvmOverloads constructor(
                 highlight = unit("highlight", 0f),
                 contactLens = unit("contactLens", 0f),
                 contactLensStyle = enumStr("contactLensStyle", "hazel", CONTACT_LENS_STYLES),
-                catchlight = unit("catchlight", 0f))
+                catchlight = unit("catchlight", 0f),
+                relight = unit("relight", 0f),
+                relightStyle = enumStr("relightStyle", "natural", RELIGHT_STYLES),
+                oilControl = unit("oilControl", 0f),
+                neckTone = unit("neckTone", 0f),
+                ambientMakeupBlend = unit("ambientMakeupBlend", 0.5f),
+                matteTemporal = unit("matteTemporal", 0.6f),
+                blemishRemove = unit("blemishRemove", 0f),
+                performanceTier = enumStr("performanceTier", "auto", PERFORMANCE_TIERS))
         }
     }
 }

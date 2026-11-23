@@ -39,6 +39,45 @@ void LiveBeautyEngine::clearStickers() {
     stickerCount_ = 0;
 }
 
+void LiveBeautyEngine::setAr3dAccessory(int slot, const math::Ar3dAccessoryConfig& layer) {
+    if (slot < 0 || slot >= math::kMaxAr3dLayers) return;
+    ar3dAccessories_[slot] = layer;
+    int maxActive = 0;
+    for (int i = 0; i < math::kMaxAr3dLayers; ++i) {
+        if (ar3dAccessories_[i].enabled && ar3dAccessories_[i].texture != rhi::kInvalidTexture) {
+            maxActive = i + 1;
+        }
+    }
+    ar3dCount_ = maxActive;
+}
+
+void LiveBeautyEngine::clearAr3dAccessories() {
+    for (auto& a : ar3dAccessories_) a = math::Ar3dAccessoryConfig{};
+    ar3dCount_ = 0;
+}
+
+void LiveBeautyEngine::setHardwareProfile(const std::string& gpuRenderer, int cpuCores, int totalRamMb) {
+    hardwareTier_ = math::DeviceTierPolicy::classify(gpuRenderer, cpuCores, totalRamMb);
+}
+
+void LiveBeautyEngine::setAmbientRgb(float r, float g, float b) {
+    ambientRgb_ = {
+        detail::clampf(r, 0.65f, 1.35f),
+        detail::clampf(g, 0.65f, 1.35f),
+        detail::clampf(b, 0.65f, 1.35f),
+    };
+}
+
+void LiveBeautyEngine::setOcclusionMask(rhi::TextureId occlusionMaskTex) {
+    occlusionMaskTex_ = occlusionMaskTex;
+}
+
+void LiveBeautyEngine::setAiResidual(rhi::TextureId residualTex, const CropRect& roi, float strength) {
+    aiResidualTex_ = residualTex;
+    aiResidualRect_ = roi;
+    aiResidualStrength_ = detail::clampf(strength, 0.0f, 1.0f);
+}
+
 bool LiveBeautyEngine::submitFaceLandmarks(
     int64_t sampleTsMs, const float* mpXy, int pointCount,
     int frameWidth, int frameHeight, int64_t receivedMs) {
@@ -119,7 +158,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    const bool processing = config_.isProcessing() || (config_.enabled && !config_.compareOriginal && stickerCount_ > 0);
+    const math::TierCapabilities tierCaps =
+        math::DeviceTierPolicy::resolve(config_.performanceTier, hardwareTier_, governor_.level());
+    const math::PerformanceTier resolvedTier = tierCaps.resolvedTier;
+    const bool processing = config_.isProcessing() ||
+        (config_.enabled && !config_.compareOriginal &&
+         (stickerCount_ > 0 || ar3dCount_ > 0 || (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f)));
     loadFades_.update(governor_.level(), nowMs);
 
     // Optional cross-backend FrameDelayRing (0..4 frames; aligns displayed camera frame with async MediaPipe landmarks)
@@ -146,11 +190,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         guidedSpread_.update(meshView.faceWidth() * static_cast<float>(width));
     }
 
-    // Optional secondary face (slot 1)
+    // Optional secondary face (slot 1), gated by resolved hardware tier
+    const int effectiveMaxFaces = std::min(config_.maxFaces, tierCaps.maxFacesCap);
     auto& secondaryTl = faces_.slot(1);
-    const float* secState41 = (config_.maxFaces >= 2) ? secondaryTl.at(displayTsMs) : nullptr;
+    const float* secState41 = (effectiveMaxFaces >= 2) ? secondaryTl.at(displayTsMs) : nullptr;
     math::FaceTimeline::SmoothedMeshView secMeshView{};
-    const bool hasSecMesh = (config_.maxFaces >= 2) && secondaryTl.meshAt(displayTsMs, secMeshView);
+    const bool hasSecMesh = (effectiveMaxFaces >= 2) && secondaryTl.meshAt(displayTsMs, secMeshView);
 
     const float* bodyState = bodySmoother_.update(
         hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
@@ -228,11 +273,19 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.bodyPresence = bodySmoother_.presence();
     in.personMaskTex = personMaskTex;
     in.hairMaskTex = hairMaskTex;
+    in.occlusionMaskTex = occlusionMaskTex_;
     in.hairShown = hairShown;
     in.hairBgShown = hairBgShown;
     in.hairAffine = hairAffine;
+    in.ambientRgb = ambientRgb_;
+    in.aiResidualTex = aiResidualTex_;
+    in.aiResidualRect = aiResidualRect_;
+    in.aiResidualStrength = aiResidualStrength_;
     in.stickers = stickers_;
     in.stickerCount = stickerCount_;
+    in.ar3dAccessories = ar3dAccessories_;
+    in.ar3dCount = ar3dCount_;
+    in.tierCaps = tierCaps;
     in.loadFadeBody = loadFades_.body();
     in.loadFadeFace = loadFades_.face();
     in.loadFadeSmooth = loadFades_.smooth();
@@ -255,7 +308,8 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
     lastStatsNowMs_ = nowMs;
     stats_.loadLevel = governor_.level();
-    stats_.facePresence = std::max(primaryTl.presence(), (config_.maxFaces >= 2) ? secondaryTl.presence() : 0.0f);
+    stats_.resolvedTier = static_cast<int>(resolvedTier);
+    stats_.facePresence = std::max(primaryTl.presence(), (effectiveMaxFaces >= 2) ? secondaryTl.presence() : 0.0f);
     stats_.hairShown = hairShown;
     stats_.activePassesMask = pipeline_.lastActivePassesMask() | (delayFrames > 0 ? rhi::kPassFrameDelay : 0u);
     stats_.frameCount++;

@@ -98,6 +98,21 @@ void main() {
 }
 )";
 
+constexpr const char* kAr3dVert = R"(
+attribute vec2 aPosition;
+attribute vec2 aTextureCoord;
+attribute float aDepth;
+varying vec2 vTextureCoord;
+varying vec2 vScreenUv;
+varying float vDepth;
+void main() {
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+    vTextureCoord = aTextureCoord;
+    vScreenUv = aPosition * 0.5 + 0.5;
+    vDepth = aDepth;
+}
+)";
+
 #define LB_GLSL_PREC \
     "#ifdef GL_ES\n#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n#endif\n"
 
@@ -285,9 +300,12 @@ void main() {
 constexpr const char* kMakeupLayerFrag = LB_GLSL_PREC R"(
 uniform sampler2D uTex0;
 uniform sampler2D uTex1;
+uniform sampler2D uTex2;
 uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
+uniform vec4 uU3;
+uniform vec4 uU4;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
 vec3 softLightBlend(vec3 b, vec3 s) { return (1.0 - 2.0 * s) * b * b + 2.0 * s * b; }
@@ -303,22 +321,42 @@ void main() {
     float mask = dot(texture2D(uTex1, atlasUv), uU1);
     float alpha = clamp(mask * uU0.a, 0.0, 1.0);
     if (alpha <= 0.001) { discard; }
-    vec3 base = texture2D(uTex0, clamp(vScreenUv, 0.0, 1.0)).rgb;
+    vec2 suv = clamp(vScreenUv, 0.0, 1.0);
+    float vis = clamp(texture2D(uTex2, suv).a * 1.04 - 0.02, 0.0, 1.0);
+    alpha *= vis;
+    if (alpha <= 0.001) { discard; }
+    vec3 base = texture2D(uTex0, suv).rgb;
+    float baseY = dot(base, vec3(0.299, 0.587, 0.114));
     if (uU2.z > 0.5) {
-        float baseY = dot(base, vec3(0.299, 0.587, 0.114));
         float darkGate = smoothstep(0.14, 0.30, baseY);
         float skinGate = smoothstep(0.025, 0.095, base.r - base.b) * smoothstep(0.015, 0.065, base.r - base.g);
         alpha *= darkGate * skinGate;
         if (alpha <= 0.001) { discard; }
     }
+    vec3 amb = mix(vec3(1.0), clamp(uU3.rgb, 0.65, 1.35), clamp(uU3.w, 0.0, 1.0));
+    vec3 pigment = clamp(uU0.rgb * amb, 0.0, 1.0);
     vec3 result;
     if (uU2.x < 0.5) {
-        result = mix(softLightBlend(base, uU0.rgb), base * mix(vec3(1.0), uU0.rgb, 0.68), 0.45);
+        result = mix(softLightBlend(base, pigment), base * mix(vec3(1.0), pigment, 0.68), 0.45);
     } else if (uU2.x < 1.5) {
-        vec3 mult = base * mix(vec3(1.0), uU0.rgb, uU2.z > 0.5 ? 0.78 : 0.92);
-        result = uU2.z > 0.5 ? mix(mult, softLightBlend(base, uU0.rgb), 0.45) : mult;
+        vec3 mult = base * mix(vec3(1.0), pigment, uU2.z > 0.5 ? 0.78 : 0.92);
+        result = uU2.z > 0.5 ? mix(mult, softLightBlend(base, pigment), 0.45) : mult;
     } else {
-        result = 1.0 - (1.0 - base) * (1.0 - uU0.rgb * 0.58);
+        result = 1.0 - (1.0 - base) * (1.0 - pigment * 0.58);
+    }
+    if (uU4.x > 0.0 && uU4.y > 0.0 && (uU4.z > 0.0 || uU4.w > 0.0)) {
+        vec2 st = uU4.xy * 1.5;
+        vec3 avg = 0.25 * (
+            texture2D(uTex0, clamp(suv + vec2(-st.x, -st.y), 0.0, 1.0)).rgb +
+            texture2D(uTex0, clamp(suv + vec2( st.x, -st.y), 0.0, 1.0)).rgb +
+            texture2D(uTex0, clamp(suv + vec2(-st.x,  st.y), 0.0, 1.0)).rgb +
+            texture2D(uTex0, clamp(suv + vec2( st.x,  st.y), 0.0, 1.0)).rgb
+        );
+        float poreHi = clamp(baseY - dot(avg, vec3(0.299, 0.587, 0.114)), -0.045, 0.045);
+        result += vec3(poreHi * uU4.z * 0.55);
+        if (uU2.z > 0.5 && uU4.w > 0.0) {
+            result += vec3(min(poreHi, 0.0) * uU4.w * 1.35);
+        }
     }
     gl_FragColor = vec4(clamp(result, 0.0, 1.0), alpha);
 }
@@ -327,14 +365,18 @@ void main() {
 constexpr const char* kMakeupLipFrag = LB_GLSL_PREC R"(
 uniform sampler2D uTex0;
 uniform sampler2D uTex1;
+uniform sampler2D uTex2;
 uniform vec4 uU0;
 uniform vec4 uU1;
+uniform vec4 uU2;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
 void main() {
     float feather = texture2D(uTex1, vMakeupUv).b;
     if (feather * uU0.a <= 0.001) { discard; }
     vec2 uv = clamp(vScreenUv, 0.0, 1.0);
+    float vis = clamp(texture2D(uTex2, uv).a * 1.04 - 0.02, 0.0, 1.0);
+    if (vis <= 0.002) { discard; }
     vec3 base = texture2D(uTex0, uv).rgb;
     float baseY = dot(base, vec3(0.299, 0.587, 0.114));
     float darkGate = smoothstep(0.06, 0.20, baseY);
@@ -344,7 +386,7 @@ void main() {
     float lipHue = (base.r - base.g) - 0.75 * max(base.g - base.b, 0.0);
     float rimZone = 1.0 - smoothstep(0.35, 0.92, feather);
     float skinRimGate = mix(1.0, smoothstep(0.045, 0.155, lipHue), rimZone * 0.92);
-    float effFeather = feather * darkGate * teethGate * skinRimGate;
+    float effFeather = feather * darkGate * teethGate * skinRimGate * vis;
     float alpha = clamp(effFeather * uU0.a, 0.0, 0.90);
     if (alpha <= 0.001) { discard; }
     float smoothY = baseY;
@@ -358,14 +400,16 @@ void main() {
         );
         smoothY = dot(avg, vec3(0.299, 0.587, 0.114));
     }
+    vec3 amb = mix(vec3(1.0), clamp(uU2.rgb, 0.65, 1.35), clamp(uU2.w, 0.0, 1.0));
+    vec3 lipPigment = clamp(uU0.rgb * amb, 0.0, 1.0);
     float lipDetail = clamp(baseY - smoothY, -0.09, 0.09);
     float midLift = 1.0 + 0.14 * smoothstep(0.14, 0.26, smoothY) * (1.0 - smoothstep(0.32, 0.48, smoothY));
     float illum = (smoothY / 0.54) * midLift;
     float illumSoft = illum / (1.0 + 0.52 * max(illum - 0.82, 0.0));
-    vec3 stainTint = clamp(uU0.rgb * 1.15, 0.05, 1.02);
+    vec3 stainTint = clamp(lipPigment * 1.15, 0.05, 1.02);
     vec3 multLip = clamp(base * mix(vec3(1.0), stainTint, 0.92), 0.0, 1.0);
     float isGlossy = step(0.5, uU1.x);
-    vec3 pigmentLip = clamp(uU0.rgb * illumSoft * mix(1.0, 0.88, isGlossy), 0.0, 1.0);
+    vec3 pigmentLip = clamp(lipPigment * illumSoft * mix(1.0, 0.88, isGlossy), 0.0, 1.0);
     float brightStainBias = smoothstep(0.46, 0.68, smoothY) * 0.16;
     float coverage = clamp(mix(0.48, 0.76, clamp(uU0.a, 0.0, 1.0)) - brightStainBias, 0.32, 0.76);
     vec3 result = mix(multLip, pigmentLip, coverage);
@@ -586,7 +630,8 @@ void main() {
     float style = uU1.x - skinOnly * 16.0;
     float gate = skinWeight(fineLow);
     float chromaGate = smoothstep(0.045, 0.10, fineLow.r - fineLow.b);
-    float polyGate = smoothstep(0.06, 0.18, luma(fineLow)) * mix(0.30, 1.0, smoothstep(0.0, 0.25, gate));
+    float polyGate = smoothstep(0.06, 0.18, luma(fineLow)) *
+        mix(0.30 * smoothstep(0.42, 0.72, faceM), 1.0, smoothstep(0.0, 0.25, gate));
     float skin = clamp(faceM * polyGate + (1.0 - faceM) * gate * chromaGate * (1.0 - 0.70 * exclM), 0.0, 1.0) * nonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
     float bleedGuard = 1.0 - (1.0 - smoothstep(0.22, 0.31, luma(fineLow))) *
@@ -596,13 +641,15 @@ void main() {
     float featureKeep = clamp(1.0 - exclM, 0.0, 1.0);
     float core = max(uU10.y, 0.005);
     float band = luma(fineLow - wideLow);
+    float micro = luma(original.rgb - fineLow);
     vec3 color = original.rgb;
     if (uU1.y > 0.0) {
         float rEdge = length(original.rgb - guided) / 0.36;
         float rEdge2 = rEdge * rEdge;
         float k = uU1.y * 0.96 * (skinOnly > 0.5 ? skin : 1.0) * featureKeep * fineDark / (1.0 + rEdge2 * rEdge2);
         float tex = clamp(band, -0.035, 0.035) * smoothstep(core, 2.5 * core, abs(band));
-        color = mix(original.rgb, guided, k) + vec3(tex * mix(0.35, 0.85, uU1.w) * k);
+        float microTex = clamp(micro, -0.022, 0.022) * smoothstep(core * 0.85, core * 2.2, abs(micro));
+        color = mix(original.rgb, guided, k) + vec3((tex * mix(0.35, 0.85, uU1.w) + microTex * uU10.z) * k);
     }
     if (uU2.y > 0.0) {
         float edge = smoothstep(1.5 * core, 4.0 * core, abs(band));
@@ -611,9 +658,25 @@ void main() {
     }
     color = clamp(color, 0.0, 1.0);
     float w = skin * featureKeep * fineDark;
-    float liftA = (0.60 * uU3.x + 0.40 * uU1.z) * w;
+    if (uU3.z > 0.0 && w > 0.0) {
+        float yCur = luma(color);
+        float chCur = max(max(color.r, color.g), color.b) - min(min(color.r, color.g), color.b);
+        float hotY = smoothstep(0.62, 0.90, yCur);
+        float lowSat = 1.0 - smoothstep(0.08, 0.30, chCur);
+        float tZone = mix(0.45, 1.0, clamp(hiM, 0.0, 1.0));
+        float oilMask = clamp(hotY * lowSat * tZone * w * uU3.z, 0.0, 0.65);
+        if (oilMask > 0.001) {
+            vec3 matteRef = mix(color * 0.86, min(color, guided * 0.94 + vec3(0.03, 0.02, 0.01)), step(0.001, uU1.y));
+            float yMat = luma(matteRef);
+            vec3 warmSkin = clamp(mix(matteRef, vec3(yMat * 1.06, yMat * 0.97, yMat * 0.90), 0.28), 0.0, 1.0);
+            color = mix(color, warmSkin, oilMask);
+        }
+    }
+    float yPre = luma(color);
+    float relightFill = 0.22 * uU3.w * w * faceM * (1.0 - smoothstep(0.20, 0.55, yPre));
+    float liftA = (0.60 * uU3.x + 0.40 * uU1.z) * w + relightFill;
     float rosyA = 0.25 * uU3.y * w;
-    float sculpt = 0.30 * uU2.x * (hiM - 0.3 * faceM) * w * faceM;
+    float sculpt = (0.30 * uU2.x + 0.42 * uU3.w) * (hiM - 0.30 * faceM) * w * faceM;
     if (liftA > 0.0 || rosyA > 0.0 || sculpt != 0.0) {
         float y0 = luma(color);
         if (uU3.x > 0.0) {
@@ -713,11 +776,12 @@ void main() {
 }
 )";
 
-// uU0=(a00, a01, a02, shown), uU1=(a10, a11, a12, 0), uU2=oval(cx,cy,rx,ry), uU3=(ax,ay,aspect,hasFace)
+// uU0=(a00, a01, a02, hairShown), uU1=(a10, a11, a12, hasOcclusion), uU2=oval(cx,cy,rx,ry), uU3=(ax,ay,aspect,hasFace)
 constexpr const char* kHairAlphaFrag = LB_GLSL_PREC R"(
 varying vec2 vSrc;
 varying vec2 vDst;
 uniform sampler2D uTex0;
+uniform sampler2D uTex1;
 uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
@@ -729,14 +793,21 @@ float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
     return u * u + v * v;
 }
 void main() {
-    vec2 muv = vec2(uU0.x * vSrc.x + uU0.y * vSrc.y + uU0.z,
-                    uU1.x * vSrc.x + uU1.y * vSrc.y + uU1.z);
-    float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
-    float hair = texture2D(uTex0, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
-    float inFace = uU3.w > 0.5 ? (1.0 - smoothstep(0.50, 1.0, ellipseE(vDst, uU2, uU3.xy, max(uU3.z, 0.0001)))) : 0.0;
-    float bias = 0.15 * inFace;
-    float h = smoothstep(0.35 + bias, 0.65 + bias, hair);
-    float nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
+    float nonHair = 1.0;
+    if (uU0.w > 0.001) {
+        vec2 muv = vec2(uU0.x * vSrc.x + uU0.y * vSrc.y + uU0.z,
+                        uU1.x * vSrc.x + uU1.y * vSrc.y + uU1.z);
+        float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
+        float hair = texture2D(uTex0, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
+        float inFace = uU3.w > 0.5 ? (1.0 - smoothstep(0.50, 1.0, ellipseE(vDst, uU2, uU3.xy, max(uU3.z, 0.0001)))) : 0.0;
+        float bias = 0.15 * inFace;
+        float h = smoothstep(0.35 + bias, 0.65 + bias, hair);
+        nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
+    }
+    if (uU1.w > 0.5) {
+        float occ = texture2D(uTex1, vec2(vDst.x, 1.0 - vDst.y)).r;
+        nonHair *= smoothstep(0.25, 0.70, occ);
+    }
     gl_FragColor = vec4(0.0, 0.0, 0.0, nonHair);
 }
 )";
@@ -810,6 +881,174 @@ void main() {
 }
 )";
 
+// P2: RGB-guided 5-tap joint bilateral + motion-adaptive temporal portrait matte refinement.
+// Operates in top-down mask space matching personMaskTex / rtBgHair_.
+// uTex0=curMask(top-down), uTex1=curRgb(bottom-up), uTex2=prevMask(top-down), uTex3=prevRgb(bottom-up)
+// uU0=(texelX, texelY, temporalWeight, hasHistory), uU1=(sigmaColor, motionLo, motionHi, 0)
+constexpr const char* kMatteRefineFrag = LB_GLSL_PREC R"(
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform sampler2D uTex3;
+uniform vec4 uU0;
+uniform vec4 uU1;
+void main() {
+    vec2 muv = vTextureCoord;
+    vec2 ruv = vec2(vTextureCoord.x, 1.0 - vTextureCoord.y);
+    float cMask = texture2D(uTex0, muv).r;
+    vec3 cRgb = texture2D(uTex1, ruv).rgb;
+    float inv2Sig2 = 0.5 / max(uU1.x * uU1.x, 0.001);
+    vec2 d = uU0.xy * 1.25;
+    float sumW = 1.4;
+    float sumM = cMask * 1.4;
+
+    vec2 o0 = vec2(-d.x, -d.y);
+    vec3 dc0 = texture2D(uTex1, clamp(ruv + vec2(o0.x, -o0.y), 0.0, 1.0)).rgb - cRgb;
+    float w0 = exp(-dot(dc0, dc0) * inv2Sig2);
+    sumW += w0; sumM += w0 * texture2D(uTex0, clamp(muv + o0, 0.0, 1.0)).r;
+
+    vec2 o1 = vec2(d.x, -d.y);
+    vec3 dc1 = texture2D(uTex1, clamp(ruv + vec2(o1.x, -o1.y), 0.0, 1.0)).rgb - cRgb;
+    float w1 = exp(-dot(dc1, dc1) * inv2Sig2);
+    sumW += w1; sumM += w1 * texture2D(uTex0, clamp(muv + o1, 0.0, 1.0)).r;
+
+    vec2 o2 = vec2(-d.x, d.y);
+    vec3 dc2 = texture2D(uTex1, clamp(ruv + vec2(o2.x, -o2.y), 0.0, 1.0)).rgb - cRgb;
+    float w2 = exp(-dot(dc2, dc2) * inv2Sig2);
+    sumW += w2; sumM += w2 * texture2D(uTex0, clamp(muv + o2, 0.0, 1.0)).r;
+
+    vec2 o3 = vec2(d.x, d.y);
+    vec3 dc3 = texture2D(uTex1, clamp(ruv + vec2(o3.x, -o3.y), 0.0, 1.0)).rgb - cRgb;
+    float w3 = exp(-dot(dc3, dc3) * inv2Sig2);
+    sumW += w3; sumM += w3 * texture2D(uTex0, clamp(muv + o3, 0.0, 1.0)).r;
+
+    float guidedMask = clamp(sumM / sumW, 0.0, 1.0);
+    float outMask = guidedMask;
+    if (uU0.w > 0.5 && uU0.z > 0.001) {
+        float pMask = texture2D(uTex2, muv).r;
+        vec3 pRgb = texture2D(uTex3, ruv).rgb;
+        vec3 dRgb = abs(cRgb - pRgb);
+        float rgbDiff = max(max(dRgb.r, dRgb.g), dRgb.b);
+        float motion = max(rgbDiff, abs(guidedMask - pMask) * 0.45);
+        float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion));
+        outMask = mix(guidedMask, pMask, keep);
+    }
+    gl_FragColor = vec4(outMask, outMask, outMask, 1.0);
+}
+)";
+
+// P3: Multi-scale isolated blemish / acne / redness healer strictly inside face skin mask.
+// uTex0=currentRgb, uTex1=rtSkinMask_ (R=faceM, G=exclM, A=nonHair*occ)
+// uU0=(texelX, texelY, strength, presence)
+constexpr const char* kBlemishHealFrag = LB_GLSL_PREC R"(
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform vec4 uU0;
+float luma7(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+void main() {
+    vec2 uv = vTextureCoord;
+    vec4 orig = texture2D(uTex0, uv);
+    vec4 sem = texture2D(uTex1, uv);
+    float skinMask = sem.r * (1.0 - sem.g) * clamp(sem.a * 1.04 - 0.02, 0.0, 1.0) * uU0.w;
+    if (skinMask <= 0.01 || uU0.z <= 0.001) {
+        gl_FragColor = orig;
+        return;
+    }
+    vec2 r = uU0.xy * 5.5;
+    vec2 rd = r * 0.7071;
+    vec3 s0 = texture2D(uTex0, clamp(uv + vec2( r.x, 0.0), 0.0, 1.0)).rgb;
+    vec3 s1 = texture2D(uTex0, clamp(uv + vec2(-r.x, 0.0), 0.0, 1.0)).rgb;
+    vec3 s2 = texture2D(uTex0, clamp(uv + vec2(0.0,  r.y), 0.0, 1.0)).rgb;
+    vec3 s3 = texture2D(uTex0, clamp(uv + vec2(0.0, -r.y), 0.0, 1.0)).rgb;
+    vec3 s4 = texture2D(uTex0, clamp(uv + vec2( rd.x,  rd.y), 0.0, 1.0)).rgb;
+    vec3 s5 = texture2D(uTex0, clamp(uv + vec2(-rd.x,  rd.y), 0.0, 1.0)).rgb;
+    vec3 s6 = texture2D(uTex0, clamp(uv + vec2( rd.x, -rd.y), 0.0, 1.0)).rgb;
+    vec3 s7 = texture2D(uTex0, clamp(uv + vec2(-rd.x, -rd.y), 0.0, 1.0)).rgb;
+    vec3 ringAvg = (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7) * 0.125;
+
+    float spread = 0.25 * (
+        length(s0 - ringAvg) + length(s1 - ringAvg) +
+        length(s2 - ringAvg) + length(s3 - ringAvg)
+    );
+    float yC = luma7(orig.rgb);
+    float yR = luma7(ringAvg);
+    float darkDeficit = max(yR - yC, 0.0);
+    float redC = orig.r - 0.5 * (orig.g + orig.b);
+    float redR = ringAvg.r - 0.5 * (ringAvg.g + ringAvg.b);
+    float redExcess = max(redC - redR, 0.0);
+
+    float uniformRing = 1.0 - smoothstep(0.055, 0.145, spread);
+    float spot = max(smoothstep(0.032, 0.110, darkDeficit), smoothstep(0.028, 0.095, redExcess)) * uniformRing;
+    float notBlack = smoothstep(0.08, 0.18, yC);
+    float healAlpha = clamp(spot * notBlack * skinMask * uU0.z * 0.92, 0.0, 0.90);
+    gl_FragColor = vec4(mix(orig.rgb, ringAvg, healAlpha), orig.a);
+}
+)";
+
+// P3: Pluggable Face-ROI Neural Residual Delta Fusion (RGBA8, 0.5=zero delta, A=confidence mask)
+// uTex0=currentRgb, uTex1=aiResidualTex(top-down ROI), uTex2=rtSkinMask_
+// uU0=(roiLeft, roiTop, roiWidth, roiHeight), uU1=(strength, hasSkinMask, 0, 0)
+constexpr const char* kAiResidualBlendFrag = LB_GLSL_PREC R"(
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform vec4 uU0;
+uniform vec4 uU1;
+void main() {
+    vec4 base = texture2D(uTex0, vTextureCoord);
+    vec2 topUv = vec2(vTextureCoord.x, 1.0 - vTextureCoord.y);
+    vec2 roiUv = (topUv - uU0.xy) / max(uU0.zw, vec2(0.001));
+    if (roiUv.x <= 0.0 || roiUv.x >= 1.0 || roiUv.y <= 0.0 || roiUv.y >= 1.0 || uU1.x <= 0.001) {
+        gl_FragColor = base;
+        return;
+    }
+    float edge = smoothstep(0.0, 0.06, roiUv.x) * (1.0 - smoothstep(0.94, 1.0, roiUv.x)) *
+                 smoothstep(0.0, 0.06, roiUv.y) * (1.0 - smoothstep(0.94, 1.0, roiUv.y));
+    vec4 res = texture2D(uTex1, clamp(roiUv, 0.0, 1.0));
+    vec4 sem = texture2D(uTex2, vTextureCoord);
+    float semMask = mix(1.0, sem.r * (1.0 - sem.g) * clamp(sem.a * 1.04 - 0.02, 0.0, 1.0), uU1.y);
+    vec3 delta = (res.rgb - vec3(0.5)) * 0.50;
+    vec3 outRgb = clamp(base.rgb + delta * (res.a * edge * semMask * uU1.x), 0.0, 1.0);
+    gl_FragColor = vec4(outRgb, base.a);
+}
+)";
+
+// P4: 3D head-occluder depth shell (higher depth = closer to camera)
+constexpr const char* kHeadDepthShellFrag = LB_GLSL_PREC R"(
+varying float vDepth;
+void main() {
+    float d = clamp(vDepth, 0.0, 1.0);
+    gl_FragColor = vec4(d, d, d, 1.0);
+}
+)";
+
+// P4: 3D perspective AR accessory quad with head-depth soft occlusion
+// uTex0=accessoryRgba, uTex1=rtHeadDepth_
+// uU0=(opacity, headOcclusionEnable, 0, 0)
+constexpr const char* kAr3dMeshFrag = LB_GLSL_PREC R"(
+varying vec2 vTextureCoord;
+varying vec2 vScreenUv;
+varying float vDepth;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform vec4 uU0;
+void main() {
+    vec4 s = texture2D(uTex0, vTextureCoord);
+    float a = s.a * uU0.x;
+    if (a <= 0.002) { discard; }
+    if (uU0.y > 0.5) {
+        float headD = texture2D(uTex1, clamp(vScreenUv, 0.0, 1.0)).r;
+        float vis = smoothstep(headD - 0.030, headD - 0.004, vDepth);
+        a *= vis;
+        if (a <= 0.002) { discard; }
+    }
+    gl_FragColor = vec4(s.rgb, clamp(a, 0.0, 1.0));
+}
+)";
+
 }  // namespace
 
 ShaderSourcePair getShaderSources(ShaderId id) {
@@ -839,6 +1078,11 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kBgHairMerge:     return {kQuadVert, kBgHairMergeFrag};
         case ShaderId::kBgVirtualMix:    return {kQuadVert, kBgVirtualMixFrag};
         case ShaderId::kStickerQuad:     return {kQuadVert, kStickerQuadFrag};
+        case ShaderId::kMatteRefine:     return {kQuadVert, kMatteRefineFrag};
+        case ShaderId::kBlemishHeal:     return {kQuadVert, kBlemishHealFrag};
+        case ShaderId::kAiResidualBlend: return {kQuadVert, kAiResidualBlendFrag};
+        case ShaderId::kHeadDepthShell:  return {kAr3dVert, kHeadDepthShellFrag};
+        case ShaderId::kAr3dMesh:        return {kAr3dVert, kAr3dMeshFrag};
         case ShaderId::kPassThrough:
         default:                         return {kQuadVert, kPassThroughFrag};
     }

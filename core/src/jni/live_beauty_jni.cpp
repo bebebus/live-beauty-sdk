@@ -21,6 +21,8 @@ struct JniEngineHandle {
     float virtualBgStrengthOverride = 1.0f;
     int maxFacesOverride = 1;
     int frameDelayFramesOverride = 0;
+    livebeauty::math::RelightStyle relightStyleOverride = livebeauty::math::RelightStyle::kNatural;
+    livebeauty::math::PerformanceTier performanceTierOverride = livebeauty::math::PerformanceTier::kAuto;
 
     JniEngineHandle() : device(), engine(device) {}
 };
@@ -149,8 +151,9 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     if (!handle || !scalars) return;
     const jsize n = env->GetArrayLength(scalars);
     if (n < 39) return;
-    jfloat s[48];
-    env->GetFloatArrayRegion(scalars, 0, n < 48 ? n : 48, s);
+    jfloat s[64];
+    std::memset(s, 0, sizeof(s));
+    env->GetFloatArrayRegion(scalars, 0, n < 64 ? n : 64, s);
 
     livebeauty::BeautyConfig cfg{};
     cfg.enabled = (enabled == JNI_TRUE);
@@ -203,6 +206,14 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
         cfg.contactLens = s[43];
         cfg.catchlight = s[44];
     }
+    if (n >= 51) {
+        cfg.relight = s[45];
+        cfg.oilControl = s[46];
+        cfg.neckTone = s[47];
+        cfg.ambientMakeupBlend = s[48];
+        cfg.matteTemporal = s[49];
+        cfg.blemishRemove = s[50];
+    }
 
     cfg.filter = livebeauty::parseFilterStyle(toStdString(env, filterStr));
     cfg.lutUrl = toStdString(env, lutUrlStr);
@@ -218,6 +229,8 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     cfg.virtualBgStrength = handle->virtualBgStrengthOverride;
     cfg.maxFaces = handle->maxFacesOverride;
     cfg.frameDelayFrames = handle->frameDelayFramesOverride;
+    cfg.relightStyle = handle->relightStyleOverride;
+    cfg.performanceTier = handle->performanceTierOverride;
 
     handle->engine.setConfig(cfg);
 }
@@ -368,6 +381,97 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitMultiFaceLandmarks(
 }
 
 JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetProOptions(
+    JNIEnv* env, jclass, jlong ptr, jstring relightStyleStr, jstring performanceTierStr) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->relightStyleOverride = livebeauty::parseRelightStyle(toStdString(env, relightStyleStr));
+    handle->performanceTierOverride = livebeauty::parsePerformanceTier(toStdString(env, performanceTierStr));
+    auto cfg = handle->engine.config();
+    cfg.relightStyle = handle->relightStyleOverride;
+    cfg.performanceTier = handle->performanceTierOverride;
+    handle->engine.setConfig(cfg);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHardwareProfile(
+    JNIEnv* env, jclass, jlong ptr, jstring gpuRenderer, jint cpuCores, jint totalRamMb) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->engine.setHardwareProfile(toStdString(env, gpuRenderer), cpuCores, totalRamMb);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAmbientRgb(
+    JNIEnv*, jclass, jlong ptr, jfloat r, jfloat g, jfloat b) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->engine.setAmbientRgb(r, g, b);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetOcclusionMask(
+    JNIEnv*, jclass, jlong ptr, jint occlusionMaskGlTex) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    const auto tex = (occlusionMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(occlusionMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    handle->engine.setOcclusionMask(tex);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAiResidual(
+    JNIEnv*, jclass, jlong ptr, jint residualGlTex,
+    jfloat roiLeft, jfloat roiTop, jfloat roiWidth, jfloat roiHeight, jfloat strength) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    const auto tex = (residualGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(residualGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    livebeauty::CropRect roi{roiLeft, roiTop, roiWidth, roiHeight};
+    handle->engine.setAiResidual(tex, roi, strength);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAr3dAccessory(
+    JNIEnv*, jclass, jlong ptr,
+    jint slot, jboolean enabled, jint anchor, jint texGlId,
+    jfloat scale, jfloat offsetX, jfloat offsetY, jfloat offsetZ,
+    jfloat yawRad, jfloat pitchRad, jfloat rollRad,
+    jfloat opacity, jfloat textureAspect,
+    jfloat springStiffness, jfloat springDamping, jboolean headOcclusion) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    livebeauty::math::Ar3dAccessoryConfig cfg{};
+    cfg.enabled = (enabled == JNI_TRUE);
+    cfg.anchor = static_cast<livebeauty::math::Ar3dAnchor>(anchor);
+    cfg.texture = (texGlId != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(texGlId))
+        : livebeauty::rhi::kInvalidTexture;
+    cfg.scale = scale;
+    cfg.offsetX = offsetX;
+    cfg.offsetY = offsetY;
+    cfg.offsetZ = offsetZ;
+    cfg.yawOffsetRad = yawRad;
+    cfg.pitchOffsetRad = pitchRad;
+    cfg.rollOffsetRad = rollRad;
+    cfg.opacity = opacity;
+    cfg.textureAspect = textureAspect;
+    cfg.springStiffness = springStiffness;
+    cfg.springDamping = springDamping;
+    cfg.headOcclusion = (headOcclusion == JNI_TRUE);
+    handle->engine.setAr3dAccessory(slot, cfg);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeClearAr3dAccessories(
+    JNIEnv*, jclass, jlong ptr) {
+    auto* handle = fromHandle(ptr);
+    if (handle) handle->engine.clearAr3dAccessories();
+}
+
+JNIEXPORT void JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
     JNIEnv* env, jclass, jlong ptr, jfloatArray outStats) {
     auto* handle = fromHandle(ptr);
@@ -375,7 +479,7 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
     const jsize len = env->GetArrayLength(outStats);
     if (len < 8) return;
     const auto& st = handle->engine.stats();
-    jfloat vals[10] = {
+    jfloat vals[11] = {
         st.lastFrameMs,
         st.emaFrameMs,
         st.fps,
@@ -386,8 +490,10 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
         static_cast<float>(st.frameCount),
         static_cast<float>(st.activeFaces),
         static_cast<float>(st.displayedTimestampMs >= 0 ? st.displayedTimestampMs : 0),
+        static_cast<float>(st.resolvedTier),
     };
-    env->SetFloatArrayRegion(outStats, 0, len >= 10 ? 10 : 8, vals);
+    const jsize count = (len >= 11) ? 11 : ((len >= 10) ? 10 : 8);
+    env->SetFloatArrayRegion(outStats, 0, count, vals);
 }
 
 }  // extern "C"

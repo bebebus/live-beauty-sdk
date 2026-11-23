@@ -5,8 +5,10 @@
 #include <memory>
 
 #include "livebeauty/config.h"
+#include "livebeauty/math/ar_3d_accessory.h"
 #include "livebeauty/math/beauty_tuning.h"
 #include "livebeauty/math/body_geometry.h"
+#include "livebeauty/math/device_tier.h"
 #include "livebeauty/math/face_geometry.h"
 #include "livebeauty/math/face_roi_selector.h"
 #include "livebeauty/math/face_timeline.h"
@@ -29,6 +31,7 @@ struct PerfStats {
     int64_t frameCount = 0;
     int activeFaces = 0;
     int64_t displayedTimestampMs = kTimeInvalid;
+    int resolvedTier = static_cast<int>(math::PerformanceTier::kStandard);
 };
 
 /**
@@ -52,6 +55,22 @@ public:
     /** Configure or clear one of up to 4 face-anchored 2D AR sticker layers. */
     void setSticker(int slot, const math::StickerLayerConfig& layer);
     void clearStickers();
+
+    /** P4: Configure or clear one of up to 4 head-occluded 3D AR accessories with spring physics. */
+    void setAr3dAccessory(int slot, const math::Ar3dAccessoryConfig& layer);
+    void clearAr3dAccessories();
+
+    /** P4: Declare device hardware profile once so DeviceTierPolicy can auto-schedule Lite/Standard/Ultra. */
+    void setHardwareProfile(const std::string& gpuRenderer, int cpuCores, int totalRamMb);
+
+    /** P1: Update smoothed ambient illuminant white-balance RGB (normalized ~[0.6..1.4]) for natural makeup tint. */
+    void setAmbientRgb(float r, float g, float b);
+
+    /** P2: Attach optional external Face-Parsing / hand occlusion mask texture (R8, 255=visible, 0=occluded). */
+    void setOcclusionMask(rhi::TextureId occlusionMaskTex);
+
+    /** P3: Attach optional external Face-ROI AI retouching residual texture (RGBA8, 0.5=zero delta). */
+    void setAiResidual(rhi::TextureId residualTex, const CropRect& roiRect, float strength);
 
     /** Feed asynchronous MediaPipe 468/478-pt single primary face landmarks (y-down normalized). */
     bool submitFaceLandmarks(int64_t sampleTsMs, const float* mpXy, int pointCount,
@@ -102,6 +121,15 @@ private:
 
     std::array<math::StickerLayerConfig, math::kMaxStickerLayers> stickers_{};
     int stickerCount_ = 0;
+    std::array<math::Ar3dAccessoryConfig, math::kMaxAr3dLayers> ar3dAccessories_{};
+    int ar3dCount_ = 0;
+
+    math::PerformanceTier hardwareTier_ = math::PerformanceTier::kStandard;
+    Vec3 ambientRgb_ = {1.0f, 1.0f, 1.0f};
+    rhi::TextureId occlusionMaskTex_ = rhi::kInvalidTexture;
+    rhi::TextureId aiResidualTex_ = rhi::kInvalidTexture;
+    CropRect aiResidualRect_ = CropRect::full();
+    float aiResidualStrength_ = 0.0f;
 
     int lastWidth_ = 0;
     int lastHeight_ = 0;

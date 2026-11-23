@@ -48,10 +48,12 @@ TextureId makeSolidTex(MetalDevice& dev, int w, int h, uint8_t r, uint8_t g, uin
 
 // Render a single fullscreen triangle pair using Makeup vertex layout (screenUv + makeupUv) into a 16x16 RT and read center pixel.
 Rgba evalMakeupShader(MetalDevice& dev, ShaderId shader, Rgba baseColor, Rgba atlasColor,
-                      const UniformBlock& ub, float makeupU = 0.5f, float makeupV = 0.5f) {
+                      const UniformBlock& ub, float makeupU = 0.5f, float makeupV = 0.5f,
+                      uint8_t semAlpha = 255) {
     constexpr int kSz = 16;
     const TextureId baseTex = makeSolidTex(dev, kSz, kSz, baseColor.r, baseColor.g, baseColor.b, baseColor.a);
     const TextureId atlasTex = makeSolidTex(dev, kSz, kSz, atlasColor.r, atlasColor.g, atlasColor.b, atlasColor.a);
+    const TextureId semTex = makeSolidTex(dev, kSz, kSz, 255, 0, 0, semAlpha);
     const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
 
     // 4 vertices * 6 floats: (ndcX, ndcY, screenU, screenV, makeupU, makeupV)
@@ -75,6 +77,7 @@ Rgba evalMakeupShader(MetalDevice& dev, ShaderId shader, Rgba baseColor, Rgba at
     TextureBindings tb{};
     tb.bind(0, baseTex);
     tb.bind(1, atlasTex);
+    tb.bind(2, semTex);
     dev.drawIndexed(shader, st, vb, ib, 0, 6, VertexLayout::kMakeupPos2Uv2Uv2, tb, ub);
     dev.endPass();
 
@@ -86,6 +89,7 @@ Rgba evalMakeupShader(MetalDevice& dev, ShaderId shader, Rgba baseColor, Rgba at
     dev.destroyBuffer(vb);
     dev.destroyBuffer(ib);
     dev.destroyRenderTarget(rt);
+    dev.destroyTexture(semTex);
     dev.destroyTexture(baseTex);
     dev.destroyTexture(atlasTex);
     return result;
@@ -532,6 +536,195 @@ void testDualFaceCoStreamingMetalProbeM1(MetalDevice& dev) {
     dev.destroyTexture(inputTex);
 }
 
+// P1-P4 GPU Pixel Gate: T-zone oil control, ambient WB & bangs/occlusion makeup guard,
+// RGB-guided temporal matte refinement, isolated blemish healer, AI residual blend, and 3D head-occluded AR.
+void testP1ToP4GpuPixelGates(MetalDevice& dev) {
+    // 1. P1 Oil control tames shiny T-zone glare while leaving matte skin intact
+    {
+        constexpr int kSz = 16;
+        const TextureId shinyTex = makeSolidTex(dev, kSz, kSz, 245, 232, 224, 255);
+        const TextureId matteTex = makeSolidTex(dev, kSz, kSz, 185, 145, 125, 255);
+        const TextureId semTex = makeSolidTex(dev, kSz, kSz, 255, 0, 230, 255);  // faceM=1, excl=0, hiM=0.9, nonHair=1
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+
+        auto runOil = [&](TextureId inTex) -> Rgba {
+            RenderState st{};
+            TextureBindings tb{};
+            tb.bind(0, inTex); tb.bind(1, inTex); tb.bind(2, semTex); tb.bind(3, semTex);
+            UniformBlock ub{};
+            ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);  // pres=1.0 poly mode
+            ub.push(16.0f, 0.0f, 0.0f, 0.0f);             // skinOnly=1, smooth=0
+            ub.push(0.0f, 0.0f, 1.0f, 0.0f);
+            ub.push(0.0f, 0.0f, 0.90f, 0.0f);             // oilControl=0.90
+            for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            ub.push(0.0f, 0.01f, 0.0f, 0.0f);
+            dev.beginPass(rt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+            dev.endPass();
+            std::vector<uint8_t> out(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+            const int c = ((kSz / 2) * kSz + (kSz / 2)) * 4;
+            return {out[c], out[c + 1], out[c + 2], out[c + 3]};
+        };
+        const Rgba shinyOut = runOil(shinyTex);
+        const Rgba matteOut = runOil(matteTex);
+        EXPECT_TRUE(shinyOut.r < 235 && shinyOut.b < 210);
+        EXPECT_TRUE(std::abs(int(matteOut.r) - 185) <= 2 && std::abs(int(matteOut.g) - 145) <= 2);
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(matteTex);
+        dev.destroyTexture(shinyTex);
+    }
+
+    // 2. P1 Ambient WB + P2 Bangs/Occlusion makeup blocking (exact 0/255 when occluded!)
+    {
+        const Vec3 blush = FaceMakeupUv::blushRgb(BlushColor::kPeach);
+        UniformBlock ubWarm{};
+        ubWarm.push(blush.x, blush.y, blush.z, 0.72f);
+        ubWarm.push(1.0f, 0.0f, 0.0f, 0.0f);
+        ubWarm.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ubWarm.push(1.22f, 1.00f, 0.78f, 1.0f);  // warm ambient illuminant
+        ubWarm.push(0.0f, 0.0f, 0.0f, 0.0f);
+
+        UniformBlock ubCool{};
+        ubCool.push(blush.x, blush.y, blush.z, 0.72f);
+        ubCool.push(1.0f, 0.0f, 0.0f, 0.0f);
+        ubCool.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ubCool.push(0.78f, 1.00f, 1.22f, 1.0f);  // cool ambient illuminant
+        ubCool.push(0.0f, 0.0f, 0.0f, 0.0f);
+
+        // Occluded by bangs/hand (semAlpha = 0) -> exact 0/255 change!
+        const Rgba occBlush = evalMakeupShader(dev, ShaderId::kMakeupLayer, {190, 150, 130, 255}, {255, 0, 0, 255}, ubWarm, 0.5f, 0.5f, 0);
+        EXPECT_TRUE(occBlush.r == 190 && occBlush.g == 150 && occBlush.b == 130);
+
+        UniformBlock ubLip{};
+        const Vec3 cherry = FaceMakeupUv::lipstickRgb(LipstickColor::kCherryRed);
+        ubLip.push(cherry.x, cherry.y, cherry.z, 0.85f);
+        ubLip.push(0.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);
+        ubLip.push(1.0f, 1.0f, 1.0f, 0.0f);
+        const Rgba occLip = evalMakeupShader(dev, ShaderId::kMakeupLip, {195, 140, 135, 255}, {0, 0, 255, 255}, ubLip, 0.5f, 0.70f, 0);
+        EXPECT_TRUE(occLip.r == 195 && occLip.g == 140 && occLip.b == 135);
+
+        // Unoccluded warm vs cool ambient shifts pigment R-B warmer under warm lighting
+        const Rgba warmRes = evalMakeupShader(dev, ShaderId::kMakeupLayer, {190, 150, 130, 255}, {255, 0, 0, 255}, ubWarm, 0.5f, 0.5f, 255);
+        const Rgba coolRes = evalMakeupShader(dev, ShaderId::kMakeupLayer, {190, 150, 130, 255}, {255, 0, 0, 255}, ubCool, 0.5f, 0.5f, 255);
+        EXPECT_TRUE((int(warmRes.r) - int(warmRes.b)) > (int(coolRes.r) - int(coolRes.b)) + 6);
+    }
+
+    // 3. P3 Multi-scale isolated blemish healer heals red pimple on cheek while leaving clean skin & excluded eye untouched
+    {
+        constexpr int kW = 32, kH = 32;
+        std::vector<uint8_t> img(kW * kH * 4);
+        std::vector<uint8_t> sem(kW * kH * 4);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int i = (y * kW + x) * 4;
+                img[i+0] = 210; img[i+1] = 168; img[i+2] = 148; img[i+3] = 255;
+                // Left half: cheek skin (faceM=1, excl=0, nonHair=1); Right half: eye exclusion (excl=1)
+                sem[i+0] = 255; sem[i+1] = (x >= 20 ? 255 : 0); sem[i+2] = 0; sem[i+3] = 255;
+            }
+        }
+        // Place isolated red acne spot at (10, 16) on cheek and identical spot at (25, 16) inside eye exclusion
+        auto putSpot = [&](int cx, int cy) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int i = ((cy + dy) * kW + (cx + dx)) * 4;
+                    img[i+0] = 168; img[i+1] = 72; img[i+2] = 68;
+                }
+            }
+        };
+        putSpot(10, 16);
+        putSpot(25, 16);
+
+        const TextureId imgTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, img.data());
+        const TextureId semTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, sem.data());
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{}; tb.bind(0, imgTex); tb.bind(1, semTex);
+        UniformBlock ub{}; ub.push(1.0f / kW, 1.0f / kH, 1.0f, 1.0f);
+        dev.beginPass(rt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kBlemishHeal, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        const int cheekSpot = (16 * kW + 10) * 4;
+        const int cleanCheek = (4 * kW + 4) * 4;
+        const int eyeSpot = (16 * kW + 25) * 4;
+        // Cheek pimple healed strongly toward clean cheek (210,168,148)
+        EXPECT_TRUE(out[cheekSpot + 1] > 130 && out[cheekSpot + 2] > 115);
+        // Clean cheek untouched
+        EXPECT_TRUE(std::abs(int(out[cleanCheek + 0]) - 210) <= 1 && std::abs(int(out[cleanCheek + 1]) - 168) <= 1);
+        // Excluded eye region exact 0/255 untouched
+        EXPECT_TRUE(out[eyeSpot + 0] == 168 && out[eyeSpot + 1] == 72 && out[eyeSpot + 2] == 68);
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(imgTex);
+    }
+
+    // 4. P4 3D Head-Occluded AR Accessory: occluded behind closer head depth, visible outside & in front
+    {
+        constexpr int kW = 32, kH = 32;
+        const TextureId baseTex = makeSolidTex(dev, kW, kH, 50, 50, 50, 255);
+        const TextureId goldTex = makeSolidTex(dev, kW, kH, 250, 210, 40, 255);
+        // Head depth shell: left half has head at depth 0.65 (166), right half is background at depth 0.0 (0)
+        std::vector<uint8_t> headDepthPx(kW * kH * 4, 0);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int i = (y * kW + x) * 4;
+                const uint8_t d = (x < kW / 2) ? 166 : 0;
+                headDepthPx[i+0] = d; headDepthPx[i+1] = d; headDepthPx[i+2] = d; headDepthPx[i+3] = 255;
+            }
+        }
+        const TextureId headDepthTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, headDepthPx.data());
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        // Fullscreen accessory quad at depth 0.42 (behind head 0.65 on left, visible over background 0.0 on right)
+        static constexpr float kAccVerts[20] = {
+            -1.0f, -1.0f, 0.0f, 1.0f, 0.42f,
+             1.0f, -1.0f, 1.0f, 1.0f, 0.42f,
+            -1.0f,  1.0f, 0.0f, 0.0f, 0.42f,
+             1.0f,  1.0f, 1.0f, 0.0f, 0.42f,
+        };
+        static constexpr uint16_t kIdx[6] = {0, 1, 2, 2, 1, 3};
+        const BufferId vb = dev.createDynamicVertexBuffer(sizeof(kAccVerts));
+        dev.updateVertexBuffer(vb, kAccVerts, sizeof(kAccVerts));
+        const BufferId ib = dev.createStaticIndexBuffer(kIdx, 6);
+
+        dev.beginPass(rt, kW, kH, false, {});
+        {
+            RenderState copySt{}; TextureBindings tb{}; tb.bind(0, baseTex); UniformBlock ub{};
+            dev.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+        }
+        {
+            RenderState blendSt{}; blendSt.blendEnable = true;
+            TextureBindings tb{}; tb.bind(0, goldTex); tb.bind(1, headDepthTex);
+            UniformBlock ub{}; ub.push(1.0f, 1.0f, 0.0f, 0.0f);  // opacity=1, headOcclusion=1
+            dev.drawIndexed(ShaderId::kAr3dMesh, blendSt, vb, ib, 0, 6, VertexLayout::kAr3dPos2Uv2Z1, tb, ub);
+        }
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        const int occludedPx = (16 * kW + 6) * 4;
+        const int visiblePx = (16 * kW + 24) * 4;
+        // Behind head -> cleanly occluded (stays base grey 50,50,50)
+        EXPECT_TRUE(out[occludedPx + 0] == 50 && out[occludedPx + 1] == 50 && out[occludedPx + 2] == 50);
+        // Outside head -> gold accessory fully visible
+        EXPECT_TRUE(out[visiblePx + 0] > 240 && out[visiblePx + 1] > 200 && out[visiblePx + 2] < 50);
+
+        dev.destroyBuffer(ib);
+        dev.destroyBuffer(vb);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(headDepthTex);
+        dev.destroyTexture(goldTex);
+        dev.destroyTexture(baseTex);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -549,9 +742,10 @@ int main() {
         testStickerOverlayProbeS1(dev);
         testHairWeightedGuidedNoBleedProbeH2(dev);
         testDualFaceCoStreamingMetalProbeM1(dev);
+        testP1ToP4GpuPixelGates(dev);
 
         if (gFailures == 0) {
-            std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, E2E) passed!\n";
+            std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";
             return 0;
         }
         std::cerr << "FAIL  " << gFailures << " Metal GPU pixel gate assertion(s) failed.\n";

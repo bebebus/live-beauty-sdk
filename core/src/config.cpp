@@ -28,14 +28,16 @@ bool BeautyConfig::hasMakeup() const {
 bool BeautyConfig::needsFaceTracking() const {
     if (!enabled || compareOriginal) return false;
     return hasFaceReshape() || hasRetouch() || hasMakeup() ||
-           (smoothing > 0.0f && skinOnly) || whiten > 0.0f || rosy > 0.0f || radiance > 0.0f;
+           (smoothing > 0.0f && skinOnly) || whiten > 0.0f || rosy > 0.0f ||
+           radiance > 0.0f || relight > 0.0f || blemishRemove > 0.0f;
 }
 
 bool BeautyConfig::isProcessing() const {
     if (!enabled || compareOriginal) return false;
     return smoothing > 0.0f || brightness != 0.0f || filter != ColorFilterStyle::kNone ||
            sharpness > 0.0f || std::fabs(saturation - 1.0f) > 1e-4f || whiten > 0.0f ||
-           rosy > 0.0f || radiance > 0.0f || backgroundBlur > 0.0f ||
+           rosy > 0.0f || radiance > 0.0f || relight > 0.0f || oilControl > 0.0f ||
+           blemishRemove > 0.0f || backgroundBlur > 0.0f ||
            backgroundMode == BackgroundMode::kVirtualImage ||
            backgroundMode == BackgroundMode::kVirtualBlur ||
            !lutUrl.empty() ||
@@ -195,6 +197,20 @@ BackgroundMode parseBackgroundMode(const std::string& s) {
     if (s == "virtual_image" || s == "image") return BackgroundMode::kVirtualImage;
     if (s == "virtual_blur" || s == "blur_image") return BackgroundMode::kVirtualBlur;
     return BackgroundMode::kNone;
+}
+
+math::RelightStyle parseRelightStyle(const std::string& s) {
+    if (s == "natural") return math::RelightStyle::kNatural;
+    if (s == "butterfly") return math::RelightStyle::kButterfly;
+    if (s == "rembrandt") return math::RelightStyle::kRembrandt;
+    return math::RelightStyle::kStudioSoftbox;
+}
+
+math::PerformanceTier parsePerformanceTier(const std::string& s) {
+    if (s == "lite") return math::PerformanceTier::kLite;
+    if (s == "standard") return math::PerformanceTier::kStandard;
+    if (s == "ultra") return math::PerformanceTier::kUltra;
+    return math::PerformanceTier::kAuto;
 }
 
 }  // namespace livebeauty

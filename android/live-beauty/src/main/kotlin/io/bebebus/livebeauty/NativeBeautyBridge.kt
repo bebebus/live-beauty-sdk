@@ -146,11 +146,50 @@ object NativeBeautyBridge {
         lightLuma: Float,
         bitrateRatio: Float,
     ): Int
-    /** 读取 C++17 内核实时性能遥测：[lastMs, emaMs, fps, loadLevel, facePresence, hairShown, activePassesMask, frameCount]。 */
-    @JvmStatic external fun nativeGetStats(handle: Long, outStats8: FloatArray)
+    /** 配置 P1/P4 专业选项：3D 打光风格与芯片分级档位。 */
+    @JvmStatic external fun nativeSetProOptions(handle: Long, relightStyle: String, performanceTier: String)
+    /** 上报宿主机 GPU 渲染器名、CPU 核心数与总内存（MB），供 DeviceTierPolicy 自动分级。 */
+    @JvmStatic external fun nativeSetHardwareProfile(handle: Long, gpuRenderer: String, cpuCores: Int, totalRamMb: Int)
+    /** 上报当前环境光照 RGB 白平衡增益（0.65..1.35），供美妆自然融入环境色温。 */
+    @JvmStatic external fun nativeSetAmbientRgb(handle: Long, r: Float, g: Float, b: Float)
+    /** 绑定可选 R8 人脸解析/手部遮挡掩码纹理（255=可见肤区，0=遮挡区）。 */
+    @JvmStatic external fun nativeSetOcclusionMask(handle: Long, occlusionMaskGlTex: Int)
+    /** 绑定可选人脸 ROI 神经网络残差纹理（RGBA8，0.5=零残差，A=置信度）。 */
+    @JvmStatic external fun nativeSetAiResidual(
+        handle: Long,
+        residualGlTex: Int,
+        roiLeft: Float,
+        roiTop: Float,
+        roiWidth: Float,
+        roiHeight: Float,
+        strength: Float,
+    )
+    /** 配置 3D 头部遮挡 AR 挂件层（slot 0..3，支持弹簧摆物理与头部深度遮挡）。 */
+    @JvmStatic external fun nativeSetAr3dAccessory(
+        handle: Long,
+        slot: Int,
+        enabled: Boolean,
+        anchor: Int,
+        texGlId: Int,
+        scale: Float,
+        offsetX: Float,
+        offsetY: Float,
+        offsetZ: Float,
+        yawRad: Float,
+        pitchRad: Float,
+        rollRad: Float,
+        opacity: Float,
+        textureAspect: Float,
+        springStiffness: Float,
+        springDamping: Float,
+        headOcclusion: Boolean,
+    )
+    @JvmStatic external fun nativeClearAr3dAccessories(handle: Long)
+    /** 读取 C++17 内核实时性能遥测：[lastMs, emaMs, fps, loadLevel, facePresence, hairShown, activePassesMask, frameCount, activeFaces, displayTs, resolvedTier]。 */
+    @JvmStatic external fun nativeGetStats(handle: Long, outStats: FloatArray)
 
-    /** 将 [VideoEffectsConfig] 的 45 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
-    fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(45)): FloatArray {
+    /** 将 [VideoEffectsConfig] 的 51 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
+    fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(51)): FloatArray {
         out[0] = cfg.smoothing
         out[1] = cfg.brightness
         out[2] = cfg.sharpness
@@ -196,6 +235,14 @@ object NativeBeautyBridge {
         out[42] = cfg.highlight
         out[43] = cfg.contactLens
         out[44] = cfg.catchlight
+        if (out.size >= 51) {
+            out[45] = cfg.relight
+            out[46] = cfg.oilControl
+            out[47] = cfg.neckTone
+            out[48] = cfg.ambientMakeupBlend
+            out[49] = cfg.matteTemporal
+            out[50] = cfg.blemishRemove
+        }
         return out
     }
 }

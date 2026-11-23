@@ -5,12 +5,15 @@
 #include <vector>
 
 #include "livebeauty/config.h"
+#include "livebeauty/math/ar_3d_accessory.h"
 #include "livebeauty/math/beauty_tuning.h"
 #include "livebeauty/math/body_geometry.h"
+#include "livebeauty/math/device_tier.h"
 #include "livebeauty/math/face_geometry.h"
 #include "livebeauty/math/face_makeup_uv.h"
 #include "livebeauty/math/face_mesh_deformer.h"
 #include "livebeauty/math/face_mesh_topology.h"
+#include "livebeauty/math/face_relight.h"
 #include "livebeauty/math/hair_mask_tuning.h"
 #include "livebeauty/math/sticker_transform.h"
 #include "livebeauty/rhi/rhi_device.h"
@@ -19,19 +22,24 @@ namespace livebeauty::rhi {
 
 /** Bitmask of passes executed during the last RenderPipeline::render() call (for PerfStats). */
 enum PassBit : uint32_t {
-    kPassBg        = 1u << 0,
-    kPassBody      = 1u << 1,
-    kPassFaceWarp  = 1u << 2,
-    kPassRetouch   = 1u << 3,
-    kPassSkinMask  = 1u << 4,
-    kPassHairAlpha = 1u << 5,
-    kPassGuided    = 1u << 6,
-    kPassComposite = 1u << 7,
-    kPassMakeup    = 1u << 8,
-    kPassSticker   = 1u << 9,
-    kPassDenoise   = 1u << 10,
-    kPassDualFace  = 1u << 11,
-    kPassFrameDelay = 1u << 12,
+    kPassBg          = 1u << 0,
+    kPassBody        = 1u << 1,
+    kPassFaceWarp    = 1u << 2,
+    kPassRetouch     = 1u << 3,
+    kPassSkinMask    = 1u << 4,
+    kPassHairAlpha   = 1u << 5,
+    kPassGuided      = 1u << 6,
+    kPassComposite   = 1u << 7,
+    kPassMakeup      = 1u << 8,
+    kPassSticker     = 1u << 9,
+    kPassDenoise     = 1u << 10,
+    kPassDualFace    = 1u << 11,
+    kPassFrameDelay  = 1u << 12,
+    kPassMatteRefine = 1u << 13,  // P2: RGB-guided temporal portrait matting
+    kPassBlemishHeal = 1u << 14,  // P3: multi-scale isolated blemish/redness residual heal
+    kPassAiResidual  = 1u << 15,  // P3: pluggable neural face-ROI residual fusion
+    kPassAr3d        = 1u << 16,  // P4: 3D head-occluded AR accessories + spring physics
+    kPassRelight3d   = 1u << 17,  // P1: real 3D rotated vertex normal studio relighting
 };
 
 /** Static makeup atlases, virtual background & 3D LUT texture handles uploaded once by platform host. */
@@ -73,16 +81,32 @@ struct FrameInputs {
     const float* bodyState7 = nullptr;
     float bodyPresence = 0.0f;
 
-    // Optional portrait & hair segmentation masks (R8, top-down)
+    // Optional portrait, hair & occlusion/face-parsing segmentation masks (R8, top-down)
     TextureId personMaskTex = kInvalidTexture;
     TextureId hairMaskTex = kInvalidTexture;
+    TextureId occlusionMaskTex = kInvalidTexture;  // P2: R8 (255 = visible face/skin, 0 = occluded by hand/mic/bangs/glasses)
     float hairShown = 0.0f;     // Semantic alpha strength [0..1] (post neck-lift attenuation)
     float hairBgShown = 0.0f;   // Background hair-merge strength [0..1] (pre-warp coordinates)
     std::array<float, math::HairMaskTuning::kAffineSize> hairAffine = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
 
+    // P1: Ambient illuminant RGB white-balance estimate [0.6..1.4] for natural makeup color adaptation
+    Vec3 ambientRgb = {1.0f, 1.0f, 1.0f};
+
+    // P3: Optional pluggable face-ROI neural retouching residual delta texture (RGBA8, 0.5 = zero delta)
+    TextureId aiResidualTex = kInvalidTexture;
+    CropRect aiResidualRect = CropRect::full();
+    float aiResidualStrength = 0.0f;
+
     // Optional face-anchored 2D AR sticker overlays (up to 4 layers)
     std::array<math::StickerLayerConfig, math::kMaxStickerLayers> stickers{};
     int stickerCount = 0;
+
+    // P4: Optional 3D head-occluded AR accessories with spring physics (up to 4 layers)
+    std::array<math::Ar3dAccessoryConfig, math::kMaxAr3dLayers> ar3dAccessories{};
+    int ar3dCount = 0;
+
+    // P4: Resolved hardware/runtime performance tier capabilities
+    math::TierCapabilities tierCaps{};
 
     // Optional secondary tracked face (when config.maxFaces == 2)
     struct SecondaryFace {
@@ -142,20 +166,30 @@ private:
     void ensureStaticBuffers();
     void renderGuidedFilter(TextureId srcTex, int width, int height, float eps, float evenness, float spread,
                             TextureId hairWeightTex = kInvalidTexture);
-    void renderSkinMask(const float* landmarks478x2, float axisX, float axisY,
-                        bool frontFaceCw, int width, int height, bool clearFirst = true);
+    void renderSkinMask(const float* landmarks478x2, float axisX, float axisY, float yawWeight,
+                        bool frontFaceCw, int width, int height,
+                        float relightStrength, math::RelightStyle relightStyle, bool useRelight3d,
+                        float neckToneStrength, const float* bodyState7,
+                        bool clearFirst = true);
     void blurSkinMask();
     void renderHairAlpha(TextureId hairMaskTex, float hairShown, const float* hairAffine8,
+                         TextureId occlusionMaskTex,
                          const float* ovalState41, float aspect, bool clearRgbToZero,
                          bool meshWarped, bool frontFaceCw);
+    TextureId renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, float matteTemporal);
     void renderMakeup(
-        RenderTargetId targetRt, TextureId baseTex, int width, int height,
-        const BeautyConfig& cfg, const float* landmarks478x2, const float* meta15,
+        RenderTargetId targetRt, TextureId baseTex, TextureId semanticTex, int width, int height,
+        const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,
+        const float* landmarks478x2, const float* meta15,
         bool hasIris, bool frontFaceCw, float presence, float steadyEye, float eyeMakeupKeep,
         bool copyBaseFirst = true);
     void renderStickers(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
                         int width, int height, const FrameInputs& in,
                         const float* landmarks478x2, const float* meta15, float presence);
+    void renderAr3dAccessories(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
+                               int width, int height, const FrameInputs& in,
+                               const float* landmarks478x2, const math::HeadPose3D& pose,
+                               bool frontFaceCw, float presence);
 
     IRhiDevice& device_;
     PipelineAssets assets_{};
@@ -188,10 +222,17 @@ private:
     RenderTargetId rtSkinMask_ = kInvalidRenderTarget;
     RenderTargetId rtSkinMaskTmp_ = kInvalidRenderTarget;
 
-    // Background bokeh / virtual background (1/4 res) & merged person+hair mask
+    // Background bokeh / virtual background (1/4 res), temporal matte & merged person+hair mask
     RenderTargetId rtBg_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
     RenderTargetId rtBgHair_ = kInvalidRenderTarget;
     RenderTargetId rtBgOut_ = kInvalidRenderTarget;
+    RenderTargetId rtMatte_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
+    RenderTargetId rtMatteRgb_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
+    int matteParity_ = 0;
+    bool matteHistoryValid_ = false;
+
+    // P4: 3D head-occluder depth shell (1/4 res)
+    RenderTargetId rtHeadDepth_ = kInvalidRenderTarget;
     uint32_t lastActivePassesMask_ = 0;
 
     // Owned 1x1 fallback white-alpha texture if host didn't provide one
@@ -201,10 +242,14 @@ private:
     bool staticBuffersReady_ = false;
     BufferId vbMeshWarp_ = kInvalidBuffer;
     BufferId vbSkinMask_ = kInvalidBuffer;
+    BufferId vbNeckApron_ = kInvalidBuffer;
     BufferId vbRetouch_ = kInvalidBuffer;
     BufferId vbMakeup_ = kInvalidBuffer;
     BufferId vbSticker_ = kInvalidBuffer;
+    BufferId vbAr3dHead_ = kInvalidBuffer;
+    BufferId vbAr3dQuad_ = kInvalidBuffer;
     BufferId ibFullMesh_ = kInvalidBuffer;
+    BufferId ibNeckApron_ = kInvalidBuffer;
     BufferId ibSkinRetouch_ = kInvalidBuffer;
     BufferId ibEyeOpening_ = kInvalidBuffer;
     BufferId ibInnerMouth_ = kInvalidBuffer;
@@ -231,12 +276,21 @@ private:
     // Reusable CPU staging buffers (zero per-frame heap allocation)
     math::FaceMeshDeformer deformer_;
     math::FaceMeshDeformer deformer2_;
+    math::FaceRelightSolver relightSolver_;
+    std::array<math::SpringPendulum, math::kMaxAr3dLayers> ar3dSprings_{};
+    std::array<float, math::FaceMeshTopology::kFaceVertexCount> relightBuf_{};
     std::array<float, math::FaceMeshFrame::kCoordCount> liftedLandmarks_{};
     std::array<float, math::FaceGeometryConstants::kStateSize> liftedState_{};
     std::array<float, math::FaceGeometryConstants::kStateSize> warpedState_{};
     std::array<float, (math::FaceMeshTopology::kFaceVertexCount + math::FaceMeshTopology::kOvalVertexCount) * 5> skinMaskVerts_{};
+    // Neck apron: 3 rows x 13 jaw vertices x 5 floats (ndcX, ndcY, skin, excl, hiPlane)
+    static constexpr int kNeckJawCount = 13;
+    static constexpr int kNeckRows = 3;
+    static constexpr int kNeckIndexCount = (kNeckRows - 1) * (kNeckJawCount - 1) * 6;
+    std::array<float, kNeckJawCount * kNeckRows * 5> neckApronVerts_{};
     std::array<float, math::FaceRetouchSubMesh::kVertexDataSize> retouchVerts_{};
     std::array<float, math::FaceMakeupUv::kVertexDataSize> makeupVerts_{};
+    std::array<float, math::Ar3dSolver::kHeadShellFloats> ar3dHeadVerts_{};
     std::array<float, (math::FaceMeshTopology::kFaceVertexCount + math::FaceMeshTopology::kOvalVertexCount) * 3> staticSkinWeights_{};
     bool staticSkinWeightsReady_ = false;
 };

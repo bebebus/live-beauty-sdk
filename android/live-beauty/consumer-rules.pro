@@ -4,6 +4,8 @@
 -keep public class io.bebebus.livebeauty.VirtualBackgroundMode { public *; }
 -keep public class io.bebebus.livebeauty.StickerAnchor { public *; }
 -keep public class io.bebebus.livebeauty.LiveBeautySticker { public *; }
+-keep public class io.bebebus.livebeauty.Ar3dAnchor { public *; }
+-keep public class io.bebebus.livebeauty.LiveBeautyAr3dAccessory { public *; }
 -keep public class io.bebebus.livebeauty.BeautyPerfStats { public *; }
 -keep public class io.bebebus.livebeauty.NativeBeautyBridge { *; }
 -keep public class io.bebebus.livebeauty.BeautyEngine { public *; }

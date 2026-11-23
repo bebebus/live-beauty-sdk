@@ -74,6 +74,33 @@ class LiveBeautyProcessor(
         activeCppEngine?.clearStickers()
     }
 
+    /** P2: 绑定外部人脸解析/手部遮挡 R8 纹理（255=可见皮肤，0=遮挡区）。 */
+    fun setOcclusionMaskTexture(glTextureId: Int) {
+        activeCppEngine?.setOcclusionMaskTexture(glTextureId)
+    }
+
+    /** P3: 绑定可选人脸 ROI 神经网络残差纹理（RGBA8，0.5=零残差，A=置信度）。 */
+    fun setAiResidualTexture(
+        glTextureId: Int,
+        roiLeft: Float = 0f,
+        roiTop: Float = 0f,
+        roiWidth: Float = 1f,
+        roiHeight: Float = 1f,
+        strength: Float = 1f,
+    ) {
+        activeCppEngine?.setAiResidualTexture(glTextureId, roiLeft, roiTop, roiWidth, roiHeight, strength)
+    }
+
+    /** P4: 配置 3D 头部遮挡 AR 挂件（slot 0..3，传 null 清除该层）。 */
+    fun setAr3dAccessory(slot: Int, accessory: LiveBeautyAr3dAccessory?) {
+        activeCppEngine?.setAr3dAccessory(slot, accessory)
+    }
+
+    /** P4: 清除全部 3D AR 挂件层。 */
+    fun clearAr3dAccessories() {
+        activeCppEngine?.clearAr3dAccessories()
+    }
+
     /** 配置双人同屏人数上限（1..2）与 C++ 零滞后帧对齐环帧数（0..2）。 */
     fun setPipelineOptions(maxFaces: Int = 1, frameDelayFrames: Int = 0) {
         activeCppEngine?.setPipelineOptions(maxFaces, frameDelayFrames)

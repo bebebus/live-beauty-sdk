@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include "livebeauty/math/device_tier.h"
+#include "livebeauty/math/face_relight.h"
 
 namespace livebeauty {
 
@@ -126,9 +128,17 @@ struct BeautyConfig {
     std::string lutUrl;
     float lutIntensity = 1.0f;
 
-    // Texture preservation & radiance
+    // Texture preservation, radiance & P1-P4 studio enhancements
     float skinTexture = 0.0f;
     float radiance = 0.0f;
+    float relight = 0.0f;                                             // P1: 3D normal studio relighting [0..1]
+    math::RelightStyle relightStyle = math::RelightStyle::kStudioSoftbox;
+    float oilControl = 0.0f;                                          // P1: T-zone oil/specular removal [0..1]
+    float neckTone = 0.0f;                                            // P1: neck-face tone continuity [0..1] (auto-assisted when whiten/smoothing > 0)
+    float ambientMakeupBlend = 0.55f;                                 // P1: ambient white-balance adaptation for makeup [0..1]
+    float matteTemporal = 0.65f;                                      // P2: RGB-guided temporal portrait matting stabilization [0..1]
+    float blemishRemove = 0.0f;                                       // P3: multi-scale isolated blemish/redness residual removal [0..1]
+    math::PerformanceTier performanceTier = math::PerformanceTier::kAuto;  // P4: Lite/Standard/Ultra hardware auto-tiering
 
     // 6-layer real-time UV makeup
     float lipstick = 0.0f;
@@ -174,5 +184,7 @@ EyebrowColor parseEyebrowColor(const std::string& s);
 EyeshadowColor parseEyeshadowColor(const std::string& s);
 ContactLensStyle parseContactLensStyle(const std::string& s);
 BackgroundMode parseBackgroundMode(const std::string& s);
+math::RelightStyle parseRelightStyle(const std::string& s);
+math::PerformanceTier parsePerformanceTier(const std::string& s);
 
 }  // namespace livebeauty

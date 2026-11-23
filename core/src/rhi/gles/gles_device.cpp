@@ -299,6 +299,9 @@ const GlesDevice::ProgramCache& GlesDevice::ensureProgram(ShaderId id) {
     } else if (id == ShaderId::kMakeupLayer || id == ShaderId::kMakeupLip || id == ShaderId::kMakeupIris) {
         pc.attr1 = glGetAttribLocation(pc.program, "aScreenUv");
         pc.attr2 = glGetAttribLocation(pc.program, "aMakeupUv");
+    } else if (id == ShaderId::kHeadDepthShell || id == ShaderId::kAr3dMesh) {
+        pc.attr1 = glGetAttribLocation(pc.program, "aTextureCoord");
+        pc.attr2 = glGetAttribLocation(pc.program, "aDepth");
     } else {
         pc.attr1 = glGetAttribLocation(pc.program, "aTextureCoord");
     }
@@ -441,6 +444,11 @@ void GlesDevice::drawIndexed(
             bindAttr(pc.attr0, 2, 6, 0);
             bindAttr(pc.attr1, 2, 6, 2);
             bindAttr(pc.attr2, 2, 6, 4);
+            break;
+        case VertexLayout::kAr3dPos2Uv2Z1:
+            bindAttr(pc.attr0, 2, 5, 0);
+            bindAttr(pc.attr1, 2, 5, 2);
+            bindAttr(pc.attr2, 1, 5, 4);
             break;
     }
 

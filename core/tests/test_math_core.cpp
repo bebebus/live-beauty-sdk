@@ -5,13 +5,16 @@
 #include <vector>
 
 #include "livebeauty/config.h"
+#include "livebeauty/math/ar_3d_accessory.h"
 #include "livebeauty/math/beauty_tuning.h"
 #include "livebeauty/math/body_geometry.h"
+#include "livebeauty/math/device_tier.h"
 #include "livebeauty/math/face_geometry.h"
 #include "livebeauty/math/face_makeup_uv.h"
 #include "livebeauty/math/face_mesh_deformer.h"
 #include "livebeauty/math/face_mesh_filter.h"
 #include "livebeauty/math/face_mesh_topology.h"
+#include "livebeauty/math/face_relight.h"
 #include "livebeauty/math/face_roi_selector.h"
 #include "livebeauty/math/face_timeline.h"
 #include "livebeauty/math/hair_mask_tuning.h"
@@ -413,6 +416,103 @@ void testMultiFaceTrackerStableAssociationAndCrossing() {
     EXPECT_TRUE(tracker.activeFaceCount() == 2);
 }
 
+void testFaceRelight3dNormalsAndStyles() {
+    FaceRelightSolver solver;
+    const auto& normals = solver.canonicalNormals();
+    // Nose tip (1) and forehead (10) must point outward (+Z) with unit norm
+    const auto checkUnit = [&](int idx) {
+        const float nx = normals[idx * 3 + 0];
+        const float ny = normals[idx * 3 + 1];
+        const float nz = normals[idx * 3 + 2];
+        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        EXPECT_NEAR(len, 1.0f, 1e-3f);
+    };
+    checkUnit(1);
+    checkUnit(10);
+    checkUnit(234);
+    checkUnit(454);
+    EXPECT_TRUE(normals[1 * 3 + 2] > 0.55f);
+    EXPECT_TRUE(normals[234 * 3 + 0] < -0.40f);  // right cheek points -X
+    EXPECT_TRUE(normals[454 * 3 + 0] > 0.40f);   // left cheek points +X
+
+    const float aspect = 9.0f / 16.0f;
+    std::array<float, FaceMeshFrame::kCoordCount> glPts{};
+    makeCanonicalFace(aspect, 0.5f, 0.5f, 0.35f, 0.0f, 0.0f, 0.0f, glPts);
+    const HeadPose3D poseFront = FaceRelightSolver::estimateHeadPose(glPts.data(), aspect, 1.0f, 0.0f, 0.0f);
+    EXPECT_TRUE(poseFront.valid);
+    // Rotation matrix must be orthonormal (row0 . row0 == 1, row0 . row1 == 0)
+    const float r0Norm = poseFront.rot[0] * poseFront.rot[0] + poseFront.rot[1] * poseFront.rot[1] + poseFront.rot[2] * poseFront.rot[2];
+    const float r01Dot = poseFront.rot[0] * poseFront.rot[3] + poseFront.rot[1] * poseFront.rot[4] + poseFront.rot[2] * poseFront.rot[5];
+    EXPECT_NEAR(r0Norm, 1.0f, 1e-4f);
+    EXPECT_NEAR(r01Dot, 0.0f, 1e-4f);
+
+    std::array<float, FaceMeshTopology::kFaceVertexCount> rembrandt{};
+    solver.computeVertexRelight(poseFront, RelightStyle::kRembrandt, 1.0f, rembrandt.data());
+    // Rembrandt key light comes from +X (left side): left cheek (454) brighter than right cheek (234)
+    EXPECT_TRUE(rembrandt[454] > rembrandt[234] + 0.05f);
+    for (float v : rembrandt) {
+        EXPECT_TRUE(std::isfinite(v) && v >= 0.0f && v <= 1.0f);
+    }
+}
+
+void testDeviceTierPolicyClassificationAndDownshift() {
+    EXPECT_TRUE(DeviceTierPolicy::classify("Adreno (TM) 750", 8, 12288) == PerformanceTier::kUltra);
+    EXPECT_TRUE(DeviceTierPolicy::classify("Apple M3 Pro", 12, 18432) == PerformanceTier::kUltra);
+    EXPECT_TRUE(DeviceTierPolicy::classify("Immortalis-G720 MC12", 8, 12288) == PerformanceTier::kUltra);
+    EXPECT_TRUE(DeviceTierPolicy::classify("Adreno (TM) 642L", 8, 8192) == PerformanceTier::kStandard);
+    EXPECT_TRUE(DeviceTierPolicy::classify("PowerVR Rogue GE8320", 4, 3072) == PerformanceTier::kLite);
+    EXPECT_TRUE(DeviceTierPolicy::classify("Mali-G52", 4, 2048) == PerformanceTier::kLite);
+
+    const auto ultraNormal = DeviceTierPolicy::resolve(PerformanceTier::kAuto, PerformanceTier::kUltra, 0);
+    EXPECT_TRUE(ultraNormal.resolvedTier == PerformanceTier::kUltra);
+    EXPECT_TRUE(ultraNormal.enableAr3d && ultraNormal.enableBlemishHeal && ultraNormal.enableMatteRefine);
+
+    // Runtime load governor level 2 downshifts Ultra -> Standard smoothly
+    const auto ultraThrottled = DeviceTierPolicy::resolve(PerformanceTier::kAuto, PerformanceTier::kUltra, 2);
+    EXPECT_TRUE(ultraThrottled.resolvedTier == PerformanceTier::kStandard);
+    EXPECT_TRUE(ultraThrottled.enableRelight3d);
+
+    // Explicit Lite forces lightweight path
+    const auto lite = DeviceTierPolicy::resolve(PerformanceTier::kLite, PerformanceTier::kUltra, 0);
+    EXPECT_TRUE(lite.resolvedTier == PerformanceTier::kLite);
+    EXPECT_TRUE(!lite.enableAr3d && !lite.enableBlemishHeal && !lite.enableMatteRefine && lite.maxFacesCap == 1);
+}
+
+void testAr3dSolverAndSpringPendulum() {
+    SpringPendulum spring;
+    spring.update(0.50f, 0.50f, 0.0f, 22.0f, 4.5f, 1000);
+    // Sudden lateral head acceleration must excite bounded sway
+    spring.update(0.56f, 0.50f, 0.0f, 22.0f, 4.5f, 1033);
+    spring.update(0.64f, 0.50f, 0.05f, 22.0f, 4.5f, 1066);
+    const float peakAngle = std::fabs(spring.swayAngleRad());
+    EXPECT_TRUE(peakAngle > 1e-4f && peakAngle <= 0.581f);
+    // Hold stationary for ~2.5 seconds: damped spring must settle smoothly toward 0
+    for (int i = 0; i < 80; ++i) {
+        spring.update(0.64f, 0.50f, 0.05f, 22.0f, 4.5f, 1099 + i * 33);
+    }
+    EXPECT_TRUE(std::fabs(spring.swayAngleRad()) < peakAngle);
+    EXPECT_TRUE(std::fabs(spring.swayAngleRad()) < 0.05f);
+
+    const float aspect = 9.0f / 16.0f;
+    std::array<float, FaceMeshFrame::kCoordCount> glPts{};
+    makeCanonicalFace(aspect, 0.5f, 0.5f, 0.35f, 0.0f, 0.0f, 0.0f, glPts);
+    const HeadPose3D pose = FaceRelightSolver::estimateHeadPose(glPts.data(), aspect, 1.0f, 0.0f, 0.0f);
+    std::array<float, Ar3dSolver::kHeadShellFloats> shell{};
+    Ar3dSolver::buildHeadDepthShell(glPts.data(), pose, shell.data());
+    // Nose tip (lm[1]) must be closer (higher depth01) than ear edge (lm[234])
+    EXPECT_TRUE(shell[1 * 5 + 4] > shell[234 * 5 + 4] + 0.15f);
+
+    Ar3dAccessoryConfig earCfg{};
+    earCfg.enabled = true;
+    earCfg.anchor = Ar3dAnchor::kLeftEar;
+    earCfg.texture = 99;
+    float quad[Ar3dSolver::kQuadFloats]{};
+    float ax = 0.0f, ay = 0.0f;
+    EXPECT_TRUE(Ar3dSolver::buildAccessoryQuad(earCfg, glPts.data(), pose, aspect, &spring, quad, ax, ay));
+    // Left ear quad sits behind nose tip plane (depth < nose depth)
+    EXPECT_TRUE(quad[4] < shell[1 * 5 + 4]);
+}
+
 }  // namespace
 
 int main() {
@@ -424,6 +524,9 @@ int main() {
     testHairMaskTuningAndMotionComp();
     testStickerTransformAnchorsAndRotation();
     testMultiFaceTrackerStableAssociationAndCrossing();
+    testFaceRelight3dNormalsAndStyles();
+    testDeviceTierPolicyClassificationAndDownshift();
+    testAr3dSolverAndSpringPendulum();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

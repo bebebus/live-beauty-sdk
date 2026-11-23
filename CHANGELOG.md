@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.0.0] - 2026-11-23
+
+### Added
+- **P1 Studio Portrait Rendering & Optical Realism (`FaceRelightSolver`, `kCompositePro`, `kMakeupLayer`, `kMakeupLip`)**:
+  - **Real 3D Vertex Normals & 6-DoF Studio Relighting (`relight`, `relightStyle`)**: Precomputes smooth area-weighted outward 3D vertex normals for all 468 canonical landmarks, estimates orthonormal head pose per frame, and evaluates 4 pose-reactive 3-point studio lighting presets (`natural`, `studio_softbox`, `butterfly`, `rembrandt`) with gentle shadow-fill lift.
+  - **T-Zone Oil & Specular Highlight Control (`oilControl`)**: Suppresses washed-out greasy glare on forehead/nose bridge while preserving natural matte skin tone and texture.
+  - **Seamless Neck-Face Continuity (`neckTone`)**: Extends a 3-row feathered 13-vertex jawline apron into `rtSkinMask_` with strict skin-chroma gating in `kCompositePro` (0/255 collar bleed).
+  - **Ambient Illuminant White-Balance Makeup & Micro-Pore Pass-Through (`ambientMakeupBlend`)**: Adapts blush/contour/eyeshadow/lipstick pigments to the live scene white balance (`setAmbientRgb`), preserves micro-pore skin texture, adds subtle eyelid crease micro-shadowing, and adds 3-band micro-pore preservation to `kCompositePro`.
+- **P2 Temporal RGB-Guided Portrait Matting & Bangs/Occlusion Makeup Guard (`kMatteRefine`, `kHairAlpha`, `setOcclusionMask`)**:
+  - Added 100% Apache-2.0 GPU RGB-guided 5-tap joint bilateral + motion-adaptive temporal EMA portrait matte refinement (`matteTemporal`) snapping segmentation edges cleanly to real RGB hair/shoulder contours without ghosting.
+  - Wired unified `rtSkinMask_.a` (hair + pluggable face-parsing/hand `occlusionMaskTex`) into `kMakeupLayer` and `kMakeupLip` so bangs, hands, cups, and microphones never get painted with makeup.
+- **P3 Multi-Scale Isolated Blemish Healer & Pluggable Neural Residual Hook (`kBlemishHeal`, `kAiResidualBlend`)**:
+  - Added zero-weight 8-tap ring morphological/chroma isolated acne/dark-spot/redness healer (`blemishRemove`) strictly gated inside `faceM * (1 - exclM) * nonHair` (0/255 impact on clean skin, eyes, brows, lips, or hair).
+  - Added pluggable Face-ROI neural residual delta fusion pass (`setAiResidual`) ready for host-supplied TFLite/CoreML portrait enhancement checkpoints.
+- **P4 Lightweight 3D Head-Occluded AR Accessories & Hardware Auto-Tiering (`Ar3dSolver`, `SpringPendulum`, `DeviceTierPolicy`)**:
+  - Added 468-pt 3D head-occluder depth shell (`kHeadDepthShell`) + perspective-rotated 3D accessory pass (`kAr3dMesh`) with 2nd-order damped spring pendulum physics for dangling earrings/headbands/glasses.
+  - Added automatic SoC/GPU tier classifier (`DeviceTierPolicy`: `Lite` / `Standard` / `Ultra`) with runtime load-governor downshift, automatic Android `GL_RENDERER` & Apple `MTLDevice` profiling, and `PerfStats.resolvedTier` telemetry.
+- **Expanded Verification Gates**:
+  - All 30 C++ GLES shaders verified in both `highp` and forced `mediump` (`kCompositePro` strictly within 15 active uniforms).
+  - Added Apple Metal real GPU pixel gates (`P1-P4`) verifying T-zone oil removal, ambient WB makeup, 0/255 bangs/occlusion makeup blocking, isolated acne healing, and 3D head-depth occlusion.
+
+## [2.2.1] - 2026-11-23
+
+### Fixed
+- Upgraded `FrameDelayRing` to 0..4 frames, tuned fast-motion head tracking & low-light temporal denoise cutoff (`<= 8/255`, cap `0.18`), and aligned `kCompositePro` LUT/filter exclusion and 2-pass skin mask feathering with Kotlin reference.
+
 ## [2.2.0] - 2026-11-23
 
 ### Added

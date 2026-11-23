@@ -93,6 +93,16 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     c.contactLens = dictFloat(d, @"contactLens", 0.0f);
     c.contactLensStyle = livebeauty::parseContactLensStyle(dictString(d, @"contactLensStyle", "hazel"));
     c.catchlight = dictFloat(d, @"catchlight", 0.0f);
+    c.relight = dictFloat(d, @"relight", 0.0f);
+    c.relightStyle = livebeauty::parseRelightStyle(dictString(d, @"relightStyle", "natural"));
+    c.oilControl = dictFloat(d, @"oilControl", 0.0f);
+    c.neckTone = dictFloat(d, @"neckTone", 0.0f);
+    c.ambientMakeupBlend = dictFloat(d, @"ambientMakeupBlend", 0.5f);
+    c.matteTemporal = dictFloat(d, @"matteTemporal", 0.6f);
+    c.blemishRemove = dictFloat(d, @"blemishRemove", 0.0f);
+    c.performanceTier = livebeauty::parsePerformanceTier(dictString(d, @"performanceTier", "auto"));
+    c.maxFaces = static_cast<int>(dictFloat(d, @"maxFaces", 1.0f));
+    c.frameDelayFrames = static_cast<int>(dictFloat(d, @"frameDelayFrames", 0.0f));
     return c;
 }
 
@@ -112,6 +122,11 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
         _device = std::make_unique<livebeauty::rhi::metal::MetalDevice>();
         if (_device->isReady()) {
             _engine = std::make_unique<livebeauty::LiveBeautyEngine>(*_device);
+            NSProcessInfo* pi = [NSProcessInfo processInfo];
+            const char* gpuName = _device->nativeDevice().name.UTF8String;
+            const int cores = static_cast<int>(pi.processorCount);
+            const int ramMb = static_cast<int>(pi.physicalMemory / (1024ULL * 1024ULL));
+            _engine->setHardwareProfile(gpuName ? std::string(gpuName) : std::string("Apple GPU"), cores, ramMb);
             CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, _device->nativeDevice(), nullptr, &_textureCache);
         }
     }
@@ -196,17 +211,121 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     if (_engine) _engine->resetTracking();
 }
 
+- (void)setAmbientR:(float)r g:(float)g b:(float)b {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_engine) _engine->setAmbientRgb(r, g, b);
+}
+
+- (void)setOcclusionMaskTexture:(nullable id<MTLTexture>)occlusionMask {
+    if (!self.isReady) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    const auto tex = occlusionMask ? _device->wrapMetalTexture(occlusionMask) : livebeauty::rhi::kInvalidTexture;
+    _engine->setOcclusionMask(tex);
+}
+
+- (void)setAiResidualTexture:(nullable id<MTLTexture>)residualTex
+                     roiLeft:(float)roiLeft
+                      roiTop:(float)roiTop
+                    roiWidth:(float)roiWidth
+                   roiHeight:(float)roiHeight
+                    strength:(float)strength {
+    if (!self.isReady) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    const auto tex = residualTex ? _device->wrapMetalTexture(residualTex) : livebeauty::rhi::kInvalidTexture;
+    _engine->setAiResidual(tex, {roiLeft, roiTop, roiWidth, roiHeight}, strength);
+}
+
+- (void)setAr3dAccessoryAtSlot:(int)slot
+                       enabled:(BOOL)enabled
+                        anchor:(int)anchor
+                       texture:(nullable id<MTLTexture>)texture
+                         scale:(float)scale
+                       offsetX:(float)offsetX
+                       offsetY:(float)offsetY
+                       offsetZ:(float)offsetZ
+                        yawRad:(float)yawRad
+                      pitchRad:(float)pitchRad
+                       rollRad:(float)rollRad
+                       opacity:(float)opacity
+                 textureAspect:(float)textureAspect
+               springStiffness:(float)springStiffness
+                 springDamping:(float)springDamping
+                 headOcclusion:(BOOL)headOcclusion {
+    if (!self.isReady) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    livebeauty::math::Ar3dAccessoryConfig cfg{};
+    cfg.enabled = (enabled == YES);
+    cfg.anchor = static_cast<livebeauty::math::Ar3dAnchor>(anchor);
+    cfg.texture = texture ? _device->wrapMetalTexture(texture) : livebeauty::rhi::kInvalidTexture;
+    cfg.scale = scale;
+    cfg.offsetX = offsetX;
+    cfg.offsetY = offsetY;
+    cfg.offsetZ = offsetZ;
+    cfg.yawOffsetRad = yawRad;
+    cfg.pitchOffsetRad = pitchRad;
+    cfg.rollOffsetRad = rollRad;
+    cfg.opacity = opacity;
+    cfg.textureAspect = textureAspect;
+    cfg.springStiffness = springStiffness;
+    cfg.springDamping = springDamping;
+    cfg.headOcclusion = (headOcclusion == YES);
+    _engine->setAr3dAccessory(slot, cfg);
+}
+
+- (void)clearAr3dAccessories {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_engine) _engine->clearAr3dAccessories();
+}
+
+- (NSDictionary<NSString*, NSNumber*>*)statsDictionary {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_engine) return @{};
+    const auto& st = _engine->stats();
+    return @{
+        @"lastFrameMs": @(st.lastFrameMs),
+        @"emaFrameMs": @(st.emaFrameMs),
+        @"fps": @(st.fps),
+        @"loadLevel": @(st.loadLevel),
+        @"resolvedTier": @(st.resolvedTier),
+        @"facePresence": @(st.facePresence),
+        @"hairShown": @(st.hairShown),
+        @"activePassesMask": @(st.activePassesMask),
+        @"frameCount": @(st.frameCount),
+        @"activeFaces": @(st.activeFaces),
+    };
+}
+
 - (nullable id<MTLTexture>)processTexture:(id<MTLTexture>)inputTexture
                          frameTimestampMs:(int64_t)frameTsMs
                                     nowMs:(int64_t)nowMs {
+    return [self processTexture:inputTexture
+               frameTimestampMs:frameTsMs
+                          nowMs:nowMs
+                     personMask:nil
+                       hairMask:nil
+                hairMaskStampMs:livebeauty::kTimeInvalid
+                      lightLuma:0.30f
+                   bitrateRatio:1.0f];
+}
+
+- (nullable id<MTLTexture>)processTexture:(id<MTLTexture>)inputTexture
+                         frameTimestampMs:(int64_t)frameTsMs
+                                    nowMs:(int64_t)nowMs
+                               personMask:(nullable id<MTLTexture>)personMask
+                                 hairMask:(nullable id<MTLTexture>)hairMask
+                          hairMaskStampMs:(int64_t)hairMaskStampMs
+                                lightLuma:(float)lightLuma
+                             bitrateRatio:(float)bitrateRatio {
     if (!self.isReady || !inputTexture) return inputTexture;
     std::lock_guard<std::mutex> lock(_mutex);
     const auto inId = _device->wrapMetalTexture(inputTexture);
+    const auto maskId = personMask ? _device->wrapMetalTexture(personMask) : livebeauty::rhi::kInvalidTexture;
+    const auto hairId = hairMask ? _device->wrapMetalTexture(hairMask) : livebeauty::rhi::kInvalidTexture;
     const auto outId = _engine->processFrame(
         inId,
         static_cast<int>(inputTexture.width),
         static_cast<int>(inputTexture.height),
-        frameTsMs, nowMs);
+        frameTsMs, nowMs, maskId, lightLuma, bitrateRatio, hairId, hairMaskStampMs);
     _device->flush();
     return _device->unwrapMetalTexture(outId);
 }

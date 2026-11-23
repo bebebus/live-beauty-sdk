@@ -144,7 +144,7 @@ document.getElementById('res').textContent = JSON.stringify(out);
         print(f"FAIL  kCompositePro uniform budget exceeded: {comp_high}", file=sys.stderr)
         return 1
 
-    print(f"PASS  all {len(pairs)} C++ GLES shaders linked in both highp and mediump ({len(results)}/50, kCompositePro={comp_high[0]['activeUniforms']} uniforms)")
+    print(f"PASS  all {len(pairs)} C++ GLES shaders linked in both highp and mediump ({len(results)}/{len(pairs) * 2}, kCompositePro={comp_high[0]['activeUniforms']} uniforms)")
     return 0
 
 

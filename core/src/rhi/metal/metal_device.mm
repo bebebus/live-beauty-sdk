@@ -112,6 +112,18 @@ struct MetalDevice::Impl {
                 vd.attributes[2].bufferIndex = 0;
                 vd.layouts[0].stride = 24;
                 break;
+            case VertexLayout::kAr3dPos2Uv2Z1:
+                vd.attributes[0].format = MTLVertexFormatFloat2;
+                vd.attributes[0].offset = 0;
+                vd.attributes[0].bufferIndex = 0;
+                vd.attributes[1].format = MTLVertexFormatFloat2;
+                vd.attributes[1].offset = 8;
+                vd.attributes[1].bufferIndex = 0;
+                vd.attributes[2].format = MTLVertexFormatFloat;
+                vd.attributes[2].offset = 16;
+                vd.attributes[2].bufferIndex = 0;
+                vd.layouts[0].stride = 20;
+                break;
         }
         return vd;
     }
@@ -144,6 +156,11 @@ struct MetalDevice::Impl {
             case ShaderId::kBgHairMerge:     vsName = @"vs_quad";      fsName = @"fs_bg_hair_merge"; break;
             case ShaderId::kBgVirtualMix:    vsName = @"vs_quad";      fsName = @"fs_bg_virtual_mix"; break;
             case ShaderId::kStickerQuad:     vsName = @"vs_quad";      fsName = @"fs_sticker_quad"; break;
+            case ShaderId::kMatteRefine:     vsName = @"vs_quad";      fsName = @"fs_matte_refine"; break;
+            case ShaderId::kBlemishHeal:     vsName = @"vs_quad";      fsName = @"fs_blemish_heal"; break;
+            case ShaderId::kAiResidualBlend: vsName = @"vs_quad";      fsName = @"fs_ai_residual_blend"; break;
+            case ShaderId::kHeadDepthShell:  vsName = @"vs_ar3d";      fsName = @"fs_head_depth_shell"; break;
+            case ShaderId::kAr3dMesh:        vsName = @"vs_ar3d";      fsName = @"fs_ar3d_mesh"; break;
             case ShaderId::kPassThrough:
             default:                         vsName = @"vs_quad";      fsName = @"fs_pass_through"; break;
         }

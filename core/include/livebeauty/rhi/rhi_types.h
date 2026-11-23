@@ -26,6 +26,7 @@ enum class VertexLayout : uint8_t {
     kSkinMaskPos2W3 = 2,    // 5 floats: dstNdcX, dstNdcY, skin, excl, hiPlane
     kRetouchPos2Uv2A4 = 3,  // 8 floats: dstNdcX, dstNdcY, srcU, srcV, wTear, wFold, offU, offV
     kMakeupPos2Uv2Uv2 = 4,  // 6 floats: dstNdcX, dstNdcY, screenU, screenV, makeupU, makeupV
+    kAr3dPos2Uv2Z1 = 5,     // 5 floats: dstNdcX, dstNdcY, u, v, depth01 (P4 3D AR & head occluder)
 };
 
 enum class ShaderId : uint8_t {
@@ -55,6 +56,11 @@ enum class ShaderId : uint8_t {
     kBgHairMerge,
     kBgVirtualMix,
     kStickerQuad,
+    kMatteRefine,
+    kBlemishHeal,
+    kAiResidualBlend,
+    kHeadDepthShell,
+    kAr3dMesh,
     kCount,
 };
 

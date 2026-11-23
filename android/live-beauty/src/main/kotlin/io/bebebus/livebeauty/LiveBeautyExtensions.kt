@@ -39,6 +39,35 @@ data class LiveBeautySticker(
     val textureAspect: Float = 1.0f,
 )
 
+/** 3D 头部遮挡 AR 挂件锚点（与 C++17 `livebeauty::math::Ar3dAnchor` 一一对应）。 */
+enum class Ar3dAnchor(val id: Int) {
+    HEAD_CROWN(0),
+    GLASSES_BRIDGE(1),
+    LEFT_EAR(2),
+    RIGHT_EAR(3),
+    NOSE_TIP(4),
+    CHIN(5),
+}
+
+/** 单个 3D AR 挂件层配置（支持 3D 透视旋转、头部深度遮挡与二阶弹簧摆物理）。 */
+data class LiveBeautyAr3dAccessory(
+    val enabled: Boolean = true,
+    val anchor: Ar3dAnchor = Ar3dAnchor.HEAD_CROWN,
+    val glTextureId: Int = 0,
+    val scale: Float = 1.0f,
+    val offsetX: Float = 0.0f,
+    val offsetY: Float = 0.0f,
+    val offsetZ: Float = 0.0f,
+    val yawRad: Float = 0.0f,
+    val pitchRad: Float = 0.0f,
+    val rollRad: Float = 0.0f,
+    val opacity: Float = 1.0f,
+    val textureAspect: Float = 1.0f,
+    val springStiffness: Float = 0.0f,
+    val springDamping: Float = 4.5f,
+    val headOcclusion: Boolean = true,
+)
+
 /** C++17 渲染内核实时性能遥测快照。 */
 data class BeautyPerfStats(
     val lastFrameMs: Float = 0f,
@@ -50,9 +79,10 @@ data class BeautyPerfStats(
     val activePassesMask: Int = 0,
     val frameCount: Long = 0L,
     val activeFaces: Int = 0,
+    val resolvedTier: Int = 2,
 ) {
     companion object {
-        const val RAW_SIZE = 10
+        const val RAW_SIZE = 11
 
         fun fromRaw(raw: FloatArray): BeautyPerfStats {
             if (raw.size < 8) return BeautyPerfStats()
@@ -66,6 +96,7 @@ data class BeautyPerfStats(
                 activePassesMask = raw[6].toInt(),
                 frameCount = raw[7].toLong(),
                 activeFaces = if (raw.size >= 9) raw[8].toInt() else 0,
+                resolvedTier = if (raw.size >= 11) raw[10].toInt() else 2,
             )
         }
     }

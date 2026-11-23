@@ -1,5 +1,6 @@
 package io.bebebus.livebeauty
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.res.AssetManager
@@ -104,6 +105,17 @@ internal class LiveBeautyCppEngine(
 
     private val stickers = arrayOfNulls<LiveBeautySticker>(MAX_STICKERS)
     private var stickersDirty = false
+    private val ar3dAccessories = arrayOfNulls<LiveBeautyAr3dAccessory>(MAX_STICKERS)
+    private var ar3dDirty = false
+    private var occlusionMaskTex = 0
+    private var occlusionDirty = false
+    private var aiResidualTex = 0
+    private var aiRoiLeft = 0f
+    private var aiRoiTop = 0f
+    private var aiRoiWidth = 1f
+    private var aiRoiHeight = 1f
+    private var aiResidualStrength = 0f
+    private var aiResidualDirty = false
     @Volatile private var maxFaces = 1
     @Volatile private var frameDelayFrames = 0
     private var pipelineOptionsDirty = false
@@ -149,7 +161,19 @@ internal class LiveBeautyCppEngine(
         invalidateBoundAssets()
         virtualBgDirty = (virtualBgMode != VirtualBackgroundMode.NONE || virtualBgTex != 0)
         stickersDirty = stickers.any { it != null }
+        ar3dDirty = ar3dAccessories.any { it != null }
+        occlusionDirty = (occlusionMaskTex != 0)
+        aiResidualDirty = (aiResidualTex != 0 && aiResidualStrength > 0f)
         pipelineOptionsDirty = (maxFaces != 1 || frameDelayFrames != 0)
+        // P4: Automatically report GPU renderer + CPU cores + RAM for hardware tier classification
+        val renderer = try { glGetString(GL_RENDERER) ?: "" } catch (_: Exception) { "" }
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        val ramMb = try {
+            val am = appContext?.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            val mi = ActivityManager.MemoryInfo()
+            if (am != null) { am.getMemoryInfo(mi); (mi.totalMem / (1024L * 1024L)).toInt() } else 4096
+        } catch (_: Exception) { 4096 }
+        NativeBeautyBridge.nativeSetHardwareProfile(created, renderer, cores, ramMb)
     }
 
     override fun configure(config: VideoEffectsConfig) {
@@ -159,6 +183,7 @@ internal class LiveBeautyCppEngine(
         }
         val h = handle
         if (h == 0L) return
+        NativeBeautyBridge.nativeSetProOptions(h, config.relightStyle, config.performanceTier)
         NativeBeautyBridge.packConfigScalars(config, scalars)
         NativeBeautyBridge.nativeSetConfig(
             handle = h,
@@ -205,6 +230,39 @@ internal class LiveBeautyCppEngine(
     fun clearStickers() {
         stickers.fill(null)
         stickersDirty = true
+    }
+
+    fun setOcclusionMaskTexture(glTextureId: Int) {
+        occlusionMaskTex = glTextureId
+        occlusionDirty = true
+    }
+
+    fun setAiResidualTexture(
+        glTextureId: Int,
+        roiLeft: Float = 0f,
+        roiTop: Float = 0f,
+        roiWidth: Float = 1f,
+        roiHeight: Float = 1f,
+        strength: Float = 1f,
+    ) {
+        aiResidualTex = glTextureId
+        aiRoiLeft = roiLeft
+        aiRoiTop = roiTop
+        aiRoiWidth = roiWidth
+        aiRoiHeight = roiHeight
+        aiResidualStrength = strength.coerceIn(0f, 1f)
+        aiResidualDirty = true
+    }
+
+    fun setAr3dAccessory(slot: Int, accessory: LiveBeautyAr3dAccessory?) {
+        if (slot !in 0 until MAX_STICKERS) return
+        ar3dAccessories[slot] = accessory
+        ar3dDirty = true
+    }
+
+    fun clearAr3dAccessories() {
+        ar3dAccessories.fill(null)
+        ar3dDirty = true
     }
 
     /** 配置双人同屏人数上限（1..2）与零滞后帧对齐环帧数（0..2）。 */
@@ -275,8 +333,9 @@ internal class LiveBeautyCppEngine(
 
         val cfg = currentConfig
         val hasStickers = stickers.any { it != null && it.enabled && it.glTextureId != 0 }
+        val hasAr3d = ar3dAccessories.any { it != null && it.enabled && it.glTextureId != 0 }
         val wantVirtualBg = (virtualBgMode == VirtualBackgroundMode.VIRTUAL_IMAGE || virtualBgMode == VirtualBackgroundMode.VIRTUAL_BLUR) && virtualBgTex != 0
-        val wantFace = faceHealthy && (needsFace(cfg) || (cfg.enabled && !cfg.compareOriginal && hasStickers))
+        val wantFace = faceHealthy && (needsFace(cfg) || (cfg.enabled && !cfg.compareOriginal && (hasStickers || hasAr3d)))
         val wantBody = bodyHealthy && needsBody(cfg)
         val wantSeg = segHealthy && (needsSegmentation(cfg) || (cfg.enabled && !cfg.compareOriginal && wantVirtualBg))
         val wantHair = hairHealthy && HairMaskTuning.wants(hairHealthy, true, wantFace, cfg)
@@ -373,6 +432,44 @@ internal class LiveBeautyCppEngine(
                     )
                 }
             }
+        }
+        if (ar3dDirty) {
+            ar3dDirty = false
+            NativeBeautyBridge.nativeClearAr3dAccessories(h)
+            for (slot in 0 until MAX_STICKERS) {
+                val a = ar3dAccessories[slot] ?: continue
+                if (a.enabled && a.glTextureId != 0) {
+                    NativeBeautyBridge.nativeSetAr3dAccessory(
+                        handle = h,
+                        slot = slot,
+                        enabled = true,
+                        anchor = a.anchor.id,
+                        texGlId = a.glTextureId,
+                        scale = a.scale,
+                        offsetX = a.offsetX,
+                        offsetY = a.offsetY,
+                        offsetZ = a.offsetZ,
+                        yawRad = a.yawRad,
+                        pitchRad = a.pitchRad,
+                        rollRad = a.rollRad,
+                        opacity = a.opacity,
+                        textureAspect = a.textureAspect,
+                        springStiffness = a.springStiffness,
+                        springDamping = a.springDamping,
+                        headOcclusion = a.headOcclusion,
+                    )
+                }
+            }
+        }
+        if (occlusionDirty) {
+            occlusionDirty = false
+            NativeBeautyBridge.nativeSetOcclusionMask(h, occlusionMaskTex)
+        }
+        if (aiResidualDirty) {
+            aiResidualDirty = false
+            NativeBeautyBridge.nativeSetAiResidual(
+                h, aiResidualTex, aiRoiLeft, aiRoiTop, aiRoiWidth, aiRoiHeight, aiResidualStrength,
+            )
         }
     }
 
@@ -554,6 +651,9 @@ internal class LiveBeautyCppEngine(
                         lightLuma = if (lightLuma.isNaN()) measured else lightLuma + 0.35f * (measured - lightLuma)
                         light.onSample(measured)?.let { dark -> try { onLowLight(dark) } catch (_: Exception) {} }
                     }
+                    // P1: Estimate ambient illuminant RGB white-balance ratios from center-sampled RGBA frame
+                    val rgb = estimateAmbientRgb(sample.pixels, sample.width, sample.height)
+                    NativeBeautyBridge.nativeSetAmbientRgb(h, rgb[0], rgb[1], rgb[2])
                 }
             } catch (_: Exception) {
                 lightHealthy = false
@@ -868,7 +968,7 @@ internal class LiveBeautyCppEngine(
     }
 
     companion object {
-        const val SCALAR_COUNT = 45
+        const val SCALAR_COUNT = 51
         const val MAX_STICKERS = 4
         private const val FACE_GPU_INTERVAL_MS = 1L
         private const val FACE_CPU_INTERVAL_MS = 45L
@@ -897,11 +997,47 @@ internal class LiveBeautyCppEngine(
             return FaceRoiSelector.CropRect(l, t, w, h)
         }
 
+        fun estimateAmbientRgb(pixels: ByteBuffer, width: Int, height: Int): FloatArray {
+            if (width <= 0 || height <= 0 || pixels.capacity() < width * height * 4) {
+                return floatArrayOf(1f, 1f, 1f)
+            }
+            val stepX = (width / 16).coerceAtLeast(1)
+            val stepY = (height / 16).coerceAtLeast(1)
+            var sumR = 0.0
+            var sumG = 0.0
+            var sumB = 0.0
+            var count = 0
+            var y = stepY / 2
+            while (y < height) {
+                var x = stepX / 2
+                while (x < width) {
+                    val idx = (y * width + x) * 4
+                    sumR += (pixels.get(idx).toInt() and 0xFF)
+                    sumG += (pixels.get(idx + 1).toInt() and 0xFF)
+                    sumB += (pixels.get(idx + 2).toInt() and 0xFF)
+                    count++
+                    x += stepX
+                }
+                y += stepY
+            }
+            if (count == 0) return floatArrayOf(1f, 1f, 1f)
+            val r = (sumR / count).toFloat()
+            val g = (sumG / count).toFloat()
+            val b = (sumB / count).toFloat()
+            val avg = ((r + g + b) / 3f).coerceAtLeast(16f)
+            return floatArrayOf(
+                (r / avg).coerceIn(0.75f, 1.25f),
+                (g / avg).coerceIn(0.75f, 1.25f),
+                (b / avg).coerceIn(0.75f, 1.25f),
+            )
+        }
+
         fun needsFace(cfg: VideoEffectsConfig) = cfg.enabled && (
             cfg.hasFaceReshape() || cfg.hasMakeup() || cfg.whiten > 0f ||
                 cfg.darkCircles > 0f || cfg.brightEyes > 0f || cfg.teethWhiten > 0f ||
                 cfg.nasolabial > 0f || cfg.rosy > 0f || cfg.radiance > 0f ||
-                (cfg.skinOnly && cfg.smoothing > 0f))
+                cfg.relight > 0f || cfg.oilControl > 0f || cfg.neckTone > 0f ||
+                cfg.blemishRemove > 0f || (cfg.skinOnly && cfg.smoothing > 0f))
 
         fun needsBody(cfg: VideoEffectsConfig) = cfg.enabled && (
             cfg.waistSlim > 0f || cfg.bustEnhance > 0f || cfg.legLengthen > 0f ||
