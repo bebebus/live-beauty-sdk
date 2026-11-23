@@ -43,6 +43,12 @@ jobs:
             yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           fi
 
+      - name: Run C++17 unified math & RHI RenderPipeline tests
+        run: |
+          cmake -S core -B /tmp/livebeauty-cpp-build
+          cmake --build /tmp/livebeauty-cpp-build --parallel
+          ctest --test-dir /tmp/livebeauty-cpp-build --output-on-failure
+
       - name: Run Android standalone unit tests & assemble Release AAR
         working-directory: android
         run: ./gradlew --no-daemon :live-beauty:testDebugUnitTest :live-beauty:testReleaseUnitTest :live-beauty:assembleRelease
@@ -92,6 +98,16 @@ jobs:
             -o "$CI_BIN"
           "$CI_BIN"
           rm -f "$CI_BIN"
+
+      - name: Build & run C++17 unified core + Apple Metal GPU pixel gates
+        run: |
+          cmake -S core -B /tmp/livebeauty-metal-build -DLIVEBEAUTY_ENABLE_METAL=ON
+          cmake --build /tmp/livebeauty-metal-build --parallel
+          ctest --test-dir /tmp/livebeauty-metal-build --output-on-failure
+          clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
+            -Icore/include -Icore/src/rhi/metal -Iios/Classes \
+            -c ios/Classes/FLTLiveBeautyMetalEngine.mm -o /tmp/flt_metal_engine.o
+          rm -f /tmp/flt_metal_engine.o
 
       - name: Set up Chrome for WebGL1 GLSL shader gate
         uses: browser-actions/setup-chrome@v2

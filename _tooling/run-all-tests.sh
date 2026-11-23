@@ -6,22 +6,22 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "=================================================================="
-echo " [1/7] Open-Source Sanitization Gate (_tooling/sanitize-check.py)"
+echo " [1/8] Open-Source Sanitization Gate (_tooling/sanitize-check.py)"
 echo "=================================================================="
 python3 _tooling/sanitize-check.py
 
 echo "=================================================================="
-echo " [2/7] Bundled MediaPipe Models SHA256 Gate (_tooling/verify-models.py)"
+echo " [2/8] Bundled MediaPipe Models SHA256 Gate (_tooling/verify-models.py)"
 echo "=================================================================="
 python3 _tooling/verify-models.py
 
 echo "=================================================================="
-echo " [3/7] Canonical 468/548 Face Topology Gate (reference/gen_face_topology.py)"
+echo " [3/8] Canonical 468/548 Face Topology Gate (reference/gen_face_topology.py)"
 echo "=================================================================="
 python3 reference/gen_face_topology.py --verify
 
 echo "=================================================================="
-echo " [4/7] 44 GLSL Shaders + 28 Mutants + 10 3D LUTs Gate (_tooling/verify-glsl.sh)"
+echo " [4/8] 44 GLSL Shaders + 28 Mutants + 10 3D LUTs Gate (_tooling/verify-glsl.sh)"
 echo "=================================================================="
 if [[ "${SKIP_GLSL_BROWSER_GATE:-0}" == "1" ]]; then
   echo "SKIP  SKIP_GLSL_BROWSER_GATE=1，仅执行内置 3D LUT 像素校验"
@@ -31,7 +31,7 @@ else
 fi
 
 echo "=================================================================="
-echo " [5/7] iOS/macOS CoreImage Kernel & Smoother Gate (ios/Tests/verify_macos_ci.m)"
+echo " [5/8] iOS/macOS CoreImage Kernel & Smoother Gate (ios/Tests/verify_macos_ci.m)"
 echo "=================================================================="
 if [[ "$(uname -s)" == "Darwin" ]]; then
   CI_BIN="$(mktemp -t livebeauty_ci).bin"
@@ -57,7 +57,7 @@ else
 fi
 
 echo "=================================================================="
-echo " [6/7] Android Standalone SDK Unit Tests & Release AAR (:live-beauty)"
+echo " [6/8] Android Standalone SDK Unit Tests & Release AAR (:live-beauty)"
 echo "=================================================================="
 if command -v java >/dev/null 2>&1 && [[ -n "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" ]]; then
   (cd android && ./gradlew --no-daemon :live-beauty:testDebugUnitTest :live-beauty:testReleaseUnitTest :live-beauty:assembleRelease)
@@ -75,7 +75,7 @@ else
 fi
 
 echo "=================================================================="
-echo " [7/7] Flutter Wrapper Static Analysis & Unit Tests (flutter/)"
+echo " [7/8] Flutter Wrapper Static Analysis & Unit Tests (flutter/)"
 echo "=================================================================="
 if command -v flutter >/dev/null 2>&1; then
   (cd flutter && flutter pub get && flutter analyze --no-pub && flutter test --no-pub)
@@ -95,5 +95,20 @@ else
   exit 1
 fi
 
+echo "=================================================================="
+echo " [8/8] Unified C++17 Core (Math + RHI + Apple Metal GPU Gate)"
+echo "=================================================================="
+CPP_BUILD_DIR="$(mktemp -d -t livebeauty_cpp)"
+trap 'rm -rf "$CPP_BUILD_DIR"' EXIT
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  cmake -S core -B "$CPP_BUILD_DIR" -DLIVEBEAUTY_ENABLE_METAL=ON
+else
+  cmake -S core -B "$CPP_BUILD_DIR"
+fi
+cmake --build "$CPP_BUILD_DIR" --parallel
+ctest --test-dir "$CPP_BUILD_DIR" --output-on-failure
+rm -rf "$CPP_BUILD_DIR"
+trap - EXIT
+
 echo ""
-echo "ALL 7 LIVE BEAUTY SDK GATES PASSED!"
+echo "ALL 8 LIVE BEAUTY SDK GATES PASSED!"

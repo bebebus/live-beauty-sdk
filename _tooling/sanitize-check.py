@@ -10,7 +10,7 @@ FORBIDDEN = re.compile(
     re.IGNORECASE,
 )
 BINARY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".task", ".tflite", ".jar", ".keystore", ".so", ".a"}
-SKIP_DIRS = {".git", ".gradle", "build", ".dart_tool", "Pods", "DerivedData"}
+SKIP_DIRS = {".git", ".gradle", "build", ".dart_tool", "Pods", "DerivedData", ".cxx", ".externalNativeBuild"}
 
 violations = []
 checked = 0

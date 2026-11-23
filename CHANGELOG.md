@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [2.0.0] - 2026-11-23
+
+### Added
+- **Unified C++17 Math & Render Core (`core/`)**:
+  - **Pure C++17 Math & State-Machine Core (`livebeauty_math`, zero third-party runtime dependencies)**: Consolidated all core algorithms into a single cross-platform source of truth — `FaceMeshTopology` (deterministically co-generated and verified alongside Kotlin via `reference/gen_face_topology.py`), 15-axis $C^\infty$ diffeomorphic `FaceMeshDeformer` (including `cranialTop`, Boltzmann SoftMax half-width symmetry, and Jacobian barrier guard), `FaceMeshFilter` (Procrustes weak-perspective + 3-region One-Euro + `LID_RING`/`LIP_RING`/`EYE_REGION` boost), `FaceTimeline` (including 35ms velocity-aware `eyeMakeupKeep`), `FaceRoiSelector`, `FaceMakeupUv` (calibrated palettes + 468-pt anatomical sub-mesh packing), `BodyGeometry` (5-axis reshape + `NeckLift`), and `EffectsLoadGovernor`.
+  - **Lightweight Cross-Backend RHI & RenderGraph Orchestrator (`livebeauty_engine`)**: Introduced `IRhiDevice`, `RenderPipeline`, and `LiveBeautyEngine` unifying all 8 beauty passes (portrait bokeh, 5-axis body warp, painter's-order 548-vertex diffeomorphic face warp, in-place 468-pt anatomical sub-mesh retouch, 504-vertex polygon skin mask, feedback-loop-isolated `1/3 + 1/9` dual-band guided smoothing, 15-uniform `CompositePro` + `64^3` 3D LUT, 6-layer physically-based UV makeup, and adaptive temporal denoise).
+  - **Android OpenGL ES 2.0/3.0 Backend & NDK JNI Bridge (`livebeauty_gles` + `livebeauty_jni`)**: Integrated `core/CMakeLists.txt` into `:live-beauty` Gradle build producing dual-ABI (`arm64-v8a` / `armeabi-v7a`) `liblivebeauty_jni.so` inside the Release AAR, exposed via `NativeBeautyBridge`.
+  - **Apple Metal RHI Backend, Equivalent Hand-Tuned MSL Shaders & Full-Parity iOS Engine (`livebeauty_metal` + `FLTLiveBeautyMetalEngine`)**: Implemented `MetalDevice`, complete hand-tuned MSL shader suite matching Android GLSL formulas, `FLTLiveBeautyMetalEngine` (`MTLTexture` & `CVMetalTextureCache` zero-copy `CVPixelBuffer` bridge), and CocoaPods integration in `LiveBeautySDK.podspec` while keeping existing `FLTVideoEffects` CoreImage APIs backward-compatible.
+  - **Cross-Platform CTest & Apple Metal GPU Pixel Gates (`_tooling/run-all-tests.sh` `[8/8]` & GitHub Actions CI)**: Added `livebeauty_math_tests`, `livebeauty_rhi_tests` (Mock RHI pass ordering & zero-feedback-loop checks), and `livebeauty_metal_pixel_gate` running real Apple Metal GPU probes (`L1/L2/L6`, `E1–E4`, `R1`, and end-to-end `koreanWaterGlow` rendering).
+
 ## [1.1.4] - 2026-11-23
 
 ### Fixed

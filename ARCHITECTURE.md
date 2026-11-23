@@ -77,4 +77,17 @@ flowchart LR
 | WebGL1 GLSL 像素门禁 | `_tooling/glsl/glsl_gate.py` | 启动无头 Chrome 真编译全部 44 段 GLSL 着色器，执行 28 组变异注入测试与像素探针 |
 | 3D LUT 像素校验 | `reference/gen_builtin_luts.py --verify` | 校验全部 10 张 `512×512`（`64^3`）内置 LUT PNG 恒等性与单调性 |
 | iOS/macOS CoreImage 门禁 | `ios/Tests/verify_macos_ci.m` | 编译全部 Objective-C 类，在 Metal GPU 上渲染合成帧并校验 150ms 渐入平滑器 |
-| Android & Flutter 单测 | `android/` & `flutter/` | 运行 35 套 Kotlin Debug/Release JVM 单测、构建独立 Release AAR，并执行 `flutter analyze` 与 `flutter test` |
+| Android & Flutter 单测 | `android/` & `flutter/` | 运行 36 套 Kotlin Debug/Release JVM 单测、构建含双架构 `liblivebeauty_jni.so` 的独立 Release AAR，并执行 `flutter analyze` 与 `flutter test` |
+| C++17 统一内核与 Metal 像素门禁 | `core/tests/` | 零外部依赖 CTest 套件：验证 548 顶点微分同胚/高颅顶/时间线/ROI/负载治理（`livebeauty_math_tests`）、Mock RHI 8 大 Pass 拓扑与零反馈环（`livebeauty_rhi_tests`）及 macOS 真实 Metal GPU 像素门禁 `L1/L2/L6`、`E1–E4`、`R1` 与端到端渲染（`livebeauty_metal_pixel_gate`） |
+
+---
+
+## 5. 统一 C++17 渲染与数学内核（`core/`）
+
+自 `v2.0` 架构演进起，SDK 将全部核心数学模型、渲染编排与图形后端收口为三层零重型依赖的 C++17 模块（详见 [docs/cpp-core-architecture-plan.md](./docs/cpp-core-architecture-plan.md)）：
+
+1. **纯数学与状态机核（`livebeauty_math`）**：`FaceMeshTopology`（由 `reference/gen_face_topology.py` 与 Kotlin 逐字节同源生成）、`FaceMeshDeformer`（15 轴 $C^\infty$ 微分同胚 + 高颅顶）、`FaceMeshFilter`、`FaceTimeline`、`FaceRoiSelector`、`FaceMakeupUv`、`FaceRetouchSubMesh`、`BodyGeometry` 与 `EffectsLoadGovernor`。
+2. **跨后端轻量 RHI 与 RenderGraph 编排器（`livebeauty_engine`）**：`IRhiDevice` + `RenderPipeline` + `LiveBeautyEngine`，统一管理全 8 大 Pass 调度顺序、画家序背面剔除、FBO 复用池与反馈环隔离。
+3. **双原生图形后端**：
+   - **Android（`livebeauty_gles` + `livebeauty_jni`）**：OpenGL ES 2.0/3.0 + 精调 GLSL 着色器 + NDK/JNI 桥接（`arm64-v8a` / `armeabi-v7a` 双架构 `.so` 自动打包进 AAR）；
+   - **iOS / macOS（`livebeauty_metal` + `FLTLiveBeautyMetalEngine`）**：Apple Metal + 等价精调 MSL 着色器 + `CVMetalTextureCache` 零拷贝桥接，使 iOS 端与 Android 满血能力全面对齐。

@@ -44,18 +44,22 @@ SDK 与推流 / RTC 传输层**彻底解耦**——不绑定任何特定推流�
 
 ```text
 live-beauty-sdk/
-├── android/                  # Android 独立原生库 (io.bebebus:live-beauty, minSdk 24, 零推流耦合)
-│   └── live-beauty/          # OpenGL ES 2.0 渲染引擎、MediaPipe 异步跟踪器、内置模型/LUT/美妆资产与 34 套 JVM 单测
-├── ios/                      # iOS 独立原生库 (LiveBeautySDK.podspec, iOS 15.0+, CoreImage + MediaPipe 478 点)
-│   ├── Classes/              # FLTVideoEffects / FLTFaceGeometry / FLTFaceGeometrySmoother / FLTFaceLandmarkTracker
+├── core/                     # 统一 C++17 渲染与数学内核 (零第三方重型依赖，支持 Android GLES & Apple Metal 双后端)
+│   ├── include/livebeauty/   # 数学核 (FaceMeshDeformer/Filter/Timeline/ROI/Body) + 轻量 RHI + LiveBeautyEngine
+│   ├── src/                  # 纯 C++17 实现、RenderPipeline、GLES/JNI 后端与 Metal/MSL 后端
+│   └── tests/                # CTest 数学单测、Mock RHI 管线测试与 macOS 真实 Metal GPU 像素门禁
+├── android/                  # Android 独立原生库 (io.bebebus:live-beauty, minSdk 24, 含 arm64-v8a/armeabi-v7a .so)
+│   └── live-beauty/          # OpenGL ES 2.0 渲染引擎、JNI 桥接、MediaPipe 异步跟踪器、内置模型/LUT/美妆资产与 36 套 JVM 单测
+├── ios/                      # iOS 独立原生库 (LiveBeautySDK.podspec, iOS 15.0+, Metal C++17 满血引擎 + CoreImage 兼容层)
+│   ├── Classes/              # FLTLiveBeautyMetalEngine (Metal 满血) + FLTVideoEffects (CoreImage 兼容) + MediaPipe 478 点跟踪
 │   ├── Resources/            # 离线 face_landmarker.task 模型
 │   └── Tests/                # macOS / iOS CoreImage 像素渲染与平滑器回归测试
 ├── flutter/                  # Flutter 跨端插件封装 (live_beauty_sdk)
 │   ├── lib/                  # LiveBeautyConfig (40+ 参数与 5 套预设)、LiveBeautyController、LicenseRegistry 辅助注册
 │   └── test/                 # Dart 契约、白名单校验与 MethodChannel 单元测试
 ├── reference/                # 跨端数学参考实现 (beauty_ref.py)、黄金向量 (beauty_vectors.json) 与资产确定性生成器
-├── _tooling/                 # 41 着色器无头 WebGL1 门禁、模型 SHA256 校验、脱敏扫描与一键全量回归脚本
-└── ARCHITECTURE.md           # 渲染管线拓扑与微分同胚网格算法深度说明
+├── _tooling/                 # 44 着色器无头 WebGL1 门禁、模型 SHA256 校验、脱敏扫描与一键 8 门禁回归脚本
+└── ARCHITECTURE.md           # 渲染管线拓扑、统一 C++17 内核与微分同胚网格算法深度说明
 ```
 
 ---
@@ -193,7 +197,7 @@ await controller.setConfig(
 本仓库提供完整的跨端数学向量、41 段 GLSL 真浏览器编译/变异注入门禁、CoreImage 像素测试及 Android/Flutter 自动化单测：
 
 ```bash
-# 运行全部 7 道质量门禁（脱敏检查 + 模型 SHA256 + 拓扑校验 + WebGL1 GLSL 门禁 + CoreImage 单测 + Android 单测/AAR + Flutter 单测）
+# 运行全部 8 道质量门禁（脱敏检查 + 模型 SHA256 + 双端拓扑校验 + WebGL1 GLSL 门禁 + CoreImage 单测 + Android 单测/NDK AAR + Flutter 单测 + C++17/Metal GPU 像素门禁）
 bash _tooling/run-all-tests.sh
 ```
 
