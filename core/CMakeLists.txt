@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(livebeauty_core VERSION 3.5.2 LANGUAGES CXX)
+project(livebeauty_core VERSION 3.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,6 +35,7 @@ add_library(livebeauty_math STATIC
     src/math/ar_3d_accessory.cpp
     src/math/face_aux_vision.cpp
     src/math/face_parsing.cpp
+    src/math/particle_system.cpp
 )
 target_include_directories(livebeauty_math PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

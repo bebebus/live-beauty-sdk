@@ -1,15 +1,26 @@
 package io.bebebus.livebeauty
 
-/** 无绿幕人像背景模式。 */
+/** 人像与演播室背景模式。 */
 enum class VirtualBackgroundMode(val wireName: String) {
     /** 跟随 `VideoEffectsConfig.backgroundBlur`（>0 为人像虚化，0 为关闭）。 */
     NONE("none"),
     /** 人像背景虚化（Bokeh）。 */
     BLUR("blur"),
-    /** 虚拟背景图片替换（自动居中 Aspect-Fill，不拉伸变形）。 */
+    /** 虚拟背景图片/视频替换（自动居中 Aspect-Fill，不拉伸变形）。 */
     VIRTUAL_IMAGE("virtual_image"),
-    /** 虚拟背景图片 + 柔和虚化。 */
+    /** 虚拟背景图片/视频 + 柔和虚化。 */
     VIRTUAL_BLUR("virtual_blur"),
+    /** v3.6: 演播室绿幕/蓝幕 YCbCr 色度抠像 + 边缘抑色（despill）。 */
+    CHROMA_KEY("chroma_key"),
+}
+
+/** v3.6: 交互式手势粒子类型（与 C++17 `livebeauty::math::GestureType` 一一对应）。 */
+enum class LiveBeautyGesture(val id: Int) {
+    NONE(0),
+    HEART(1),
+    THUMBS_UP(2),
+    VICTORY(3),
+    OPEN_PALM(4),
 }
 
 /** 2D AR 人脸挂件贴纸解剖锚点（与 C++17 `livebeauty::math::StickerAnchor` 一一对应）。 */

@@ -482,6 +482,7 @@ uniform sampler2D uTex0;
 uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
+uniform vec4 uU3;
 varying vec2 vTextureCoord;
 void main() {
     float aspect = max(uU2.z, 0.001);
@@ -514,7 +515,18 @@ void main() {
             float tw = (t + 0.3 * torso) / (0.22 * torso);
             float r = abs(s) / (1.65 * width);
             float f = r < 1.0 ? (1.0 - r * r) * (1.0 - r * r) : 0.0;
-            s *= 1.0 + uU1.z * exp(-0.5 * tw * tw) * f;
+            float handKeep = 1.0;
+            if (uU2.w > 0.5) {
+                if (uU3.x >= 0.0) {
+                    vec2 dh0 = vec2(uv.x - uU3.x, (uv.y - uU3.y) / aspect);
+                    handKeep *= smoothstep(0.12 * max(torso, 0.15), 0.34 * max(torso, 0.15), length(dh0));
+                }
+                if (uU3.z >= 0.0) {
+                    vec2 dh1 = vec2(uv.x - uU3.z, (uv.y - uU3.w) / aspect);
+                    handKeep *= smoothstep(0.12 * max(torso, 0.15), 0.34 * max(torso, 0.15), length(dh1));
+                }
+            }
+            s *= 1.0 + uU1.z * handKeep * exp(-0.5 * tw * tw) * f;
         }
         if (uU2.x > 0.0) {
             float ts = (t + 0.95 * torso) / (0.18 * torso);
@@ -1068,10 +1080,10 @@ void main() {
 }
 )";
 
-// v3.4: Real-time strand-preserving salon hair dyeing & anisotropic crown Angel-Ring sheen
+// v3.4/v3.6: Real-time strand-preserving salon hair dyeing (melanin bleach curve + micro-strand detail) & dual-lobe Angel-Ring sheen
 // uTex0=currentRgb, uTex1=hairMaskTex(top-down), uTex2=rtSkinMask_
 // uU0=(a00, a01, a02, hairDye), uU1=(a10, a11, a12, hairShine)
-// uU2=(dyeR, dyeG, dyeB, hasFacePoly), uU3=(crownCx, crownCy, crownRx, crownRy), uU4=(axisUx, axisUy, aspect, signedYaw)
+// uU2=(dyeR, dyeG, dyeB, hasFacePoly), uU3=(crownCx, crownCy, crownRx, crownRy), uU4=(axisUx, axisUy, aspect, signedYaw), uU5=(texelX, texelY, 0, 0)
 constexpr const char* kHairDyeFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
@@ -1082,6 +1094,7 @@ uniform vec4 uU1;
 uniform vec4 uU2;
 uniform vec4 uU3;
 uniform vec4 uU4;
+uniform vec4 uU5;
 float lumaHair(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 fitHairGamut(vec3 c, float y) {
     float hi = max(max(c.r, c.g), c.b);
@@ -1113,9 +1126,22 @@ void main() {
         float y = lumaHair(color);
         float strandLift = smoothstep(0.015, 0.12, y);
         float dyeY = max(lumaHair(uU2.rgb), 0.08);
-        float liftedY = clamp(mix(y, clamp(y * (0.65 + dyeY * 1.35) + dyeY * 0.36 * strandLift, 0.0, 0.95), 0.78), 0.0, 0.96);
-        vec3 tinted = fitHairGamut(clamp(uU2.rgb * (liftedY / dyeY), 0.0, 1.25), liftedY);
-        color = mix(color, clamp(tinted, 0.0, 1.0), clamp(hairMask * uU0.w * (0.35 + 0.65 * strandLift), 0.0, 0.92));
+        float bleachNeed = smoothstep(0.28, 0.72, dyeY) * smoothstep(0.012, 0.09, y) * (1.0 - smoothstep(0.18, 0.45, y));
+        float strandDetail = 0.0;
+        if (uU5.x > 0.0001) {
+            vec2 stepLat = uU4.xy * uU5.x * 1.5;
+            float avgLat = 0.5 * (
+                lumaHair(texture2D(uTex0, clamp(uv + stepLat, 0.0, 1.0)).rgb) +
+                lumaHair(texture2D(uTex0, clamp(uv - stepLat, 0.0, 1.0)).rgb)
+            );
+            strandDetail = clamp(y - avgLat, -0.06, 0.06);
+        }
+        float liftedY = clamp(
+            mix(y, clamp(y * (0.65 + dyeY * 1.35) + dyeY * 0.36 * strandLift + bleachNeed * dyeY * 0.32, 0.0, 0.95), 0.80) +
+            strandDetail * 1.20,
+            0.0, 0.96);
+        vec3 tinted = fitHairGamut(clamp(uU2.rgb * (liftedY / dyeY), 0.0, 1.28), liftedY);
+        color = mix(color, clamp(tinted, 0.0, 1.0), clamp(hairMask * uU0.w * (0.36 + 0.64 * strandLift), 0.0, 0.92));
     }
     if (uU1.w > 0.001) {
         vec2 axisU = uU4.xy;
@@ -1123,17 +1149,129 @@ void main() {
         vec2 d = vec2(uv.x - uU3.x, (uv.y - uU3.y) / max(uU4.z, 0.001));
         float su = dot(d, axisU) / max(uU3.z, 0.04);
         float sv = dot(d, axisV) / max(uU3.w, 0.04);
-        float arcDist = (sv + 0.18 * su * su) * 4.2;
-        float ringBand = exp(-(arcDist * arcDist)) * (1.0 - smoothstep(0.65, 1.35, abs(su)));
+        float latKeep = 1.0 - smoothstep(0.65, 1.35, abs(su));
+        float arcR = (sv + 0.18 * su * su) * 4.2;
+        float arcTrt = (sv + 0.18 * su * su - 0.12) * 6.5;
+        float ringBand = (exp(-(arcR * arcR)) + 0.32 * exp(-(arcTrt * arcTrt))) * latKeep;
         float yawPeak = clamp(-uU4.w * 0.45, -0.35, 0.35);
         float du = su - yawPeak;
         float viewLobe = 0.65 + 0.35 * exp(-(du * du) * 2.5);
         float strandCatch = smoothstep(0.04, 0.32, lumaHair(color)) * (0.55 + 0.45 * smoothstep(0.10, 0.45, orig.r));
-        float sheen = clamp(ringBand * viewLobe * strandCatch * hairMask * uU1.w * 0.52, 0.0, 0.45);
+        float sheen = clamp(ringBand * viewLobe * strandCatch * hairMask * uU1.w * 0.50, 0.0, 0.46);
         vec3 sheenCol = mix(vec3(1.0, 0.99, 0.97), clamp(uU2.rgb * 1.35 + vec3(0.25), 0.0, 1.0), clamp(uU0.w * 0.45, 0.0, 0.45));
         color = clamp(color + (sheenCol - color) * sheen, 0.0, 1.0);
     }
     gl_FragColor = vec4(color, orig.a);
+}
+)";
+
+// v3.6: Studio YCbCr Chroma Key (green/blue screen) + edge despill + 5-tap virtual background Light Wrap
+// uTex0=currentRgb, uTex1=virtualBgRgba(top-down)
+// uU0=(strength, similarity, smoothness, despill), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY), uU2=(keyR, keyG, keyB, isBlueKey)
+constexpr const char* kChromaKeyFrag = LB_GLSL_PREC R"(
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform vec4 uU0;
+uniform vec4 uU1;
+uniform vec4 uU2;
+float lumaCk(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec2 toCbCr(vec3 c) {
+    return vec2(0.5 + dot(c, vec3(-0.168736, -0.331264, 0.5)),
+                0.5 + dot(c, vec3(0.5, -0.418688, -0.081312)));
+}
+void main() {
+    vec4 color = texture2D(uTex0, vTextureCoord);
+    vec2 bgUv = clamp(vec2(vTextureCoord.x * uU1.x + uU1.z, (1.0 - vTextureCoord.y) * uU1.y + uU1.w), 0.0, 1.0);
+    vec3 vbg = texture2D(uTex1, bgUv).rgb;
+    vec2 cc = toCbCr(color.rgb);
+    vec2 kc = toCbCr(uU2.rgb);
+    float dist = length(cc - kc);
+    float sim = clamp(uU0.y, 0.05, 0.95) * 0.55;
+    float sm = max(uU0.z * 0.45, 0.008);
+    float keep = smoothstep(sim, sim + sm, dist);
+
+    float baseY = lumaCk(color.rgb);
+    vec3 fg = color.rgb;
+    if (uU2.w < 0.5) {
+        float refMax = mix(0.5 * (fg.r + fg.b), max(fg.r, fg.b), 0.35);
+        float spill = max(fg.g - refMax, 0.0) * clamp(uU0.w, 0.0, 1.0);
+        fg.g -= spill;
+    } else {
+        float refMax = mix(0.5 * (fg.r + fg.g), max(fg.r, fg.g), 0.35);
+        float spill = max(fg.b - refMax, 0.0) * clamp(uU0.w, 0.0, 1.0);
+        fg.b -= spill;
+    }
+    fg = clamp(fg + vec3((baseY - lumaCk(fg)) * 0.65), 0.0, 1.0);
+
+    vec2 wrapD = vec2(0.022, 0.022);
+    vec3 vbgAmb = 0.20 * (
+        vbg +
+        texture2D(uTex1, clamp(bgUv + vec2( wrapD.x, 0.0), 0.0, 1.0)).rgb +
+        texture2D(uTex1, clamp(bgUv + vec2(-wrapD.x, 0.0), 0.0, 1.0)).rgb +
+        texture2D(uTex1, clamp(bgUv + vec2(0.0,  wrapD.y), 0.0, 1.0)).rgb +
+        texture2D(uTex1, clamp(bgUv + vec2(0.0, -wrapD.y), 0.0, 1.0)).rgb
+    );
+    float edgeBand = smoothstep(0.04, 0.45, keep) * (1.0 - smoothstep(0.55, 0.96, keep));
+    vec3 fgWrapped = mix(fg, mix(max(fg, vbgAmb * 0.92), vbgAmb, 0.24), edgeBand * 0.30);
+    gl_FragColor = vec4(mix(color.rgb, mix(vbg, fgWrapped, keep), clamp(uU0.x, 0.0, 1.0)), color.a);
+}
+)";
+
+// v3.6: Batched 2D Analytical SDF Particle Burst (0=heart, 1=5pt star, 2=diamond, 3=4-ray sparkle)
+// Uses kRetouchVert: vSrcCoord=localXY[-1..1], vRetouchAttr=(r, g, b, shapeId * 2.0 + alpha01)
+constexpr const char* kParticleBurstFrag = LB_GLSL_PREC R"(
+varying vec2 vSrcCoord;
+varying vec4 vRetouchAttr;
+float sdHeart(vec2 p) {
+    vec2 q = vec2(abs(p.x) * 1.15, p.y * 1.15 + 0.55);
+    if (q.y + q.x > 1.0) {
+        return length(q - vec2(0.25, 0.75)) - 0.3536;
+    }
+    vec2 a = q - vec2(0.0, 1.0);
+    float h = clamp(0.5 * (q.x + q.y), 0.0, 1.0);
+    vec2 b = q - vec2(h, h);
+    float d = sqrt(min(dot(a, a), dot(b, b)));
+    float s = (q.x - q.y < 0.0) ? -1.0 : 1.0;
+    return d * s;
+}
+float sdStar5(vec2 p) {
+    vec2 k1 = vec2(0.809017, -0.587785);
+    vec2 k2 = vec2(-0.809017, -0.587785);
+    vec2 q = vec2(abs(p.x), p.y) * 1.28;
+    q -= 2.0 * max(dot(k1, q), 0.0) * k1;
+    q -= 2.0 * max(dot(k2, q), 0.0) * k2;
+    q.x = abs(q.x);
+    q.y -= 1.0;
+    vec2 ba = vec2(0.270381, -0.627852);
+    float h = clamp(dot(q, ba) / 0.467304, 0.0, 1.0);
+    float s = (q.y * ba.x - q.x * ba.y < 0.0) ? -1.0 : 1.0;
+    return length(q - ba * h) * s * 0.78;
+}
+void main() {
+    float shape = floor(vRetouchAttr.w * 0.5 + 0.001);
+    float alpha = clamp(vRetouchAttr.w - shape * 2.0, 0.0, 1.0);
+    if (alpha <= 0.003) { discard; }
+    vec2 p = vSrcCoord;
+    float sd = 1.0;
+    if (shape < 0.5) {
+        sd = sdHeart(p);
+    } else if (shape < 1.5) {
+        sd = sdStar5(p);
+    } else if (shape < 2.5) {
+        vec2 a = abs(p);
+        sd = (a.x * 1.25 + a.y * 0.95 - 0.72) * 0.64;
+    } else {
+        vec2 a = sqrt(abs(p) + vec2(0.004));
+        sd = (a.x + a.y - 0.94) * 0.85;
+    }
+    float bodyMask = 1.0 - smoothstep(-0.06, 0.05, sd);
+    float halo = exp(-max(sd, 0.0) * 6.5) * 0.36;
+    float finalA = clamp((bodyMask + halo) * alpha, 0.0, 1.0);
+    if (finalA <= 0.003) { discard; }
+    float core = smoothstep(-0.02, -0.32, sd) * 0.55;
+    vec3 outRgb = clamp(mix(vRetouchAttr.rgb, vec3(1.0, 0.99, 0.96), core), 0.0, 1.0);
+    gl_FragColor = vec4(outRgb, finalA);
 }
 )";
 
@@ -1172,6 +1310,8 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kHeadDepthShell:  return {kAr3dVert, kHeadDepthShellFrag};
         case ShaderId::kAr3dMesh:        return {kAr3dVert, kAr3dMeshFrag};
         case ShaderId::kHairDye:         return {kQuadVert, kHairDyeFrag};
+        case ShaderId::kChromaKey:       return {kQuadVert, kChromaKeyFrag};
+        case ShaderId::kParticleBurst:   return {kRetouchVert, kParticleBurstFrag};
         case ShaderId::kPassThrough:
         default:                         return {kQuadVert, kPassThroughFrag};
     }

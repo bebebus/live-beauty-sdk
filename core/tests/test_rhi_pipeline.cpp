@@ -790,6 +790,86 @@ void testCodeReviewEngineLifecycleAndPriorityGuards() {
     EXPECT_TRUE(engine.config().maxFaces == 2);
 }
 
+void testV36ChromaKeyParticlesMulticlassAndHandShield() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    engine.setHardwareProfile("Adreno 750", 8, 12288);
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId vbgTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId stickerTex = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+
+    PipelineAssets assets{};
+    assets.virtualBgTex = vbgTex;
+    assets.virtualBgAspect = 720.0f / 1280.0f;
+    engine.setAssets(assets);
+
+    // 1. Chroma Key works without personMaskTex, and ParticleBurst works with zero feedback loop
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.backgroundMode = BackgroundMode::kChromaKey;
+    cfg.chromaKeyColor = ChromaKeyColor::kGreen;
+    cfg.virtualBgStrength = 1.0f;
+    cfg.waistSlim = 0.50f;
+    engine.setConfig(cfg);
+
+    std::array<PoseLandmark, 33> pose{};
+    for (auto& p : pose) p = {0.5f, 0.5f, 0.9f};
+    pose[11] = {0.35f, 0.32f, 0.95f};
+    pose[12] = {0.65f, 0.32f, 0.95f};
+    pose[23] = {0.39f, 0.58f, 0.95f};
+    pose[24] = {0.61f, 0.58f, 0.95f};
+    pose[27] = {0.40f, 0.90f, 0.95f};
+    pose[28] = {0.60f, 0.90f, 0.95f};
+    EXPECT_TRUE(engine.submitBodyPose(1000, pose.data(), 33, 720, 1280));
+    engine.setHandShieldCoords(0.38f, 0.50f, -1.0f, -1.0f);
+    engine.triggerGesture(GestureType::kHeart, 0.50f, 0.45f, 1000);
+
+    std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+    makeMediaPipeFace(720.0f / 1280.0f, mpXy);
+    engine.submitFaceLandmarks(1000, mpXy.data(), 478, 720, 1280, 1000);
+
+    StickerLayerConfig heartCrown{};
+    heartCrown.enabled = true;
+    heartCrown.texture = stickerTex;
+    heartCrown.opacity = 1.0f;
+    engine.setSticker(0, heartCrown, bundle::BundleTriggerRule::kGestureHeart);
+
+    // Warm up 1 frame at t=1000ms so BodyGeometrySmoother fade-in dt > 0 at t=1150ms
+    engine.processFrame(inputTex, 720, 1280, 1000, 1000);
+    dev.calls.clear();
+    const TextureId outTex = engine.processFrame(inputTex, 720, 1280, 1150, 1150);
+    EXPECT_TRUE(outTex != inputTex);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    const uint32_t mask = engine.stats().activePassesMask;
+    EXPECT_TRUE((mask & kPassChromaKey) != 0);
+    EXPECT_TRUE((mask & kPassParticles) != 0);
+    EXPECT_TRUE((mask & kPassSticker) != 0);
+    EXPECT_TRUE((mask & kPassBody) != 0);
+
+    bool sawHandShieldUniform = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kBodyWarp && c.uniforms.count >= 4 && c.uniforms.v[2].w > 0.5f) {
+            sawHandShieldUniform = std::fabs(c.uniforms.v[3].x - 0.38f) < 1e-4f &&
+                                   std::fabs(c.uniforms.v[3].y - 0.50f) < 1e-4f;
+        }
+    }
+    EXPECT_TRUE(sawHandShieldUniform);
+
+    // 2. Multiclass 6-way NHWC logits auto-supply both hairMaskTex and fallback personMaskTex
+    std::vector<float> logits(16 * 16 * 6, -3.0f);
+    for (int i = 0; i < 16 * 16; ++i) {
+        logits[static_cast<size_t>(i * 6 + (i < 128 ? 1 : 3))] = 4.0f;
+    }
+    EXPECT_TRUE(engine.submitMulticlass6Logits(logits.data(), 16, 16, 1200));
+    cfg.backgroundMode = BackgroundMode::kVirtualImage;
+    cfg.hairDye = 0.75f;
+    engine.setConfig(cfg);
+    engine.processFrame(inputTex, 720, 1280, 1250, 1250);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) != 0);
+}
+
 }  // namespace
 
 int main() {
@@ -802,6 +882,7 @@ int main() {
     testV34HairDyeHalfFloatAndFaceParsingIntegration();
     testV35EffectBundleTriggersAndWebGl2Backend();
     testCodeReviewEngineLifecycleAndPriorityGuards();
+    testV36ChromaKeyParticlesMulticlassAndHandShield();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

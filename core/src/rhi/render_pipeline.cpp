@@ -157,6 +157,8 @@ void RenderPipeline::releaseGpuResources() {
     killBuf(ibRightEye_);
     killBuf(ibLeftEye_);
     killBuf(ibSticker_);
+    killBuf(vbParticles_);
+    killBuf(ibParticles_);
 
     staticBuffersReady_ = false;
     width_ = height_ = 0;
@@ -229,6 +231,10 @@ void RenderPipeline::ensureStaticBuffers() {
         static_cast<int>(math::FaceMeshTopology::kLeftEyeIndices.size()));
     static constexpr uint16_t kStickerIndices[6] = {0, 1, 2, 2, 1, 3};
     ibSticker_ = device_.createStaticIndexBuffer(kStickerIndices, 6);
+    vbParticles_ = device_.createDynamicVertexBuffer(
+        sizeof(float) * static_cast<size_t>(math::ParticleBurstSolver::kMaxVertexFloats));
+    const auto& particleIdx = math::ParticleBurstSolver::quadIndices();
+    ibParticles_ = device_.createStaticIndexBuffer(particleIdx.data(), particleIdx.size());
 
     const uint8_t fallbackPx[4] = {0, 0, 0, 255};
     ownedFallbackTex_ = device_.createTexture2D(1, 1, TextureFormat::kRgba8, fallbackPx);
@@ -960,6 +966,34 @@ void RenderPipeline::renderStickers(
     device_.endPass();
 }
 
+void RenderPipeline::renderParticles(
+    RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
+    int width, int height, const float* particleVerts, int quadCount) {
+    if (!particleVerts || quadCount <= 0) return;
+    const int nQuads = std::min(quadCount, math::ParticleBurstSolver::kMaxParticles);
+    const size_t floatCount = static_cast<size_t>(
+        nQuads * math::ParticleBurstSolver::kVertsPerQuad * math::ParticleBurstSolver::kFloatsPerVertex);
+    device_.updateVertexBuffer(vbParticles_, particleVerts, sizeof(float) * floatCount);
+
+    device_.beginPass(targetRt, width, height, false);
+    if (copyBaseFirst) {
+        RenderState copySt{};
+        TextureBindings tb{};
+        UniformBlock ub{};
+        tb.bind(0, baseTex);
+        device_.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+    }
+    RenderState st{};
+    st.blendEnable = true;
+    TextureBindings emptyTb{};
+    UniformBlock emptyUb{};
+    device_.drawIndexed(
+        ShaderId::kParticleBurst, st, vbParticles_, ibParticles_,
+        0, nQuads * math::ParticleBurstSolver::kIndicesPerQuad,
+        VertexLayout::kRetouchPos2Uv2A4, emptyTb, emptyUb);
+    device_.endPass();
+}
+
 TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& in) {
     lastActivePassesMask_ = 0;
     if (in.inputTexture == kInvalidTexture || in.width <= 0 || in.height <= 0) {
@@ -983,8 +1017,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         }
     }
     const bool hasAiResidual = (in.aiResidualTex != kInvalidTexture && in.aiResidualStrength > 1e-4f);
+    const bool hasParticles = (in.particleQuadCount > 0 && in.particleVertices != nullptr);
     if (!config.isProcessing() &&
-        !(config.enabled && !config.compareOriginal && (hasAnySticker || hasAnyAr3d || hasAiResidual))) {
+        !(config.enabled && !config.compareOriginal &&
+          (hasAnySticker || hasAnyAr3d || hasAiResidual || hasParticles))) {
         return in.inputTexture;
     }
 
@@ -1029,14 +1065,48 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         denoiseHistoryValid_ = false;
     }
 
-    // 1. Optional Background Bokeh / Virtual Background Replacement (with optional hair-merge flyaway preservation)
+    // 1. Optional Background Bokeh / Virtual Background / Studio Chroma Key Replacement
     const float bgBlur = config.backgroundBlur * in.loadFadeBody;
-    const bool wantVirtualImage = (config.backgroundMode == BackgroundMode::kVirtualImage ||
+    const bool wantChromaKey = (config.backgroundMode == BackgroundMode::kChromaKey) &&
+                               assets_.virtualBgTex != kInvalidTexture &&
+                               config.virtualBgStrength * in.loadFadeBody > 1e-4f;
+    const bool wantVirtualImage = !wantChromaKey &&
+                                  (config.backgroundMode == BackgroundMode::kVirtualImage ||
                                    config.backgroundMode == BackgroundMode::kVirtualBlur) &&
                                   assets_.virtualBgTex != kInvalidTexture &&
                                   config.virtualBgStrength * in.loadFadeBody > 1e-4f;
-    const bool wantBgBlur = !wantVirtualImage && bgBlur > 1e-4f;
-    if ((wantVirtualImage || wantBgBlur) && in.personMaskTex != kInvalidTexture) {
+    const bool wantBgBlur = !wantChromaKey && !wantVirtualImage && bgBlur > 1e-4f;
+    if (wantChromaKey) {
+        matteHistoryValid_ = false;
+        const float bgAspect = (assets_.virtualBgAspect > 0.05f) ? assets_.virtualBgAspect : aspect;
+        float uvScaleX = 1.0f, uvScaleY = 1.0f;
+        if (bgAspect > aspect) {
+            uvScaleX = aspect / bgAspect;
+        } else {
+            uvScaleY = bgAspect / aspect;
+        }
+        const float uvOffX = 0.5f * (1.0f - uvScaleX);
+        const float uvOffY = 0.5f * (1.0f - uvScaleY);
+        const bool isBlue = (config.chromaKeyColor == ChromaKeyColor::kBlue);
+        const Vec3 keyRgb = isBlue ? Vec3{0.08f, 0.22f, 0.82f} : Vec3{0.05f, 0.72f, 0.10f};
+
+        RenderState st{};
+        TextureBindings tb{};
+        UniformBlock ub{};
+        tb.bind(0, currentTex);
+        tb.bind(1, assets_.virtualBgTex);
+        ub.push(detail::clampf(config.virtualBgStrength * in.loadFadeBody, 0.0f, 1.0f),
+                detail::clampf(config.chromaKeySimilarity, 0.05f, 0.95f),
+                detail::clampf(config.chromaKeySmoothness, 0.01f, 0.80f),
+                detail::clampf(config.chromaKeyDespill, 0.0f, 1.0f));
+        ub.push(uvScaleX, uvScaleY, uvOffX, uvOffY);
+        ub.push(keyRgb.x, keyRgb.y, keyRgb.z, isBlue ? 1.0f : 0.0f);
+        device_.beginPass(rtBgOut_, in.width, in.height, false);
+        device_.drawFullScreenQuad(ShaderId::kChromaKey, st, tb, ub);
+        device_.endPass();
+        currentTex = device_.textureOf(rtBgOut_);
+        lastActivePassesMask_ |= (kPassBg | kPassChromaKey);
+    } else if ((wantVirtualImage || wantBgBlur) && in.personMaskTex != kInvalidTexture) {
         lastActivePassesMask_ |= kPassBg;
         const float ovalCx = in.hasFaceState ? in.faceState41[22] : 0.5f;
         const float ovalCy = in.hasFaceState ? in.faceState41[23] : 0.5f;
@@ -1183,6 +1253,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         const float neck = config.neckLengthen * 0.22f * bodyMod;
         appliedNeck = neck;
 
+        const bool hasHandShield = (in.handShieldCoords.x >= 0.0f || in.handShieldCoords.z >= 0.0f);
         RenderState st{};
         TextureBindings tb{};
         UniformBlock ub{};
@@ -1190,7 +1261,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         ub.push(in.bodyState7[0], in.bodyState7[1],
                 in.bodyState7[2] * (1.0f + legStrength), in.bodyState7[3] * (1.0f + legStrength));
         ub.push(in.bodyState7[4], in.bodyState7[5], waist, bust);
-        ub.push(shoulder, neck, aspect, 0.0f);
+        ub.push(shoulder, neck, aspect, hasHandShield ? 1.0f : 0.0f);
+        if (hasHandShield) {
+            ub.push(in.handShieldCoords);
+        }
         device_.beginPass(rtBody_, in.width, in.height, false);
         device_.drawFullScreenQuad(ShaderId::kBodyWarp, st, tb, ub);
         device_.endPass();
@@ -1653,6 +1727,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         ub.push(dyeRgb.x, dyeRgb.y, dyeRgb.z, polySkinMaskReady ? 1.0f : 0.0f);
         ub.push(crownCx, crownCy, crownRx, crownRy);
         ub.push(ux, uy, aspect, signedYaw);
+        ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), 0.0f, 0.0f);
         device_.beginPass(rtBgOut_, in.width, in.height, false);
         device_.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
         device_.endPass();
@@ -1716,6 +1791,15 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             makeupRendered = true;
             lastActivePassesMask_ |= kPassAr3d;
         }
+    }
+
+    // 7d. v3.6: Batched 2D Analytical SDF Interactive Gesture Particle Bursts
+    if (hasParticles && config.enabled && !config.compareOriginal) {
+        renderParticles(rtMakeup_, currentTex, !makeupRendered, in.width, in.height,
+                        in.particleVertices, in.particleQuadCount);
+        currentTex = device_.textureOf(rtMakeup_);
+        makeupRendered = true;
+        lastActivePassesMask_ |= kPassParticles;
     }
 
     return currentTex;

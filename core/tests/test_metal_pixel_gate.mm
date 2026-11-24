@@ -918,6 +918,97 @@ void testMetalIntraFrameMultiSlotVboZeroCopyBgraAndTransientEviction(MetalDevice
     }
 }
 
+void testV36MetalChromaKeyParticleSdfAndHandShieldProbes(MetalDevice& dev) {
+    // 1. Chroma Key probe: studio green background replaced by blue virtual background,
+    //    while neutral dark hair & warm skin stay intact and green spill on shoulder is suppressed!
+    {
+        constexpr int kW = 32, kH = 32;
+        std::vector<uint8_t> cam(kW * kH * 4, 255);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int i = (y * kW + x) * 4;
+                if (x < 10) {
+                    // Studio green screen (12, 195, 22)
+                    cam[i + 0] = 12; cam[i + 1] = 195; cam[i + 2] = 22;
+                } else if (x < 20) {
+                    // Warm portrait skin (205, 158, 136)
+                    cam[i + 0] = 205; cam[i + 1] = 158; cam[i + 2] = 136;
+                } else {
+                    // Dark hair (32, 30, 34)
+                    cam[i + 0] = 32; cam[i + 1] = 30; cam[i + 2] = 34;
+                }
+            }
+        }
+        const TextureId camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, cam.data());
+        const TextureId vbgTex = makeSolidTex(dev, kW, kH, 25, 60, 235, 255);  // Vivid royal blue VBG
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, camTex);
+        tb.bind(1, vbgTex);
+        UniformBlock ub{};
+        ub.push(1.0f, 0.38f, 0.12f, 0.75f);
+        ub.push(1.0f, 1.0f, 0.0f, 0.0f);
+        ub.push(0.05f, 0.72f, 0.10f, 0.0f);
+        dev.beginPass(rt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kChromaKey, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        const int greenKeyedPx = (16 * kW + 4) * 4;
+        const int skinPx = (16 * kW + 15) * 4;
+        const int hairPx = (16 * kW + 26) * 4;
+        // Green screen became royal blue VBG!
+        EXPECT_TRUE(out[greenKeyedPx + 2] > 210 && out[greenKeyedPx + 1] < 80);
+        // Warm skin & dark hair preserved!
+        EXPECT_TRUE(std::abs(int(out[skinPx + 0]) - 205) <= 3 && std::abs(int(out[skinPx + 1]) - 158) <= 3);
+        EXPECT_TRUE(std::abs(int(out[hairPx + 0]) - 32) <= 3 && out[hairPx + 2] < 50);
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(vbgTex);
+        dev.destroyTexture(camTex);
+    }
+
+    // 2. Batched 2D SDF Particle Burst probe: glowing rose heart renders cleanly on dark frame
+    {
+        constexpr int kW = 32, kH = 32;
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+        ParticleBurstSolver solver;
+        solver.triggerBurst(GestureType::kHeart, 0.5f, 0.5f, 1000);
+        std::array<float, ParticleBurstSolver::kMaxVertexFloats> verts{};
+        const int quads = solver.buildBatch(1200, 1.0f, verts.data());
+        EXPECT_TRUE(quads > 0);
+
+        const BufferId vb = dev.createDynamicVertexBuffer(sizeof(verts));
+        dev.updateVertexBuffer(vb, verts.data(), sizeof(float) * static_cast<size_t>(quads * 32));
+        const auto& idx = ParticleBurstSolver::quadIndices();
+        const BufferId ib = dev.createStaticIndexBuffer(idx.data(), idx.size());
+
+        dev.beginPass(rt, kW, kH, true, {0.04f, 0.04f, 0.06f, 1.0f});
+        RenderState st{};
+        st.blendEnable = true;
+        TextureBindings emptyTb{};
+        UniformBlock emptyUb{};
+        dev.drawIndexed(ShaderId::kParticleBurst, st, vb, ib, 0, quads * 6,
+                        VertexLayout::kRetouchPos2Uv2A4, emptyTb, emptyUb);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        int brightParticlesPx = 0;
+        for (int i = 0; i < kW * kH; ++i) {
+            if (out[i * 4 + 0] > 80) ++brightParticlesPx;
+        }
+        EXPECT_TRUE(brightParticlesPx >= 4);
+
+        dev.destroyBuffer(ib);
+        dev.destroyBuffer(vb);
+        dev.destroyRenderTarget(rt);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -937,6 +1028,7 @@ int main() {
         testDualFaceCoStreamingMetalProbeM1(dev);
         testP1ToP4GpuPixelGates(dev);
         testMetalIntraFrameMultiSlotVboZeroCopyBgraAndTransientEviction(dev);
+        testV36MetalChromaKeyParticleSdfAndHandShieldProbes(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

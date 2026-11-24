@@ -265,6 +265,38 @@ object NativeBeautyBridge {
     ): Boolean
     /** 读取 C++17 内核实时性能遥测：[lastMs, emaMs, fps, loadLevel, facePresence, hairShown, activePassesMask, frameCount, activeFaces, displayTs, resolvedTier]。 */
     @JvmStatic external fun nativeGetStats(handle: Long, outStats: FloatArray)
+    /** v3.6: 配置演播室绿幕/蓝幕 YCbCr 色度抠像（keyColor: "green" / "blue"）与边缘抑色（despill）。 */
+    @JvmStatic external fun nativeSetChromaKey(
+        handle: Long,
+        keyColor: String,
+        similarity: Float,
+        smoothness: Float,
+        despill: Float,
+    )
+    /** v3.6: 提交 MediaPipe selfie_multiclass 6 分类 NHWC float logits（bg/hair/body_skin/face_skin/clothes/accessories）。 */
+    @JvmStatic external fun nativeSubmitMulticlassLogits(
+        handle: Long,
+        logitsNhwc6: FloatArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        sampleTsMs: Long,
+    ): Boolean
+    /** v3.6: 触发交互式 2D SDF 手势粒子爆发（gestureId: 1=heart, 2=thumbs_up, 3=victory, 4=open_palm）。 */
+    @JvmStatic external fun nativeTriggerGesture(
+        handle: Long,
+        gestureId: Int,
+        normX: Float,
+        normY: Float,
+        nowMs: Long,
+    )
+    /** v3.6: 更新实时双掌归一化中心（top-down [0..1]，无效传负值），防止瘦腰拉伸手掌与手指。 */
+    @JvmStatic external fun nativeSetHandShield(
+        handle: Long,
+        hand0X: Float,
+        hand0Y: Float,
+        hand1X: Float,
+        hand1Y: Float,
+    )
 
     /** 将 [VideoEffectsConfig] 的 51 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
     fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(51)): FloatArray {

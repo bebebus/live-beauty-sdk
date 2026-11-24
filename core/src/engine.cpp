@@ -30,18 +30,24 @@ void LiveBeautyEngine::resetTracking() {
         occlusionSolver_.reset();
         faceParsingMapper_.reset();
         expressionBus_.reset();
+        particleSolver_.reset();
+        activeGesture_ = math::GestureType::kNone;
+        activeGestureUntilMs_ = kTimeInvalid;
+        handShieldCoords_ = {-10.0f, -10.0f, -10.0f, -10.0f};
         hasLatestFaceBounds_ = false;
         latestFaceRollRad_ = 0.0f;
         semanticOccActive_ = false;
         stagedOccDirty_ = false;
         stagedParseHairDirty_ = false;
         stagedParseHairTsMs_ = kTimeInvalid;
+        stagedParsePersonDirty_ = false;
         stagedResidualDirty_ = false;
         stagedResidualActive_ = false;
     }
     autoResidualStrength_ = 0.0f;
     autoParseHairValid_ = false;
     autoParseHairTsMs_ = kTimeInvalid;
+    autoParsePersonValid_ = false;
 }
 
 void LiveBeautyEngine::releaseGpuResources() {
@@ -56,6 +62,11 @@ void LiveBeautyEngine::releaseGpuResources() {
     }
     autoParseHairValid_ = false;
     autoParseHairTsMs_ = kTimeInvalid;
+    if (autoParsePersonTex_ != rhi::kInvalidTexture) {
+        device_.destroyTexture(autoParsePersonTex_);
+        autoParsePersonTex_ = rhi::kInvalidTexture;
+    }
+    autoParsePersonValid_ = false;
     if (autoResidualTex_ != rhi::kInvalidTexture) {
         device_.destroyTexture(autoResidualTex_);
         autoResidualTex_ = rhi::kInvalidTexture;
@@ -142,6 +153,10 @@ bool LiveBeautyEngine::applyEffectBundle(
             merged.backgroundBlur = config_.backgroundBlur;
             merged.backgroundMode = config_.backgroundMode;
             merged.virtualBgStrength = config_.virtualBgStrength;
+            merged.chromaKeyColor = config_.chromaKeyColor;
+            merged.chromaKeySimilarity = config_.chromaKeySimilarity;
+            merged.chromaKeySmoothness = config_.chromaKeySmoothness;
+            merged.chromaKeyDespill = config_.chromaKeyDespill;
         }
         if (!manifest.overridesPipelineOptions) {
             merged.performanceTier = config_.performanceTier;
@@ -291,6 +306,46 @@ bool LiveBeautyEngine::submitFaceParsingLogits(
     return true;
 }
 
+bool LiveBeautyEngine::submitMulticlass6Logits(
+    const float* logitsNhwc6, int srcWidth, int srcHeight, int64_t sampleTsMs) {
+    if (!logitsNhwc6 || srcWidth <= 0 || srcHeight <= 0) return false;
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    if (!faceParsingMapper_.mapMulticlass6LogitsNhwc(
+            logitsNhwc6, srcWidth, srcHeight,
+            stagedOccMask_.data(), stagedParseHair_.data(), stagedParsePerson_.data())) {
+        return false;
+    }
+    semanticOccActive_ = true;
+    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
+    stagedOccDirty_ = true;
+    stagedParseHairDirty_ = true;
+    stagedParseHairTsMs_ = sampleTsMs;
+    stagedParsePersonDirty_ = true;
+    return true;
+}
+
+void LiveBeautyEngine::triggerGesture(
+    math::GestureType gesture, float normX, float normY, int64_t nowMs) {
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    if (gesture == math::GestureType::kNone) return;
+    particleSolver_.triggerBurst(gesture, normX, normY, nowMs);
+    activeGesture_ = gesture;
+    activeGestureUntilMs_ = nowMs + 1200;
+}
+
+void LiveBeautyEngine::setHandShieldCoords(
+    float hand0X, float hand0Y, float hand1X, float hand1Y) {
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    const bool h0Valid = (hand0X >= 0.0f && hand0X <= 1.0f && hand0Y >= 0.0f && hand0Y <= 1.0f);
+    const bool h1Valid = (hand1X >= 0.0f && hand1X <= 1.0f && hand1Y >= 0.0f && hand1Y <= 1.0f);
+    handShieldCoords_ = {
+        h0Valid ? hand0X : -10.0f,
+        h0Valid ? (1.0f - hand0Y) : -10.0f,
+        h1Valid ? hand1X : -10.0f,
+        h1Valid ? (1.0f - hand1Y) : -10.0f,
+    };
+}
+
 bool LiveBeautyEngine::submitNeuralResidualTensor(
     const float* tensorNchw,
     int channels,
@@ -437,20 +492,24 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const math::TierCapabilities tierCaps =
         math::DeviceTierPolicy::resolve(config_.performanceTier, hardwareTier_, governor_.level());
     const math::PerformanceTier resolvedTier = tierCaps.resolvedTier;
-    const bool processing = config_.isProcessing() ||
-        (config_.enabled && !config_.compareOriginal &&
-         (stickerCount_ > 0 || ar3dCount_ > 0 ||
-          (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f) ||
-          (autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f)));
-    loadFades_.update(governor_.level(), nowMs);
 
-    // Sync staged C++17 + NEON occlusion & residual maps onto GPU RHI textures
+    // Sync staged C++17 + NEON occlusion, multiclass parsing, particles & residual maps onto GPU RHI textures
     math::ExpressionReaction exprReaction{};
+    math::GestureType activeGesture = math::GestureType::kNone;
+    Vec4 handShield{-10.0f, -10.0f, -10.0f, -10.0f};
+    int particleQuads = 0;
     bool faceBoundsAlive = false;
     {
         std::lock_guard<std::mutex> lock(auxMutex_);
         exprReaction = expressionBus_.latest();
         faceBoundsAlive = hasLatestFaceBounds_;
+        handShield = handShieldCoords_;
+        if (activeGestureUntilMs_ != kTimeInvalid && nowMs <= activeGestureUntilMs_) {
+            activeGesture = activeGesture_;
+        }
+        if (config_.enabled && !config_.compareOriginal && particleSolver_.hasActiveParticles(nowMs)) {
+            particleQuads = particleSolver_.buildBatch(nowMs, aspect, particleVerts_.data());
+        }
         if (stagedOccDirty_) {
             stagedOccDirty_ = false;
             const int occS = stagedOccSize_;
@@ -476,6 +535,16 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             autoParseHairValid_ = (autoParseHairTex_ != rhi::kInvalidTexture);
             autoParseHairTsMs_ = stagedParseHairTsMs_;
         }
+        if (stagedParsePersonDirty_) {
+            stagedParsePersonDirty_ = false;
+            constexpr int kPerS = math::FaceParsingMapper::kOutSize;
+            if (autoParsePersonTex_ == rhi::kInvalidTexture) {
+                autoParsePersonTex_ = device_.createTexture2D(kPerS, kPerS, rhi::TextureFormat::kR8, stagedParsePerson_.data());
+            } else {
+                device_.updateTexture2D(autoParsePersonTex_, kPerS, kPerS, rhi::TextureFormat::kR8, stagedParsePerson_.data());
+            }
+            autoParsePersonValid_ = (autoParsePersonTex_ != rhi::kInvalidTexture);
+        }
         if (stagedResidualDirty_) {
             stagedResidualDirty_ = false;
             if (stagedResidualActive_) {
@@ -492,6 +561,13 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             }
         }
     }
+
+    const bool processing = config_.isProcessing() ||
+        (config_.enabled && !config_.compareOriginal &&
+         (stickerCount_ > 0 || ar3dCount_ > 0 || particleQuads > 0 ||
+          (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f) ||
+          (autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f)));
+    loadFades_.update(governor_.level(), nowMs);
 
     // Optional cross-backend FrameDelayRing (0..4 frames; aligns displayed camera frame with async MediaPipe landmarks)
     rhi::TextureId displayTex = inputTexture;
@@ -602,7 +678,10 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.hasBody = (bodyState != nullptr);
     in.bodyState7 = bodyState;
     in.bodyPresence = bodySmoother_.presence();
-    in.personMaskTex = personMaskTex;
+    in.handShieldCoords = handShield;
+    in.personMaskTex = (personMaskTex != rhi::kInvalidTexture)
+        ? personMaskTex
+        : (autoParsePersonValid_ ? autoParsePersonTex_ : rhi::kInvalidTexture);
     in.hairMaskTex = resolvedHairTex;
     bool semanticOccAlive = false;
     {
@@ -631,7 +710,8 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     for (int i = 0; i < stickerCount_; ++i) {
         if (!modulatedStickers[i].enabled) continue;
         if (stickerTriggers_[i] != bundle::BundleTriggerRule::kAlways) {
-            const float gain = bundle::EffectBundleParser::evaluateTriggerGain(stickerTriggers_[i], exprReaction);
+            const float gain = bundle::EffectBundleParser::evaluateTriggerGain(
+                stickerTriggers_[i], exprReaction, activeGesture);
             modulatedStickers[i].opacity *= gain;
             if (modulatedStickers[i].opacity <= 1e-4f) modulatedStickers[i].enabled = false;
         }
@@ -643,7 +723,8 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     for (int i = 0; i < ar3dCount_; ++i) {
         if (!modulatedAr3d[i].enabled) continue;
         if (ar3dTriggers_[i] != bundle::BundleTriggerRule::kAlways) {
-            const float gain = bundle::EffectBundleParser::evaluateTriggerGain(ar3dTriggers_[i], exprReaction);
+            const float gain = bundle::EffectBundleParser::evaluateTriggerGain(
+                ar3dTriggers_[i], exprReaction, activeGesture);
             modulatedAr3d[i].opacity *= gain;
             if (modulatedAr3d[i].opacity <= 1e-4f) {
                 modulatedAr3d[i].enabled = false;
@@ -658,6 +739,8 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
     in.ar3dAccessories = modulatedAr3d;
     in.ar3dCount = ar3dCount_;
+    in.particleVertices = (particleQuads > 0) ? particleVerts_.data() : nullptr;
+    in.particleQuadCount = particleQuads;
     in.tierCaps = tierCaps;
     in.loadFadeBody = loadFades_.body();
     in.loadFadeFace = loadFades_.face();

@@ -579,6 +579,7 @@ fragment float4 fs_body_warp(QuadOut in [[stage_in]],
     float4 a = uni.u[0];
     float4 b = uni.u[1];
     float4 c = uni.u[2];
+    float4 handShield = uni.u[3];
     float aspect = max(c.z, 0.001f);
     float axisLen = length(a.zw);
     float2 uv = in.uv;
@@ -609,7 +610,18 @@ fragment float4 fs_body_warp(QuadOut in [[stage_in]],
             float tw = (t + 0.3f * torso) / (0.22f * torso);
             float r = abs(s) / (1.65f * width);
             float f = r < 1.0f ? (1.0f - r * r) * (1.0f - r * r) : 0.0f;
-            s *= 1.0f + b.z * exp(-0.5f * tw * tw) * f;
+            float handKeep = 1.0f;
+            if (c.w > 0.5f) {
+                if (handShield.x >= 0.0f) {
+                    float2 dh0 = float2(uv.x - handShield.x, (uv.y - handShield.y) / aspect);
+                    handKeep *= smoothstep(0.12f * max(torso, 0.15f), 0.34f * max(torso, 0.15f), length(dh0));
+                }
+                if (handShield.z >= 0.0f) {
+                    float2 dh1 = float2(uv.x - handShield.z, (uv.y - handShield.w) / aspect);
+                    handKeep *= smoothstep(0.12f * max(torso, 0.15f), 0.34f * max(torso, 0.15f), length(dh1));
+                }
+            }
+            s *= 1.0f + b.z * handKeep * exp(-0.5f * tw * tw) * f;
         }
         if (c.x > 0.0f) {
             float ts = (t + 0.95f * torso) / (0.18f * torso);
@@ -1039,9 +1051,22 @@ fragment float4 fs_hair_dye(QuadOut in [[stage_in]],
         float y = luma709(color);
         float strandLift = smoothstep(0.015f, 0.12f, y);
         float dyeY = max(luma709(uni.u[2].rgb), 0.08f);
-        float liftedY = clamp(mix(y, clamp(y * (0.65f + dyeY * 1.35f) + dyeY * 0.36f * strandLift, 0.0f, 0.95f), 0.78f), 0.0f, 0.96f);
-        float3 tinted = fitGamut(clamp(uni.u[2].rgb * (liftedY / dyeY), 0.0f, 1.25f), liftedY);
-        color = mix(color, clamp(tinted, 0.0f, 1.0f), clamp(hairMask * uni.u[0].w * (0.35f + 0.65f * strandLift), 0.0f, 0.92f));
+        float bleachNeed = smoothstep(0.28f, 0.72f, dyeY) * smoothstep(0.012f, 0.09f, y) * (1.0f - smoothstep(0.18f, 0.45f, y));
+        float strandDetail = 0.0f;
+        if (uni.u[5].x > 0.0001f) {
+            float2 stepLat = uni.u[4].xy * uni.u[5].x * 1.5f;
+            float avgLat = 0.5f * (
+                luma709(tex0.sample(kLinearClamp, toMtlUv(clamp(uv + stepLat, 0.0f, 1.0f))).rgb) +
+                luma709(tex0.sample(kLinearClamp, toMtlUv(clamp(uv - stepLat, 0.0f, 1.0f))).rgb)
+            );
+            strandDetail = clamp(y - avgLat, -0.06f, 0.06f);
+        }
+        float liftedY = clamp(
+            mix(y, clamp(y * (0.65f + dyeY * 1.35f) + dyeY * 0.36f * strandLift + bleachNeed * dyeY * 0.32f, 0.0f, 0.95f), 0.80f) +
+            strandDetail * 1.20f,
+            0.0f, 0.96f);
+        float3 tinted = fitGamut(clamp(uni.u[2].rgb * (liftedY / dyeY), 0.0f, 1.28f), liftedY);
+        color = mix(color, clamp(tinted, 0.0f, 1.0f), clamp(hairMask * uni.u[0].w * (0.36f + 0.64f * strandLift), 0.0f, 0.92f));
     }
     if (uni.u[1].w > 0.001f) {
         float2 axisU = uni.u[4].xy;
@@ -1049,17 +1074,118 @@ fragment float4 fs_hair_dye(QuadOut in [[stage_in]],
         float2 d = float2(uv.x - uni.u[3].x, (uv.y - uni.u[3].y) / max(uni.u[4].z, 0.001f));
         float su = dot(d, axisU) / max(uni.u[3].z, 0.04f);
         float sv = dot(d, axisV) / max(uni.u[3].w, 0.04f);
-        float arcDist = (sv + 0.18f * su * su) * 4.2f;
-        float ringBand = exp(-(arcDist * arcDist)) * (1.0f - smoothstep(0.65f, 1.35f, abs(su)));
+        float latKeep = 1.0f - smoothstep(0.65f, 1.35f, abs(su));
+        float arcR = (sv + 0.18f * su * su) * 4.2f;
+        float arcTrt = (sv + 0.18f * su * su - 0.12f) * 6.5f;
+        float ringBand = (exp(-(arcR * arcR)) + 0.32f * exp(-(arcTrt * arcTrt))) * latKeep;
         float yawPeak = clamp(-uni.u[4].w * 0.45f, -0.35f, 0.35f);
         float du = su - yawPeak;
         float viewLobe = 0.65f + 0.35f * exp(-(du * du) * 2.5f);
         float strandCatch = smoothstep(0.04f, 0.32f, luma709(color)) * (0.55f + 0.45f * smoothstep(0.10f, 0.45f, orig.r));
-        float sheen = clamp(ringBand * viewLobe * strandCatch * hairMask * uni.u[1].w * 0.52f, 0.0f, 0.45f);
+        float sheen = clamp(ringBand * viewLobe * strandCatch * hairMask * uni.u[1].w * 0.50f, 0.0f, 0.46f);
         float3 sheenCol = mix(float3(1.0f, 0.99f, 0.97f), clamp(uni.u[2].rgb * 1.35f + float3(0.25f), 0.0f, 1.0f), clamp(uni.u[0].w * 0.45f, 0.0f, 0.45f));
         color = clamp(color + (sheenCol - color) * sheen, 0.0f, 1.0f);
     }
     return float4(color, orig.a);
+}
+
+inline float2 toCbCrMtl(float3 c) {
+    return float2(0.5f + dot(c, float3(-0.168736f, -0.331264f, 0.5f)),
+                  0.5f + dot(c, float3(0.5f, -0.418688f, -0.081312f)));
+}
+
+fragment float4 fs_chroma_key(QuadOut in [[stage_in]],
+                              texture2d<float> tex0 [[texture(0)]],
+                              texture2d<float> tex1 [[texture(1)]],
+                              constant Uniforms& uni [[buffer(1)]]) {
+    float2 muv = toMtlUv(in.uv);
+    float4 color = tex0.sample(kLinearClamp, muv);
+    float2 bgUv = clamp(float2(in.uv.x * uni.u[1].x + uni.u[1].z, (1.0f - in.uv.y) * uni.u[1].y + uni.u[1].w), 0.0f, 1.0f);
+    float3 vbg = tex1.sample(kLinearClamp, bgUv).rgb;
+    float2 cc = toCbCrMtl(color.rgb);
+    float2 kc = toCbCrMtl(uni.u[2].rgb);
+    float dist = length(cc - kc);
+    float sim = clamp(uni.u[0].y, 0.05f, 0.95f) * 0.55f;
+    float sm = max(uni.u[0].z * 0.45f, 0.008f);
+    float keep = smoothstep(sim, sim + sm, dist);
+
+    float baseY = luma709(color.rgb);
+    float3 fg = color.rgb;
+    if (uni.u[2].w < 0.5f) {
+        float refMax = mix(0.5f * (fg.r + fg.b), max(fg.r, fg.b), 0.35f);
+        float spill = max(fg.g - refMax, 0.0f) * clamp(uni.u[0].w, 0.0f, 1.0f);
+        fg.g -= spill;
+    } else {
+        float refMax = mix(0.5f * (fg.r + fg.g), max(fg.r, fg.g), 0.35f);
+        float spill = max(fg.b - refMax, 0.0f) * clamp(uni.u[0].w, 0.0f, 1.0f);
+        fg.b -= spill;
+    }
+    fg = clamp(fg + float3((baseY - luma709(fg)) * 0.65f), 0.0f, 1.0f);
+
+    float2 wrapD = float2(0.022f, 0.022f);
+    float3 vbgAmb = 0.20f * (
+        vbg +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2( wrapD.x, 0.0f), 0.0f, 1.0f)).rgb +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2(-wrapD.x, 0.0f), 0.0f, 1.0f)).rgb +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f,  wrapD.y), 0.0f, 1.0f)).rgb +
+        tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f, -wrapD.y), 0.0f, 1.0f)).rgb
+    );
+    float edgeBand = smoothstep(0.04f, 0.45f, keep) * (1.0f - smoothstep(0.55f, 0.96f, keep));
+    float3 fgWrapped = mix(fg, mix(max(fg, vbgAmb * 0.92f), vbgAmb, 0.24f), edgeBand * 0.30f);
+    return float4(mix(color.rgb, mix(vbg, fgWrapped, keep), clamp(uni.u[0].x, 0.0f, 1.0f)), color.a);
+}
+
+inline float sdHeartMtl(float2 p) {
+    float2 q = float2(abs(p.x) * 1.15f, p.y * 1.15f + 0.55f);
+    if (q.y + q.x > 1.0f) {
+        return length(q - float2(0.25f, 0.75f)) - 0.3536f;
+    }
+    float2 a = q - float2(0.0f, 1.0f);
+    float h = clamp(0.5f * (q.x + q.y), 0.0f, 1.0f);
+    float2 b = q - float2(h, h);
+    float d = sqrt(min(dot(a, a), dot(b, b)));
+    float s = (q.x - q.y < 0.0f) ? -1.0f : 1.0f;
+    return d * s;
+}
+
+inline float sdStar5Mtl(float2 p) {
+    float2 k1 = float2(0.809017f, -0.587785f);
+    float2 k2 = float2(-0.809017f, -0.587785f);
+    float2 q = float2(abs(p.x), p.y) * 1.28f;
+    q -= 2.0f * max(dot(k1, q), 0.0f) * k1;
+    q -= 2.0f * max(dot(k2, q), 0.0f) * k2;
+    q.x = abs(q.x);
+    q.y -= 1.0f;
+    float2 ba = float2(0.270381f, -0.627852f);
+    float h = clamp(dot(q, ba) / 0.467304f, 0.0f, 1.0f);
+    float s = (q.y * ba.x - q.x * ba.y < 0.0f) ? -1.0f : 1.0f;
+    return length(q - ba * h) * s * 0.78f;
+}
+
+fragment float4 fs_particle_burst(RetouchOut in [[stage_in]]) {
+    float shape = floor(in.attr.w * 0.5f + 0.001f);
+    float alpha = clamp(in.attr.w - shape * 2.0f, 0.0f, 1.0f);
+    if (alpha <= 0.003f) discard_fragment();
+    float2 p = in.src;
+    float sd = 1.0f;
+    if (shape < 0.5f) {
+        sd = sdHeartMtl(p);
+    } else if (shape < 1.5f) {
+        sd = sdStar5Mtl(p);
+    } else if (shape < 2.5f) {
+        float2 a = abs(p);
+        sd = (a.x * 1.25f + a.y * 0.95f - 0.72f) * 0.64f;
+    } else {
+        float2 a = sqrt(abs(p) + float2(0.004f));
+        sd = (a.x + a.y - 0.94f) * 0.85f;
+    }
+    float bodyMask = 1.0f - smoothstep(-0.06f, 0.05f, sd);
+    float halo = exp(-max(sd, 0.0f) * 6.5f) * 0.36f;
+    float finalA = clamp((bodyMask + halo) * alpha, 0.0f, 1.0f);
+    if (finalA <= 0.003f) discard_fragment();
+    float core = smoothstep(-0.02f, -0.32f, sd) * 0.55f;
+    float3 outRgb = clamp(mix(in.attr.rgb, float3(1.0f, 0.99f, 0.96f), core), 0.0f, 1.0f);
+    return float4(outRgb, finalA);
 }
 )MSL";
 

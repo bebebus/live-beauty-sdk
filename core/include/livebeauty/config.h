@@ -81,6 +81,12 @@ enum class BackgroundMode : int {
     kBlur = 1,          // Portrait bokeh blur
     kVirtualImage = 2,  // Green-screen-free virtual background replacement
     kVirtualBlur = 3,   // Virtual background image with soft bokeh blur
+    kChromaKey = 4,     // Studio green/blue screen chroma key + edge despill
+};
+
+enum class ChromaKeyColor : int {
+    kGreen = 0,
+    kBlue = 1,
 };
 
 struct BeautyConfig {
@@ -128,10 +134,14 @@ struct BeautyConfig {
     float teethWhiten = 0.0f;
     float nasolabial = 0.0f;
 
-    // Portrait bokeh, virtual background & 3D LUT
+    // Portrait bokeh, virtual background, studio chroma key & 3D LUT
     float backgroundBlur = 0.0f;
     BackgroundMode backgroundMode = BackgroundMode::kNone;
     float virtualBgStrength = 1.0f;
+    ChromaKeyColor chromaKeyColor = ChromaKeyColor::kGreen;
+    float chromaKeySimilarity = 0.38f;
+    float chromaKeySmoothness = 0.12f;
+    float chromaKeyDespill = 0.75f;
     int maxFaces = 1;           // 1 = single primary face (default), 2 = dual-face co-streaming
     int frameDelayFrames = 0;   // 0 = lowest latency, 1..4 = FrameDelayRing zero-lag alignment
     std::string lutUrl;
@@ -200,6 +210,7 @@ EyeshadowColor parseEyeshadowColor(const std::string& s);
 ContactLensStyle parseContactLensStyle(const std::string& s);
 HairDyeColor parseHairDyeColor(const std::string& s);
 BackgroundMode parseBackgroundMode(const std::string& s);
+ChromaKeyColor parseChromaKeyColor(const std::string& s);
 math::RelightStyle parseRelightStyle(const std::string& s);
 math::PerformanceTier parsePerformanceTier(const std::string& s);
 

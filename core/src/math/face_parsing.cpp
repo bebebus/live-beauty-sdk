@@ -154,6 +154,75 @@ bool FaceParsingMapper::mapLogitsNchw(
     return mapClassIds(argmaxScratch_.data(), srcW, srcH, outOcclusionR8, outHairR8, outPersonR8);
 }
 
+bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
+    const float* logitsNhwc6,
+    int srcW,
+    int srcH,
+    uint8_t* outOcclusionR8,
+    uint8_t* outHairR8,
+    uint8_t* outPersonR8) {
+    if (!logitsNhwc6 || srcW <= 0 || srcH <= 0 || srcW > 4096 || srcH > 4096 || !outOcclusionR8) {
+        return false;
+    }
+
+    for (int y = 0; y < kOutSize; ++y) {
+        const int sy = std::clamp(static_cast<int>((static_cast<int64_t>(y) * srcH) / kOutSize), 0, srcH - 1);
+        const size_t srcRow = static_cast<size_t>(sy) * static_cast<size_t>(srcW);
+        const int dstRow = y * kOutSize;
+        for (int x = 0; x < kOutSize; ++x) {
+            const int sx = std::clamp(static_cast<int>((static_cast<int64_t>(x) * srcW) / kOutSize), 0, srcW - 1);
+            const float* lg = logitsNhwc6 + (srcRow + static_cast<size_t>(sx)) * 6u;
+
+            // Numerically stable 6-way softmax: [0:bg, 1:hair, 2:body_skin, 3:face_skin, 4:clothes, 5:accessories]
+            float maxL = -1e30f;
+            bool finiteAll = true;
+            for (int c = 0; c < 6; ++c) {
+                if (!std::isfinite(lg[c])) {
+                    finiteAll = false;
+                    break;
+                }
+                if (lg[c] > maxL) maxL = lg[c];
+            }
+            const int idx = dstRow + x;
+            if (!finiteAll) {
+                rawOcc_[idx] = 255;
+                rawHair_[idx] = 0;
+                rawPerson_[idx] = 0;
+                continue;
+            }
+            float p[6];
+            float sumE = 0.0f;
+            for (int c = 0; c < 6; ++c) {
+                p[c] = std::exp(std::max(lg[c] - maxL, -20.0f));
+                sumE += p[c];
+            }
+            const float invSum = 1.0f / std::max(sumE, 1e-6f);
+            for (int c = 0; c < 6; ++c) p[c] *= invSum;
+
+            // Hair wisps (1), clothes (4), and accessories/glasses/hands/hats (5) occlude bare face makeup & skin retouch!
+            const float pOcc = detail::clampf(p[1] + p[4] + p[5], 0.0f, 1.0f);
+            const float pHair = detail::clampf(p[1], 0.0f, 1.0f);
+            const float pPerson = detail::clampf(1.0f - p[0], 0.0f, 1.0f);
+
+            rawOcc_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround((1.0f - pOcc) * 255.0f)), 0, 255));
+            rawHair_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(pHair * 255.0f)), 0, 255));
+            rawPerson_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(pPerson * 255.0f)), 0, 255));
+        }
+    }
+
+    boxBlur3x3AndEma(rawOcc_.data(), emaOcc_.data(), hasOccHistory_ ? kParseEmaAlpha : 1.0f, outOcclusionR8, kOutSize);
+    hasOccHistory_ = true;
+    if (outHairR8) {
+        boxBlur3x3AndEma(rawHair_.data(), emaHair_.data(), hasHairHistory_ ? kParseEmaAlpha : 1.0f, outHairR8, kOutSize);
+        hasHairHistory_ = true;
+    }
+    if (outPersonR8) {
+        boxBlur3x3AndEma(rawPerson_.data(), emaPerson_.data(), hasPersonHistory_ ? kParseEmaAlpha : 1.0f, outPersonR8, kOutSize);
+        hasPersonHistory_ = true;
+    }
+    return true;
+}
+
 // ============================================================================
 // NeuralSkinResidualAdapter
 // ============================================================================

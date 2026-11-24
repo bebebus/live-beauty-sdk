@@ -415,7 +415,7 @@ const WebGl2Device::ProgramCache& WebGl2Device::ensureProgram(ShaderId id) {
     pc.attr0 = gl_.getAttribLocation(pc.program, "aPosition");
     if (id == ShaderId::kSkinMask) {
         pc.attr1 = gl_.getAttribLocation(pc.program, "aMaskWeights");
-    } else if (id == ShaderId::kRetouchSkin || id == ShaderId::kRetouchEyeTeeth) {
+    } else if (id == ShaderId::kRetouchSkin || id == ShaderId::kRetouchEyeTeeth || id == ShaderId::kParticleBurst) {
         pc.attr1 = gl_.getAttribLocation(pc.program, "aSrcCoord");
         pc.attr2 = gl_.getAttribLocation(pc.program, "aRetouchAttr");
     } else if (id == ShaderId::kMakeupLayer || id == ShaderId::kMakeupLip || id == ShaderId::kMakeupIris) {

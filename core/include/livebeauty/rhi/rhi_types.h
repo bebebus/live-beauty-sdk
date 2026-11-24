@@ -63,6 +63,8 @@ enum class ShaderId : uint8_t {
     kHeadDepthShell,
     kAr3dMesh,
     kHairDye,
+    kChromaKey,
+    kParticleBurst,
     kCount,
 };
 

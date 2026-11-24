@@ -8,12 +8,13 @@
 #include "livebeauty/config.h"
 #include "livebeauty/math/ar_3d_accessory.h"
 #include "livebeauty/math/face_aux_vision.h"
+#include "livebeauty/math/particle_system.h"
 #include "livebeauty/math/sticker_transform.h"
 #include "livebeauty/rhi/rhi_types.h"
 
 namespace livebeauty::bundle {
 
-/** Expression-gated visibility rule for declarative creator effect layers (.lbfx). */
+/** Expression & hand-gesture gated visibility rule for declarative creator effect layers (.lbfx). */
 enum class BundleTriggerRule : uint8_t {
     kAlways = 0,
     kSmile = 1,
@@ -22,6 +23,10 @@ enum class BundleTriggerRule : uint8_t {
     kBlink = 4,
     kCheekPuff = 5,
     kTongueOut = 6,
+    kGestureHeart = 7,
+    kGestureThumbsUp = 8,
+    kGestureVictory = 9,
+    kGestureOpenPalm = 10,
 };
 
 struct BundleStickerSpec {
@@ -65,8 +70,11 @@ public:
     static math::Ar3dAnchor parseAr3dAnchor(const std::string& s);
     static math::Ar3dMeshPreset parseMeshPreset(const std::string& s);
 
-    /** Evaluate [0..1] opacity multiplier for a bundle layer given current smoothed expression state. */
-    static float evaluateTriggerGain(BundleTriggerRule rule, const math::ExpressionReaction& reaction);
+    /** Evaluate [0..1] opacity multiplier for a bundle layer given current smoothed expression & gesture state. */
+    static float evaluateTriggerGain(
+        BundleTriggerRule rule,
+        const math::ExpressionReaction& reaction,
+        math::GestureType activeGesture = math::GestureType::kNone);
 
     /** Parse a `.lbfx` JSON manifest string into `out` (zero external dependencies). */
     static bool parseJson(const std::string& jsonText, EffectBundleManifest& out, std::string* outError = nullptr);

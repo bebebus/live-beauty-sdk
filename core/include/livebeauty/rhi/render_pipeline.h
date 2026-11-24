@@ -15,6 +15,7 @@
 #include "livebeauty/math/face_mesh_topology.h"
 #include "livebeauty/math/face_relight.h"
 #include "livebeauty/math/hair_mask_tuning.h"
+#include "livebeauty/math/particle_system.h"
 #include "livebeauty/math/sticker_transform.h"
 #include "livebeauty/rhi/rhi_device.h"
 
@@ -41,6 +42,8 @@ enum PassBit : uint32_t {
     kPassAr3d        = 1u << 16,  // P4: 3D head-occluded AR accessories + spring physics
     kPassRelight3d   = 1u << 17,  // P1: real 3D rotated vertex normal studio relighting
     kPassHairDye     = 1u << 18,  // v3.4: real-time strand-preserving hair dyeing & crown Angel-Ring sheen
+    kPassChromaKey   = 1u << 19,  // v3.6: studio YCbCr green/blue screen chroma key + edge despill
+    kPassParticles   = 1u << 20,  // v3.6: batched 2D SDF interactive gesture particle bursts
 };
 
 /** Static makeup atlases, virtual background & 3D LUT texture handles uploaded once by platform host. */
@@ -77,10 +80,11 @@ struct FrameInputs {
     float eyeMakeupKeep = 1.0f;
     float denoiseKeep = 1.0f;
 
-    // Optional body geometry (7-D state)
+    // Optional body geometry (7-D state) + v3.6 hand-waist anti-distortion shield (bottom-up UV, <0 when inactive)
     bool hasBody = false;
     const float* bodyState7 = nullptr;
     float bodyPresence = 0.0f;
+    Vec4 handShieldCoords = {-10.0f, -10.0f, -10.0f, -10.0f};
 
     // Optional portrait, hair & occlusion/face-parsing segmentation masks (R8, top-down)
     TextureId personMaskTex = kInvalidTexture;
@@ -105,6 +109,10 @@ struct FrameInputs {
     // P4: Optional 3D head-occluded AR accessories with spring physics (up to 4 layers)
     std::array<math::Ar3dAccessoryConfig, math::kMaxAr3dLayers> ar3dAccessories{};
     int ar3dCount = 0;
+
+    // v3.6: Optional batched 2D SDF gesture particles (kRetouchPos2Uv2A4, 8 floats/vert * 4 verts/quad)
+    const float* particleVertices = nullptr;
+    int particleQuadCount = 0;
 
     // P4: Resolved hardware/runtime performance tier capabilities
     math::TierCapabilities tierCaps{};
@@ -191,6 +199,8 @@ private:
                                int width, int height, const FrameInputs& in,
                                const float* landmarks478x2, const math::HeadPose3D& pose,
                                bool frontFaceCw, float presence);
+    void renderParticles(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
+                         int width, int height, const float* particleVerts, int quadCount);
 
     IRhiDevice& device_;
     PipelineAssets assets_{};
@@ -268,6 +278,8 @@ private:
     BufferId ibRightEye_ = kInvalidBuffer;
     BufferId ibLeftEye_ = kInvalidBuffer;
     BufferId ibSticker_ = kInvalidBuffer;
+    BufferId vbParticles_ = kInvalidBuffer;
+    BufferId ibParticles_ = kInvalidBuffer;
 
     // Cross-backend FrameDelayRing (allocated lazily only when frameDelayFrames > 0; supports 0..4 frames)
     static constexpr int kMaxDelaySlots = 5;

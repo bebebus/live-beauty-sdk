@@ -19,6 +19,10 @@ struct JniEngineHandle {
     livebeauty::rhi::PipelineAssets assets{};
     livebeauty::BackgroundMode bgModeOverride = livebeauty::BackgroundMode::kNone;
     float virtualBgStrengthOverride = 1.0f;
+    livebeauty::ChromaKeyColor chromaKeyColorOverride = livebeauty::ChromaKeyColor::kGreen;
+    float chromaKeySimilarityOverride = 0.38f;
+    float chromaKeySmoothnessOverride = 0.12f;
+    float chromaKeyDespillOverride = 0.75f;
     int maxFacesOverride = 1;
     int frameDelayFramesOverride = 0;
     livebeauty::math::RelightStyle relightStyleOverride = livebeauty::math::RelightStyle::kNatural;
@@ -238,6 +242,10 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     cfg.contactLensStyle = livebeauty::parseContactLensStyle(toStdString(env, lensStyleStr));
     cfg.backgroundMode = handle->bgModeOverride;
     cfg.virtualBgStrength = handle->virtualBgStrengthOverride;
+    cfg.chromaKeyColor = handle->chromaKeyColorOverride;
+    cfg.chromaKeySimilarity = handle->chromaKeySimilarityOverride;
+    cfg.chromaKeySmoothness = handle->chromaKeySmoothnessOverride;
+    cfg.chromaKeyDespill = handle->chromaKeyDespillOverride;
     cfg.maxFaces = handle->maxFacesOverride;
     cfg.frameDelayFrames = handle->frameDelayFramesOverride;
     cfg.relightStyle = handle->relightStyleOverride;
@@ -527,7 +535,7 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAr3dAccessoryEx(
     cfg.springStiffness = springStiffness;
     cfg.springDamping = springDamping;
     cfg.headOcclusion = (headOcclusion == JNI_TRUE);
-    const auto trig = static_cast<livebeauty::bundle::BundleTriggerRule>(std::clamp(static_cast<int>(triggerRule), 0, 6));
+    const auto trig = static_cast<livebeauty::bundle::BundleTriggerRule>(std::clamp(static_cast<int>(triggerRule), 0, 10));
     handle->engine.setAr3dAccessory(slot, cfg, trig);
 }
 
@@ -645,6 +653,10 @@ static jboolean applyBundleInternal(
             handle->relightStyleOverride = cfg.relightStyle;
             handle->bgModeOverride = cfg.backgroundMode;
             handle->virtualBgStrengthOverride = cfg.virtualBgStrength;
+            handle->chromaKeyColorOverride = cfg.chromaKeyColor;
+            handle->chromaKeySimilarityOverride = cfg.chromaKeySimilarity;
+            handle->chromaKeySmoothnessOverride = cfg.chromaKeySmoothness;
+            handle->chromaKeyDespillOverride = cfg.chromaKeyDespill;
             handle->performanceTierOverride = cfg.performanceTier;
             handle->preferHalfFloatOverride = cfg.preferHalfFloat;
             handle->maxFacesOverride = cfg.maxFaces;
@@ -696,6 +708,60 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeGetStats(
     };
     const jsize count = (len >= 11) ? 11 : ((len >= 10) ? 10 : 8);
     env->SetFloatArrayRegion(outStats, 0, count, vals);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetChromaKey(
+    JNIEnv* env, jclass, jlong ptr,
+    jstring keyColorStr, jfloat similarity, jfloat smoothness, jfloat despill) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->chromaKeyColorOverride = livebeauty::parseChromaKeyColor(toStdString(env, keyColorStr));
+    handle->chromaKeySimilarityOverride = std::clamp(similarity, 0.05f, 0.95f);
+    handle->chromaKeySmoothnessOverride = std::clamp(smoothness, 0.01f, 0.80f);
+    handle->chromaKeyDespillOverride = std::clamp(despill, 0.0f, 1.0f);
+    auto cfg = handle->engine.config();
+    cfg.chromaKeyColor = handle->chromaKeyColorOverride;
+    cfg.chromaKeySimilarity = handle->chromaKeySimilarityOverride;
+    cfg.chromaKeySmoothness = handle->chromaKeySmoothnessOverride;
+    cfg.chromaKeyDespill = handle->chromaKeyDespillOverride;
+    handle->engine.setConfig(cfg);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitMulticlassLogits(
+    JNIEnv* env, jclass, jlong ptr, jfloatArray logitsNhwc6Arr,
+    jint srcWidth, jint srcHeight, jlong sampleTsMs) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !logitsNhwc6Arr || srcWidth <= 0 || srcHeight <= 0 || srcWidth > 2048 || srcHeight > 2048) {
+        return JNI_FALSE;
+    }
+    const jlong len = static_cast<jlong>(env->GetArrayLength(logitsNhwc6Arr));
+    const jlong needed = static_cast<jlong>(srcWidth) * static_cast<jlong>(srcHeight) * 6LL;
+    if (len < needed) return JNI_FALSE;
+    jfloat* raw = env->GetFloatArrayElements(logitsNhwc6Arr, nullptr);
+    if (!raw) return JNI_FALSE;
+    const bool ok = handle->engine.submitMulticlass6Logits(raw, srcWidth, srcHeight, sampleTsMs);
+    env->ReleaseFloatArrayElements(logitsNhwc6Arr, raw, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeTriggerGesture(
+    JNIEnv*, jclass, jlong ptr, jint gestureId, jfloat normX, jfloat normY, jlong nowMs) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    const int clamped = std::clamp(static_cast<int>(gestureId), 0, 4);
+    handle->engine.triggerGesture(
+        static_cast<livebeauty::math::GestureType>(clamped), normX, normY, nowMs);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHandShield(
+    JNIEnv*, jclass, jlong ptr, jfloat hand0X, jfloat hand0Y, jfloat hand1X, jfloat hand1Y) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->engine.setHandShieldCoords(hand0X, hand0Y, hand1X, hand1Y);
 }
 
 }  // extern "C"

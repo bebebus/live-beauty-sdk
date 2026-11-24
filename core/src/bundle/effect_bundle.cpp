@@ -356,6 +356,10 @@ BundleTriggerRule EffectBundleParser::parseTriggerRule(const std::string& s) {
     if (s == "blink" || s == "wink") return BundleTriggerRule::kBlink;
     if (s == "cheek_puff") return BundleTriggerRule::kCheekPuff;
     if (s == "tongue_out") return BundleTriggerRule::kTongueOut;
+    if (s == "gesture_heart" || s == "heart") return BundleTriggerRule::kGestureHeart;
+    if (s == "gesture_thumbs_up" || s == "thumbs_up") return BundleTriggerRule::kGestureThumbsUp;
+    if (s == "gesture_victory" || s == "victory") return BundleTriggerRule::kGestureVictory;
+    if (s == "gesture_palm" || s == "open_palm") return BundleTriggerRule::kGestureOpenPalm;
     return BundleTriggerRule::kAlways;
 }
 
@@ -383,7 +387,9 @@ math::Ar3dMeshPreset EffectBundleParser::parseMeshPreset(const std::string& s) {
 }
 
 float EffectBundleParser::evaluateTriggerGain(
-    BundleTriggerRule rule, const math::ExpressionReaction& rx) {
+    BundleTriggerRule rule,
+    const math::ExpressionReaction& rx,
+    math::GestureType activeGesture) {
     switch (rule) {
         case BundleTriggerRule::kSmile:
             return detail::smoothstep(0.18f, 0.45f, rx.smile);
@@ -397,6 +403,14 @@ float EffectBundleParser::evaluateTriggerGain(
             return detail::smoothstep(0.16f, 0.40f, rx.cheekPuff);
         case BundleTriggerRule::kTongueOut:
             return detail::smoothstep(0.18f, 0.42f, rx.tongueOut);
+        case BundleTriggerRule::kGestureHeart:
+            return (activeGesture == math::GestureType::kHeart) ? 1.0f : 0.0f;
+        case BundleTriggerRule::kGestureThumbsUp:
+            return (activeGesture == math::GestureType::kThumbsUp) ? 1.0f : 0.0f;
+        case BundleTriggerRule::kGestureVictory:
+            return (activeGesture == math::GestureType::kVictory) ? 1.0f : 0.0f;
+        case BundleTriggerRule::kGestureOpenPalm:
+            return (activeGesture == math::GestureType::kOpenPalm) ? 1.0f : 0.0f;
         case BundleTriggerRule::kAlways:
         default:
             return 1.0f;
@@ -507,11 +521,17 @@ bool EffectBundleParser::parseJson(
         c.ambientMakeupBlend = optFloat(*b, "ambientMakeupBlend", c.ambientMakeupBlend, 0.0f, 1.0f);
         c.matteTemporal = optFloat(*b, "matteTemporal", c.matteTemporal, 0.0f, 1.0f);
 
-        if (b->find("backgroundBlur") || b->find("backgroundMode") || b->find("virtualBgStrength")) {
+        if (b->find("backgroundBlur") || b->find("backgroundMode") || b->find("virtualBgStrength") ||
+            b->find("chromaKeyColor") || b->find("chromaKeySimilarity") ||
+            b->find("chromaKeySmoothness") || b->find("chromaKeyDespill")) {
             out.overridesBackground = true;
             c.backgroundBlur = optFloat(*b, "backgroundBlur", c.backgroundBlur, 0.0f, 1.0f);
             if (b->find("backgroundMode")) c.backgroundMode = parseBackgroundMode(optStr(*b, "backgroundMode"));
             c.virtualBgStrength = optFloat(*b, "virtualBgStrength", c.virtualBgStrength, 0.0f, 1.0f);
+            if (b->find("chromaKeyColor")) c.chromaKeyColor = parseChromaKeyColor(optStr(*b, "chromaKeyColor"));
+            c.chromaKeySimilarity = optFloat(*b, "chromaKeySimilarity", c.chromaKeySimilarity, 0.05f, 0.95f);
+            c.chromaKeySmoothness = optFloat(*b, "chromaKeySmoothness", c.chromaKeySmoothness, 0.01f, 0.80f);
+            c.chromaKeyDespill = optFloat(*b, "chromaKeyDespill", c.chromaKeyDespill, 0.0f, 1.0f);
         }
         if (b->find("performanceTier") || b->find("preferHalfFloat") ||
             b->find("maxFaces") || b->find("frameDelayFrames")) {
@@ -534,6 +554,11 @@ bool EffectBundleParser::parseJson(
             if (bg->find("mode")) out.beauty.backgroundMode = parseBackgroundMode(optStr(*bg, "mode"));
             else if (bg->find("backgroundMode")) out.beauty.backgroundMode = parseBackgroundMode(optStr(*bg, "backgroundMode"));
             out.beauty.virtualBgStrength = optFloat(*bg, "strength", optFloat(*bg, "virtualBgStrength", out.beauty.virtualBgStrength, 0.0f, 1.0f), 0.0f, 1.0f);
+            if (bg->find("keyColor")) out.beauty.chromaKeyColor = parseChromaKeyColor(optStr(*bg, "keyColor"));
+            else if (bg->find("chromaKeyColor")) out.beauty.chromaKeyColor = parseChromaKeyColor(optStr(*bg, "chromaKeyColor"));
+            out.beauty.chromaKeySimilarity = optFloat(*bg, "similarity", optFloat(*bg, "chromaKeySimilarity", out.beauty.chromaKeySimilarity, 0.05f, 0.95f), 0.05f, 0.95f);
+            out.beauty.chromaKeySmoothness = optFloat(*bg, "smoothness", optFloat(*bg, "chromaKeySmoothness", out.beauty.chromaKeySmoothness, 0.01f, 0.80f), 0.01f, 0.80f);
+            out.beauty.chromaKeyDespill = optFloat(*bg, "despill", optFloat(*bg, "chromaKeyDespill", out.beauty.chromaKeyDespill, 0.0f, 1.0f), 0.0f, 1.0f);
         }
     }
     if (const auto* po = root.find("pipelineOptions")) {

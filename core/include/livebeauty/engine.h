@@ -18,6 +18,7 @@
 #include "livebeauty/math/face_timeline.h"
 #include "livebeauty/math/hair_mask_tuning.h"
 #include "livebeauty/math/multi_face_tracker.h"
+#include "livebeauty/math/particle_system.h"
 #include "livebeauty/math/sticker_transform.h"
 #include "livebeauty/rhi/render_pipeline.h"
 
@@ -115,6 +116,25 @@ public:
      */
     bool submitFaceParsingClassMap(const uint8_t* classIds, int srcWidth, int srcHeight, int64_t sampleTsMs);
     bool submitFaceParsingLogits(const float* logitsNchw, int numClasses, int srcWidth, int srcHeight, int64_t sampleTsMs);
+
+    /**
+     * v3.6: Submit 6-class MediaPipe selfie_multiclass NHWC float logits
+     * (`0=bg, 1=hair, 2=body_skin, 3=face_skin, 4=clothes, 5=accessories/hands`)
+     * from any worker thread. Softmax-maps anti-aliased `128x128` occlusion, hair, and person masks.
+     */
+    bool submitMulticlass6Logits(const float* logitsNhwc6, int srcWidth, int srcHeight, int64_t sampleTsMs);
+
+    /**
+     * v3.6: Trigger an interactive 2D SDF particle burst (`heart`, `thumbs_up`, `victory`, `open_palm`)
+     * at normalized top-down `(normX, normY)` in `[0..1]` and latch gesture-reactive `.lbfx` layers.
+     */
+    void triggerGesture(math::GestureType gesture, float normX, float normY, int64_t nowMs);
+
+    /**
+     * v3.6: Update active hand palm centers in normalized top-down `[0..1]` (`< 0` when inactive)
+     * so `ShaderId::kBodyWarp` shields hands/fingers from waist-slimming lateral pull.
+     */
+    void setHandShieldCoords(float hand0X, float hand0Y, float hand1X, float hand1Y);
 
     /**
      * v3.3: Submit external Face-ROI neural skin retouching tensor (`3xHxW` or `4xHxW` float NCHW in `[-0.24, +0.24]`)
@@ -218,6 +238,15 @@ private:
     rhi::TextureId autoParseHairTex_ = rhi::kInvalidTexture;
     bool autoParseHairValid_ = false;
     int64_t autoParseHairTsMs_ = kTimeInvalid;
+    bool stagedParsePersonDirty_ = false;
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> stagedParsePerson_{};
+    rhi::TextureId autoParsePersonTex_ = rhi::kInvalidTexture;
+    bool autoParsePersonValid_ = false;
+    math::ParticleBurstSolver particleSolver_;
+    math::GestureType activeGesture_ = math::GestureType::kNone;
+    int64_t activeGestureUntilMs_ = kTimeInvalid;
+    Vec4 handShieldCoords_ = {-10.0f, -10.0f, -10.0f, -10.0f};
+    std::array<float, math::ParticleBurstSolver::kMaxVertexFloats> particleVerts_{};
     uint64_t nextAr3dMeshGen_ = 0;
     rhi::TextureId autoResidualTex_ = rhi::kInvalidTexture;
     CropRect autoResidualRect_ = CropRect::full();

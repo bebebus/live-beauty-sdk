@@ -383,7 +383,7 @@ const GlesDevice::ProgramCache& GlesDevice::ensureProgram(ShaderId id) {
     pc.attr0 = glGetAttribLocation(pc.program, "aPosition");
     if (id == ShaderId::kSkinMask) {
         pc.attr1 = glGetAttribLocation(pc.program, "aMaskWeights");
-    } else if (id == ShaderId::kRetouchSkin || id == ShaderId::kRetouchEyeTeeth) {
+    } else if (id == ShaderId::kRetouchSkin || id == ShaderId::kRetouchEyeTeeth || id == ShaderId::kParticleBurst) {
         pc.attr1 = glGetAttribLocation(pc.program, "aSrcCoord");
         pc.attr2 = glGetAttribLocation(pc.program, "aRetouchAttr");
     } else if (id == ShaderId::kMakeupLayer || id == ShaderId::kMakeupLip || id == ShaderId::kMakeupIris) {

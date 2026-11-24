@@ -868,6 +868,81 @@ void testCodeReviewRegressionGuards() {
     EXPECT_TRUE(rollMicro[(rotEyeY * 64 + rotEyeX) * 4 + 3] == 0);
 }
 
+void testV36MulticlassParsingParticlesAndBundleGestureTriggers() {
+    // 1. 6-class MediaPipe selfie_multiclass NHWC softmax mapper
+    constexpr int kS = 32;
+    std::vector<float> logits(static_cast<size_t>(kS * kS * 6), -4.0f);
+    for (int y = 0; y < kS; ++y) {
+        for (int x = 0; x < kS; ++x) {
+            float* c = logits.data() + static_cast<size_t>((y * kS + x) * 6);
+            if (y < 8) {
+                c[1] = 5.0f;  // class 1: hair
+            } else if (y < 16 && x >= 10 && x < 22) {
+                c[5] = 5.0f;  // class 5: glasses/accessories/hands -> occludes face makeup!
+            } else if (y < 24) {
+                c[3] = 5.0f;  // class 3: face_skin -> visible skin!
+            } else {
+                c[0] = 5.0f;  // class 0: background
+            }
+        }
+    }
+    FaceParsingMapper mapper;
+    std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+    EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwc(logits.data(), kS, kS, occ.data(), hair.data(), person.data()));
+    // Top hair band (outY = 8) -> hair > 220, occ < 20, person > 220
+    EXPECT_TRUE(hair[8 * 128 + 64] > 220 && occ[8 * 128 + 64] < 20 && person[8 * 128 + 64] > 220);
+    // Glasses/accessory band (outY = 48, outX = 64) -> occ < 20 (shielded!), person > 220
+    EXPECT_TRUE(occ[48 * 128 + 64] < 20 && person[48 * 128 + 64] > 220);
+    // Bare face skin (outY = 80, outX = 64) -> occ > 220, hair < 20, person > 220
+    EXPECT_TRUE(occ[80 * 128 + 64] > 220 && hair[80 * 128 + 64] < 20 && person[80 * 128 + 64] > 220);
+    // Background (outY = 116, outX = 64) -> person < 20
+    EXPECT_TRUE(person[116 * 128 + 64] < 20);
+
+    // 2. ParticleBurstSolver physics, packing & expiration
+    ParticleBurstSolver solver;
+    EXPECT_TRUE(!solver.hasActiveParticles(1000));
+    solver.triggerBurst(GestureType::kHeart, 0.50f, 0.55f, 1000);
+    EXPECT_TRUE(solver.hasActiveParticles(1100));
+    std::array<float, ParticleBurstSolver::kMaxVertexFloats> verts{};
+    const int nQuads = solver.buildBatch(1200, 720.0f / 1280.0f, verts.data());
+    EXPECT_TRUE(nQuads >= 12 && nQuads <= ParticleBurstSolver::kMaxParticles);
+    // Verify packed shapeId*2 + alpha stays well-formed
+    const float packedW = verts[7];
+    const float shapeId = std::floor(packedW * 0.5f + 0.001f);
+    const float alpha = packedW - shapeId * 2.0f;
+    EXPECT_TRUE((shapeId == 0.0f || shapeId == 3.0f) && alpha > 0.05f && alpha < 1.0f);
+    // After 3 seconds all particles expire cleanly
+    EXPECT_TRUE(solver.buildBatch(4500, 720.0f / 1280.0f, verts.data()) == 0);
+
+    // 3. .lbfx schema v2 chroma_key + gesture trigger parsing
+    const char* v36Json = R"JSON({
+        "schemaVersion": 2,
+        "id": "chroma_heart_v2",
+        "background": {
+            "mode": "chroma_key",
+            "keyColor": "blue",
+            "similarity": 0.42,
+            "smoothness": 0.15,
+            "despill": 0.80,
+            "strength": 0.95
+        },
+        "stickers": [
+            { "slot": 0, "anchor": "forehead_crown", "assetPath": "heart.png", "trigger": "gesture_heart" }
+        ]
+    })JSON";
+    bundle::EffectBundleManifest mf{};
+    EXPECT_TRUE(bundle::EffectBundleParser::parseJson(v36Json, mf, nullptr));
+    EXPECT_TRUE(mf.beauty.backgroundMode == BackgroundMode::kChromaKey);
+    EXPECT_TRUE(mf.beauty.chromaKeyColor == ChromaKeyColor::kBlue);
+    EXPECT_TRUE(std::fabs(mf.beauty.chromaKeySimilarity - 0.42f) < 1e-5f);
+    EXPECT_TRUE(mf.stickers.size() == 1 && mf.stickers[0].trigger == bundle::BundleTriggerRule::kGestureHeart);
+    ExpressionReaction neutralRx{};
+    EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(
+        bundle::BundleTriggerRule::kGestureHeart, neutralRx, GestureType::kNone) == 0.0f);
+    EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(
+        bundle::BundleTriggerRule::kGestureHeart, neutralRx, GestureType::kHeart) == 1.0f);
+}
+
 }  // namespace
 
 int main() {
@@ -886,6 +961,7 @@ int main() {
     testFaceParsing19ClassAndNeuralResidualAdapter();
     testV35Curved3dMeshesAndEffectBundleParser();
     testCodeReviewRegressionGuards();
+    testV36MulticlassParsingParticlesAndBundleGestureTriggers();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

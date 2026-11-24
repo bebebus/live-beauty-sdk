@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.0] - 2026-11-24
+
+### Added
+- **6-Class Neural Multiclass Face/Body/Accessory Parsing (`FaceParsingMapper::mapMulticlass6LogitsNhwc`, `LiveBeautyEngine::submitMulticlass6Logits`)**:
+  - Added numerically stable 6-way softmax probability mapping for MediaPipe `selfie_multiclass_256x256` NHWC float logits (`background`, `hair`, `body_skin`, `face_skin`, `clothes`, `accessories/hands`) with `α=0.72` temporal EMA, simultaneously feeding `128x128` anti-aliased makeup occlusion, hair protection, and fallback person segmentation masks.
+- **Interactive 2D SDF Gesture Particle System & Gesture-Reactive `.lbfx` Bundles (`ParticleBurstSolver`, `ShaderId::kParticleBurst`, `LiveBeautyEngine::triggerGesture`)**:
+  - Added zero-texture GPU-batched analytical SDF particle bursts (`heart`, `5-point star`, `diamond`, `4-ray sparkle`) driven by `heart`, `thumbs_up`, `victory`, and `open_palm` hand gestures (`<= 64` quads in 1 indexed draw call), plus `.lbfx` schema v2 gesture triggers (`gesture_heart`, `gesture_thumbs_up`, `gesture_victory`, `gesture_palm`).
+- **Studio YCbCr Chroma Key, Hand-Waist Shield & Melanin Hair Dye Upgrade (`ShaderId::kChromaKey`, `ShaderId::kBodyWarp`, `ShaderId::kHairDye`)**:
+  - Added green/blue screen YCbCr Chroma Key (`BackgroundMode::kChromaKey`) with luminance-preserving color spill suppression and 5-tap virtual background Light Wrap (`nativeSetChromaKey`).
+  - Added dual-hand normalized palm shield (`setHandShieldCoords` / `nativeSetHandShield`) in `kBodyWarp` to prevent waist-slimming lateral pull from bending fingers/hands near the waist.
+  - Upgraded `kHairDye` with melanin S-curve bleach lift on dark hair, 2-tap lateral micro-strand detail preservation, and dual-lobe (`R` + `TRT`) Kajiya-Kay Angel-Ring specular sheen.
+
 ## [3.5.2] - 2026-11-24
 
 ### Fixed

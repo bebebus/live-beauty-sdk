@@ -43,6 +43,7 @@ bool BeautyConfig::isProcessing() const {
            backgroundBlur > 0.0f ||
            backgroundMode == BackgroundMode::kVirtualImage ||
            backgroundMode == BackgroundMode::kVirtualBlur ||
+           backgroundMode == BackgroundMode::kChromaKey ||
            !lutUrl.empty() ||
            hasFaceReshape() || hasBodyReshape() || hasRetouch() || hasMakeup();
 }
@@ -208,7 +209,13 @@ BackgroundMode parseBackgroundMode(const std::string& s) {
     if (s == "blur") return BackgroundMode::kBlur;
     if (s == "virtual_image" || s == "image") return BackgroundMode::kVirtualImage;
     if (s == "virtual_blur" || s == "blur_image") return BackgroundMode::kVirtualBlur;
+    if (s == "chroma_key" || s == "green_screen") return BackgroundMode::kChromaKey;
     return BackgroundMode::kNone;
+}
+
+ChromaKeyColor parseChromaKeyColor(const std::string& s) {
+    if (s == "blue" || s == "blue_screen") return ChromaKeyColor::kBlue;
+    return ChromaKeyColor::kGreen;
 }
 
 math::RelightStyle parseRelightStyle(const std::string& s) {
