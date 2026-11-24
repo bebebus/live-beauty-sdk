@@ -88,6 +88,9 @@ class LiveBeautyConfig {
     this.contactLens = 0.0,
     this.contactLensStyle = 'hazel',
     this.catchlight = 0.0,
+    this.hairDye = 0.0,
+    this.hairDyeColor = 'milk_tea_brown',
+    this.hairShine = 0.0,
   });
 
   final bool enabled;
@@ -160,6 +163,9 @@ class LiveBeautyConfig {
   final double contactLens;
   final String contactLensStyle;
   final double catchlight;
+  final double hairDye;
+  final String hairDyeColor;
+  final double hairShine;
 
   /// Official live demo & on-device experience testbed powered by this SDK.
   static const String demoSiteUrl = 'https://dh.video';
@@ -225,6 +231,15 @@ class LiveBeautyConfig {
     'chocolate',
     'mist_grey',
     'sakura_pink',
+  };
+
+  static const Set<String> hairDyeColors = <String>{
+    'milk_tea_brown',
+    'haze_blue',
+    'ash_purple',
+    'rose_gold',
+    'cool_black',
+    'caramel_copper',
   };
 
   /// Builds an `asset://luts/<id>.png` URI for a bundled 3D LUT.
@@ -470,6 +485,8 @@ class LiveBeautyConfig {
     unit('highlight', highlight);
     unit('contactLens', contactLens);
     unit('catchlight', catchlight);
+    unit('hairDye', hairDye);
+    unit('hairShine', hairShine);
 
     if (!isValidLutUrl(lutUrl)) {
       throw ArgumentError.value(lutUrl, 'lutUrl', 'Invalid LUT URL');
@@ -482,6 +499,7 @@ class LiveBeautyConfig {
     allow('eyebrowColor', eyebrowColor, eyebrowColors);
     allow('eyeshadowColor', eyeshadowColor, eyeshadowColors);
     allow('contactLensStyle', contactLensStyle, contactLensStyles);
+    allow('hairDyeColor', hairDyeColor, hairDyeColors);
   }
 
   Map<String, Object> toMap() {
@@ -544,6 +562,9 @@ class LiveBeautyConfig {
       'contactLens': contactLens,
       'contactLensStyle': contactLensStyle,
       'catchlight': catchlight,
+      'hairDye': hairDye,
+      'hairDyeColor': hairDyeColor,
+      'hairShine': hairShine,
     };
   }
 
@@ -640,6 +661,9 @@ class LiveBeautyConfig {
       contactLens: numOr('contactLens', 0.0),
       contactLensStyle: strOr('contactLensStyle', 'hazel'),
       catchlight: numOr('catchlight', 0.0),
+      hairDye: numOr('hairDye', 0.0),
+      hairDyeColor: strOr('hairDyeColor', 'milk_tea_brown'),
+      hairShine: numOr('hairShine', 0.0),
     );
     parsed.validate();
     return parsed;
@@ -704,6 +728,9 @@ class LiveBeautyConfig {
     double? contactLens,
     String? contactLensStyle,
     double? catchlight,
+    double? hairDye,
+    String? hairDyeColor,
+    double? hairShine,
   }) {
     return LiveBeautyConfig(
       enabled: enabled ?? this.enabled,
@@ -764,6 +791,9 @@ class LiveBeautyConfig {
       contactLens: contactLens ?? this.contactLens,
       contactLensStyle: contactLensStyle ?? this.contactLensStyle,
       catchlight: catchlight ?? this.catchlight,
+      hairDye: hairDye ?? this.hairDye,
+      hairDyeColor: hairDyeColor ?? this.hairDyeColor,
+      hairShine: hairShine ?? this.hairShine,
     );
   }
 

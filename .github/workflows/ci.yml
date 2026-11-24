@@ -106,8 +106,11 @@ jobs:
           ctest --test-dir /tmp/livebeauty-metal-build --output-on-failure
           clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
             -Icore/include -Icore/src/rhi/metal -Iios/Classes \
+            -c ios/Classes/FLTVisionTracker.mm -o /tmp/flt_vision_tracker.o
+          clang++ -std=c++17 -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
+            -Icore/include -Icore/src/rhi/metal -Iios/Classes \
             -c ios/Classes/FLTLiveBeautyMetalEngine.mm -o /tmp/flt_metal_engine.o
-          rm -f /tmp/flt_metal_engine.o
+          rm -f /tmp/flt_vision_tracker.o /tmp/flt_metal_engine.o
 
       - name: Set up Chrome for WebGL1 GLSL shader gate
         uses: browser-actions/setup-chrome@v2

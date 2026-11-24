@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <vector>
 #include "livebeauty/math/face_mesh_topology.h"
 #include "livebeauty/math/face_relight.h"
 #include "livebeauty/rhi/rhi_types.h"
@@ -18,9 +19,25 @@ enum class Ar3dAnchor : int {
     kChin = 5,           // Beard / neck collar prop
 };
 
+enum class Ar3dMeshPreset : int {
+    kBillboardQuad = 0,   // Perspective-foreshortened 3D quad
+    kCurvedGlasses = 1,   // 3D front frame + left/right ear temples extending along -Z
+    kCurvedTiara = 2,     // Cylindrical 3D crown/headband wrapping around forehead cranium
+};
+
+/** Custom 3D accessory mesh vertex in normalized local half-width space (x,y,z in ~[-1.5..+1.5], u,v in [0..1]). */
+struct Ar3dMeshVertex {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float u = 0.0f;
+    float v = 0.0f;
+};
+
 struct Ar3dAccessoryConfig {
     bool enabled = false;
     Ar3dAnchor anchor = Ar3dAnchor::kHeadCrown;
+    Ar3dMeshPreset meshPreset = Ar3dMeshPreset::kBillboardQuad;
     rhi::TextureId texture = rhi::kInvalidTexture;
     float scale = 1.0f;
     float offsetX = 0.0f;          // In canonical face-width units (+X = subject left)
@@ -34,6 +51,12 @@ struct Ar3dAccessoryConfig {
     float springStiffness = 0.0f;  // 0 = rigid, >0 = damped spring sway (e.g. 18.0 for earrings/ears)
     float springDamping = 4.5f;    // Damping factor (higher = quicker settle)
     bool headOcclusion = true;     // Occlude pixels behind the 3D head depth shell
+
+    // v3.5: Optional custom indexed 3D triangle mesh (overrides meshPreset when non-null & valid)
+    const Ar3dMeshVertex* customVertices = nullptr;
+    int customVertexCount = 0;
+    const uint16_t* customIndices = nullptr;
+    int customIndexCount = 0;
 };
 
 constexpr int kMaxAr3dLayers = 4;
@@ -80,7 +103,18 @@ public:
     static constexpr int kQuadVertices = 4;
     static constexpr int kFloatsPerVertex = 5;  // ndcX, ndcY, u, v, depth01 (larger = closer to camera)
     static constexpr int kQuadFloats = kQuadVertices * kFloatsPerVertex;
+    static constexpr int kMaxMeshVertices = 128;
+    static constexpr int kMaxMeshIndices = 384;
+    static constexpr int kMaxMeshFloats = kMaxMeshVertices * kFloatsPerVertex;
     static constexpr int kHeadShellFloats = FaceMeshTopology::kFaceVertexCount * kFloatsPerVertex;
+
+    /** Built-in 3D curved glasses mesh (front bridge + 2 perspective side temples receding along -Z). */
+    static void getCurvedGlassesMesh(const Ar3dMeshVertex*& outVerts, int& outVertCount,
+                                     const uint16_t*& outIndices, int& outIndexCount);
+
+    /** Built-in 3D cylindrical crown/tiara mesh wrapping around forehead cranium along -Z arc. */
+    static void getCurvedTiaraMesh(const Ar3dMeshVertex*& outVerts, int& outVertCount,
+                                   const uint16_t*& outIndices, int& outIndexCount);
 
     /** Build 468-vertex 3D head-occluder shell (depth normalized to [0..1], higher = closer to camera). */
     static void buildHeadDepthShell(
@@ -99,6 +133,24 @@ public:
         float aspect,
         const SpringPendulum* spring,
         float* outQuad20,
+        float& outAnchorX,
+        float& outAnchorY);
+
+    /**
+     * v3.5: Project an arbitrary indexed 3D mesh (custom or preset) into `kAr3dPos2Uv2Z1` vertex stream.
+     * Writes `outVertCount * 5` floats into `outVertices` and sets `outIndices` / `outIndexCount`.
+     */
+    static bool buildAccessoryMesh(
+        const Ar3dAccessoryConfig& cfg,
+        const float* landmarks478x2,
+        const HeadPose3D& pose,
+        float aspect,
+        const SpringPendulum* spring,
+        float* outVertices,
+        int maxVertices,
+        int& outVertCount,
+        const uint16_t*& outIndices,
+        int& outIndexCount,
         float& outAnchorX,
         float& outAnchorY);
 };

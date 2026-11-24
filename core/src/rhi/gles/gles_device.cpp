@@ -175,6 +175,55 @@ void main() {
 }
 
 RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureFormat format) {
+    if (format == TextureFormat::kRgba16f) {
+        // Clear any prior GL error before probing half-float color-renderable FBO support.
+        while (glGetError() != GL_NO_ERROR) {}
+        GLuint glTex = 0;
+        glGenTextures(1, &glTex);
+        glBindTexture(GL_TEXTURE_2D, glTex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        GLuint fbo = 0;
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+        // 1. Try GLES 3.0 sized GL_RGBA16F (0x881A) + GL_HALF_FLOAT (0x140B)
+        constexpr GLint kGlRgba16f = 0x881A;
+        constexpr GLenum kGlHalfFloat = 0x140B;
+        glTexImage2D(GL_TEXTURE_2D, 0, kGlRgba16f, width, height, 0, GL_RGBA, kGlHalfFloat, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
+        bool ok = (glGetError() == GL_NO_ERROR) &&
+                  (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
+        // 2. Try GLES 2.0 OES_texture_half_float_linear + EXT_color_buffer_half_float (0x8D61)
+        if (!ok) {
+            while (glGetError() != GL_NO_ERROR) {}
+            constexpr GLenum kGlHalfFloatOes = 0x8D61;
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, kGlHalfFloatOes, nullptr);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
+            ok = (glGetError() == GL_NO_ERROR) &&
+                 (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        }
+
+        // 3. Graceful fallback to RGBA8 if driver lacks renderable FP16 FBO support
+        if (!ok) {
+            while (glGetError() != GL_NO_ERROR) {}
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
+        }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        const TextureId texId = nextId_++;
+        textures_[texId] = TexRecord{glTex, false};
+        const RenderTargetId rtId = nextId_++;
+        rts_[rtId] = RtRecord{fbo, texId, width, height};
+        return rtId;
+    }
+
     const TextureId texId = createTexture2D(width, height, format, nullptr);
     GLuint fbo = 0;
     glGenFramebuffers(1, &fbo);

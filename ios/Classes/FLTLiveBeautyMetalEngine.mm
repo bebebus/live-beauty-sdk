@@ -1,4 +1,5 @@
 #import "FLTLiveBeautyMetalEngine.h"
+#import "FLTVisionTracker.h"
 
 #import <CoreGraphics/CoreGraphics.h>
 #include <memory>
@@ -101,6 +102,10 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     c.matteTemporal = dictFloat(d, @"matteTemporal", 0.6f);
     c.blemishRemove = dictFloat(d, @"blemishRemove", 0.0f);
     c.performanceTier = livebeauty::parsePerformanceTier(dictString(d, @"performanceTier", "auto"));
+    c.hairDye = dictFloat(d, @"hairDye", 0.0f);
+    c.hairDyeColor = livebeauty::parseHairDyeColor(dictString(d, @"hairDyeColor", "milk_tea_brown"));
+    c.hairShine = dictFloat(d, @"hairShine", 0.0f);
+    c.preferHalfFloat = dictBool(d, @"preferHalfFloat", true);
     c.maxFaces = static_cast<int>(dictFloat(d, @"maxFaces", 1.0f));
     c.frameDelayFrames = static_cast<int>(dictFloat(d, @"frameDelayFrames", 0.0f));
     return c;
@@ -114,6 +119,7 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     std::unique_ptr<livebeauty::LiveBeautyEngine> _engine;
     livebeauty::rhi::PipelineAssets _assets;
     CVMetalTextureCacheRef _textureCache;
+    FLTVisionTracker* _visionTracker;
 }
 
 - (instancetype)init {
@@ -128,6 +134,7 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
             const int ramMb = static_cast<int>(pi.physicalMemory / (1024ULL * 1024ULL));
             _engine->setHardwareProfile(gpuName ? std::string(gpuName) : std::string("Apple GPU"), cores, ramMb);
             CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, _device->nativeDevice(), nullptr, &_textureCache);
+            _visionTracker = [[FLTVisionTracker alloc] init];
         }
     }
     return self;
@@ -206,9 +213,140 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     if (_engine) _engine->submitFaceMiss(sampleTsMs);
 }
 
+- (BOOL)submitBodyPose:(const float*)poseXyv99
+            pointCount:(int)pointCount
+                 width:(int)width
+                height:(int)height
+            sampleTsMs:(int64_t)sampleTsMs {
+    if (!self.isReady || !poseXyv99 || pointCount < 33) return NO;
+    livebeauty::math::PoseLandmark landmarks[33];
+    for (int i = 0; i < 33; ++i) {
+        landmarks[i].x = poseXyv99[i * 3 + 0];
+        landmarks[i].y = poseXyv99[i * 3 + 1];
+        landmarks[i].visibility = poseXyv99[i * 3 + 2];
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _engine->submitBodyPose(sampleTsMs, landmarks, 33, width, height) ? YES : NO;
+}
+
+- (void)submitBodyMissAtMs:(int64_t)sampleTsMs {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_engine) _engine->submitBodyMiss(sampleTsMs);
+}
+
+- (void)submitFaceBlendshapesWithSmile:(float)smile
+                               jawOpen:(float)jawOpen
+                                browUp:(float)browUp
+                                 blink:(float)blink
+                             cheekPuff:(float)cheekPuff
+                             tongueOut:(float)tongueOut {
+    if (!self.isReady) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    livebeauty::math::BlendshapeInput bs{smile, jawOpen, browUp, blink, cheekPuff, tongueOut};
+    _engine->submitFaceBlendshapes(bs);
+}
+
+- (BOOL)submitAuxRgbaSample:(const uint8_t*)rgbaTopDown
+                      width:(int)width
+                     height:(int)height
+            retouchStrength:(float)retouchStrength {
+    if (!self.isReady || !rgbaTopDown || width <= 0 || height <= 0) return NO;
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _engine->submitAuxRgbaSample(rgbaTopDown, width, height, retouchStrength) ? YES : NO;
+}
+
+- (BOOL)setVirtualBackgroundImage:(nullable CGImageRef)image
+                             mode:(NSString*)mode
+                         strength:(float)strength {
+    if (!self.isReady) return NO;
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_assets.virtualBgTex != livebeauty::rhi::kInvalidTexture) {
+        _device->destroyTexture(_assets.virtualBgTex);
+        _assets.virtualBgTex = livebeauty::rhi::kInvalidTexture;
+        _assets.virtualBgAspect = 0.0f;
+    }
+    if (image != nullptr) {
+        const size_t w = CGImageGetWidth(image);
+        const size_t h = CGImageGetHeight(image);
+        if (w == 0 || h == 0) return NO;
+        std::vector<uint8_t> rgba(w * h * 4, 0);
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(
+            rgba.data(), w, h, 8, w * 4, cs,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(cs);
+        if (!ctx) return NO;
+        CGContextDrawImage(ctx, CGRectMake(0, 0, static_cast<CGFloat>(w), static_cast<CGFloat>(h)), image);
+        CGContextRelease(ctx);
+        _assets.virtualBgTex = _device->createTexture2D(
+            static_cast<int>(w), static_cast<int>(h),
+            livebeauty::rhi::TextureFormat::kRgba8, rgba.data());
+        _assets.virtualBgAspect = static_cast<float>(w) / static_cast<float>(h);
+    }
+    _engine->setAssets(_assets);
+    auto cfg = _engine->config();
+    cfg.backgroundMode = livebeauty::parseBackgroundMode(mode ? std::string(mode.UTF8String) : std::string("none"));
+    cfg.virtualBgStrength = livebeauty::detail::clampf(strength, 0.0f, 1.0f);
+    _engine->setConfig(cfg);
+    return YES;
+}
+
+- (void)submitVisionPixelBuffer:(CVPixelBufferRef)pixelBuffer
+               frameTimestampMs:(int64_t)frameTsMs {
+    if (!self.isReady || !pixelBuffer || !_visionTracker) return;
+    BOOL wantSeg = NO;
+    BOOL wantPose = NO;
+    BOOL wantAux = NO;
+    float retouchStr = 0.0f;
+    int quality = 1;
+    const int pbW = static_cast<int>(CVPixelBufferGetWidth(pixelBuffer));
+    const int pbH = static_cast<int>(CVPixelBufferGetHeight(pixelBuffer));
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const auto& cfg = _engine->config();
+        if (!cfg.enabled || cfg.compareOriginal) return;
+        const bool wantVbg = (_assets.virtualBgTex != livebeauty::rhi::kInvalidTexture &&
+                              (cfg.backgroundMode == livebeauty::BackgroundMode::kVirtualImage ||
+                               cfg.backgroundMode == livebeauty::BackgroundMode::kVirtualBlur) &&
+                              cfg.virtualBgStrength > 1e-4f);
+        wantSeg = (cfg.backgroundBlur > 1e-4f || wantVbg) ? YES : NO;
+        wantPose = cfg.hasBodyReshape() ? YES : NO;
+        wantAux = (_engine->facePresence() > 0.05f) ? YES : NO;
+        retouchStr = livebeauty::detail::clampf(
+            cfg.smoothing * 0.42f + cfg.blemishRemove * 0.52f + cfg.oilControl * 0.30f, 0.0f, 0.72f);
+        quality = (_engine->stats().resolvedTier <= 0 || _engine->loadLevel() >= 1) ? 0 : 1;
+    }
+    _visionTracker.qualityLevel = quality;
+
+    FLTLiveBeautyMetalEngine* __weak weakSelf = self;
+    [_visionTracker submitPixelBuffer:pixelBuffer
+                      sampleTimestamp:frameTsMs
+                     wantSegmentation:wantSeg
+                         wantBodyPose:wantPose
+                          wantFaceAux:wantAux
+                      onAuxRgbaSample:^(const uint8_t* rgba, int w, int h) {
+        [weakSelf submitAuxRgbaSample:rgba width:w height:h retouchStrength:retouchStr];
+    }];
+
+    float poseXyv[33 * 3];
+    int64_t poseTs = -1;
+    if ([_visionTracker pollLatestBodyPose:poseXyv sampleTimestamp:&poseTs]) {
+        [self submitBodyPose:poseXyv pointCount:33 width:pbW height:pbH sampleTsMs:poseTs];
+    }
+}
+
+- (BOOL)applyEffectBundleJson:(NSString*)manifestJson {
+    if (!self.isReady || !manifestJson) return NO;
+    const char* utf8 = [manifestJson UTF8String];
+    if (!utf8) return NO;
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _engine->applyEffectBundleJson(std::string(utf8), nullptr, nullptr) ? YES : NO;
+}
+
 - (void)resetTracking {
     std::lock_guard<std::mutex> lock(_mutex);
     if (_engine) _engine->resetTracking();
+    [_visionTracker reset];
 }
 
 - (void)setAmbientR:(float)r g:(float)g b:(float)b {
@@ -298,14 +436,30 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
 - (nullable id<MTLTexture>)processTexture:(id<MTLTexture>)inputTexture
                          frameTimestampMs:(int64_t)frameTsMs
                                     nowMs:(int64_t)nowMs {
-    return [self processTexture:inputTexture
-               frameTimestampMs:frameTsMs
-                          nowMs:nowMs
-                     personMask:nil
-                       hairMask:nil
-                hairMaskStampMs:livebeauty::kTimeInvalid
-                      lightLuma:0.30f
-                   bitrateRatio:1.0f];
+    // Automatically attach latest Vision ANE R8 person matte if available
+    CVPixelBufferRef maskPb = [_visionTracker copyLatestPersonMaskBuffer:nullptr];
+    CVMetalTextureRef maskCvTex = nullptr;
+    id<MTLTexture> autoMaskTex = nil;
+    if (maskPb && _textureCache) {
+        const size_t mw = CVPixelBufferGetWidth(maskPb);
+        const size_t mh = CVPixelBufferGetHeight(maskPb);
+        if (CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, _textureCache, maskPb, nullptr,
+                MTLPixelFormatR8Unorm, mw, mh, 0, &maskCvTex) == kCVReturnSuccess && maskCvTex) {
+            autoMaskTex = CVMetalTextureGetTexture(maskCvTex);
+        }
+    }
+    id<MTLTexture> out = [self processTexture:inputTexture
+                             frameTimestampMs:frameTsMs
+                                        nowMs:nowMs
+                                   personMask:autoMaskTex
+                                     hairMask:nil
+                              hairMaskStampMs:livebeauty::kTimeInvalid
+                                    lightLuma:0.30f
+                                 bitrateRatio:1.0f];
+    if (maskCvTex) CFRelease(maskCvTex);
+    if (maskPb) CFRelease(maskPb);
+    return out;
 }
 
 - (nullable id<MTLTexture>)processTexture:(id<MTLTexture>)inputTexture
@@ -344,6 +498,7 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
         MTLPixelFormatBGRA8Unorm, w, h, 0, &cvTex);
     if (rc != kCVReturnSuccess || !cvTex) return nullptr;
 
+    [self submitVisionPixelBuffer:pixelBuffer frameTimestampMs:frameTsMs];
     id<MTLTexture> inMtl = CVMetalTextureGetTexture(cvTex);
     id<MTLTexture> outMtl = [self processTexture:inMtl frameTimestampMs:frameTsMs nowMs:nowMs];
     CFRelease(cvTex);

@@ -67,6 +67,15 @@ enum class ContactLensStyle : int {
     kSakuraPink = 3,
 };
 
+enum class HairDyeColor : int {
+    kMilkTeaBrown = 0,
+    kHazeBlue = 1,
+    kAshPurple = 2,
+    kRoseGold = 3,
+    kCoolBlack = 4,
+    kCaramelCopper = 5,
+};
+
 enum class BackgroundMode : int {
     kNone = 0,          // Follow backgroundBlur (>0 => bokeh blur)
     kBlur = 1,          // Portrait bokeh blur
@@ -160,6 +169,12 @@ struct BeautyConfig {
     ContactLensStyle contactLensStyle = ContactLensStyle::kHazel;
     float catchlight = 0.0f;
 
+    // v3.4: Real-time strand-preserving hair dyeing, crown Angel-Ring sheen & RGBA16F intermediate pipeline
+    float hairDye = 0.0f;
+    HairDyeColor hairDyeColor = HairDyeColor::kMilkTeaBrown;
+    float hairShine = 0.0f;
+    bool preferHalfFloat = true;
+
     bool hasFaceReshape() const;
     bool hasBodyReshape() const;
     bool hasRetouch() const;
@@ -183,6 +198,7 @@ EyebrowStyle parseEyebrowStyle(const std::string& s);
 EyebrowColor parseEyebrowColor(const std::string& s);
 EyeshadowColor parseEyeshadowColor(const std::string& s);
 ContactLensStyle parseContactLensStyle(const std::string& s);
+HairDyeColor parseHairDyeColor(const std::string& s);
 BackgroundMode parseBackgroundMode(const std::string& s);
 math::RelightStyle parseRelightStyle(const std::string& s);
 math::PerformanceTier parsePerformanceTier(const std::string& s);

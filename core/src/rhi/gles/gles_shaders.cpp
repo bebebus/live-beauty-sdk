@@ -416,7 +416,9 @@ void main() {
     result = clamp(result + vec3(lipDetail * mix(1.15, 0.75, isGlossy)), 0.0, 1.0);
     if (isGlossy > 0.5) {
         float lumaDrive = smoothstep(0.22, 0.56, baseY);
-        float centerBelly = 1.0 - smoothstep(0.015, 0.090, abs(vMakeupUv.x - 0.5));
+        float yawShift = clamp(uU1.w * 0.18, -0.14, 0.14);
+        float centerBelly = 1.0 - smoothstep(0.015, 0.090, abs(vMakeupUv.x - (0.5 + yawShift)));
+        float fresnelRim = clamp(abs(uU1.w) * 0.22, 0.0, 0.14) * smoothstep(0.03, 0.14, abs(vMakeupUv.x - 0.5));
         float ridgeMask = clamp(0.88 + lipDetail * 5.2, 0.20, 1.45);
         float dyLo = (vMakeupUv.y - 0.714) * 145.0;
         float dyHi = (vMakeupUv.y - 0.673) * 165.0;
@@ -424,7 +426,7 @@ void main() {
         float upperBand = exp(-(dyHi * dyHi)) * 0.44;
         float microGlint = smoothstep(0.014, 0.048, lipDetail) * centerBelly * 0.26;
         float naturalHot = smoothstep(0.76, 0.94, baseY) * 0.26;
-        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.82 + microGlint + naturalHot) * ridgeMask * effFeather, 0.0, 0.74);
+        float spec = clamp(((lowerBand + upperBand) * (centerBelly + fresnelRim) * lumaDrive * 0.82 + microGlint + naturalHot) * ridgeMask * effFeather, 0.0, 0.74);
         vec3 specCol = clamp(vec3(1.0, 0.99, 0.97) * mix(vec3(1.0), amb, 0.35), 0.0, 1.0);
         result = clamp(result + (specCol - result) * (spec * 0.56), 0.0, 1.0);
     } else {
@@ -462,8 +464,9 @@ void main() {
     vec3 outRgb = mix(base, lensRgb, lensA);
     float clA = 0.0;
     if (uU2.y > 0.0) {
-        vec2 p0 = d - vec2(-0.26, 0.28);
-        vec2 p1 = d - vec2(0.22, -0.18);
+        vec2 parallax = vec2(clamp(uU1.w * 0.18, -0.12, 0.12), 0.0);
+        vec2 p0 = d - (vec2(-0.26, 0.28) + parallax);
+        vec2 p1 = d - (vec2(0.22, -0.18) + parallax * 0.65);
         float spot = exp(-dot(p0, p0) * 32.0) + 0.45 * exp(-dot(p1, p1) * 58.0);
         clA = clamp(spot * uU2.y * blink, 0.0, 0.92);
         outRgb = mix(outRgb, vec3(1.0, 0.99, 0.97), clA);
@@ -1065,6 +1068,75 @@ void main() {
 }
 )";
 
+// v3.4: Real-time strand-preserving salon hair dyeing & anisotropic crown Angel-Ring sheen
+// uTex0=currentRgb, uTex1=hairMaskTex(top-down), uTex2=rtSkinMask_
+// uU0=(a00, a01, a02, hairDye), uU1=(a10, a11, a12, hairShine)
+// uU2=(dyeR, dyeG, dyeB, hasFacePoly), uU3=(crownCx, crownCy, crownRx, crownRy), uU4=(axisUx, axisUy, aspect, signedYaw)
+constexpr const char* kHairDyeFrag = LB_GLSL_PREC R"(
+varying vec2 vTextureCoord;
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform vec4 uU0;
+uniform vec4 uU1;
+uniform vec4 uU2;
+uniform vec4 uU3;
+uniform vec4 uU4;
+float lumaHair(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 fitHairGamut(vec3 c, float y) {
+    float hi = max(max(c.r, c.g), c.b);
+    float lo = min(min(c.r, c.g), c.b);
+    float s = 1.0;
+    if (hi > 1.0) s = min(s, (1.0 - y) / max(hi - y, 0.0001));
+    if (lo < 0.0) s = min(s, y / max(y - lo, 0.0001));
+    return vec3(y) + (c - vec3(y)) * s;
+}
+void main() {
+    vec2 uv = vTextureCoord;
+    vec4 orig = texture2D(uTex0, uv);
+    vec2 muv = vec2(uU0.x * uv.x + uU0.y * uv.y + uU0.z,
+                    uU1.x * uv.x + uU1.y * uv.y + uU1.z);
+    float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
+    float rawHair = texture2D(uTex1, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
+    float hairMask = smoothstep(0.28, 0.72, rawHair);
+    if (uU2.w > 0.5) {
+        vec4 sem = texture2D(uTex2, uv);
+        float bareFace = clamp(sem.r * clamp(sem.a * 1.04 - 0.02, 0.0, 1.0) * 0.85 + sem.g, 0.0, 1.0);
+        hairMask *= (1.0 - smoothstep(0.45, 0.85, bareFace));
+    }
+    if (hairMask <= 0.002) {
+        gl_FragColor = orig;
+        return;
+    }
+    vec3 color = orig.rgb;
+    if (uU0.w > 0.001) {
+        float y = lumaHair(color);
+        float strandLift = smoothstep(0.015, 0.12, y);
+        float dyeY = max(lumaHair(uU2.rgb), 0.08);
+        float liftedY = clamp(mix(y, clamp(y * (0.65 + dyeY * 1.35) + dyeY * 0.36 * strandLift, 0.0, 0.95), 0.78), 0.0, 0.96);
+        vec3 tinted = fitHairGamut(clamp(uU2.rgb * (liftedY / dyeY), 0.0, 1.25), liftedY);
+        color = mix(color, clamp(tinted, 0.0, 1.0), clamp(hairMask * uU0.w * (0.35 + 0.65 * strandLift), 0.0, 0.92));
+    }
+    if (uU1.w > 0.001) {
+        vec2 axisU = uU4.xy;
+        vec2 axisV = vec2(-axisU.y, axisU.x);
+        vec2 d = vec2(uv.x - uU3.x, (uv.y - uU3.y) / max(uU4.z, 0.001));
+        float su = dot(d, axisU) / max(uU3.z, 0.04);
+        float sv = dot(d, axisV) / max(uU3.w, 0.04);
+        float arcDist = (sv + 0.18 * su * su) * 4.2;
+        float ringBand = exp(-(arcDist * arcDist)) * (1.0 - smoothstep(0.65, 1.35, abs(su)));
+        float yawPeak = clamp(-uU4.w * 0.45, -0.35, 0.35);
+        float du = su - yawPeak;
+        float viewLobe = 0.65 + 0.35 * exp(-(du * du) * 2.5);
+        float strandCatch = smoothstep(0.04, 0.32, lumaHair(color)) * (0.55 + 0.45 * smoothstep(0.10, 0.45, orig.r));
+        float sheen = clamp(ringBand * viewLobe * strandCatch * hairMask * uU1.w * 0.52, 0.0, 0.45);
+        vec3 sheenCol = mix(vec3(1.0, 0.99, 0.97), clamp(uU2.rgb * 1.35 + vec3(0.25), 0.0, 1.0), clamp(uU0.w * 0.45, 0.0, 0.45));
+        color = clamp(color + (sheenCol - color) * sheen, 0.0, 1.0);
+    }
+    gl_FragColor = vec4(color, orig.a);
+}
+)";
+
 }  // namespace
 
 ShaderSourcePair getShaderSources(ShaderId id) {
@@ -1099,6 +1171,7 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kAiResidualBlend: return {kQuadVert, kAiResidualBlendFrag};
         case ShaderId::kHeadDepthShell:  return {kAr3dVert, kHeadDepthShellFrag};
         case ShaderId::kAr3dMesh:        return {kAr3dVert, kAr3dMeshFrag};
+        case ShaderId::kHairDye:         return {kQuadVert, kHairDyeFrag};
         case ShaderId::kPassThrough:
         default:                         return {kQuadVert, kPassThroughFrag};
     }

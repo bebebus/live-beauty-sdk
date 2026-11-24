@@ -66,6 +66,44 @@ NS_ASSUME_NONNULL_BEGIN
                  receivedMs:(int64_t)receivedMs;
 
 - (void)submitFaceMissAtMs:(int64_t)sampleTsMs;
+
+/** v3.2: Submit 33-point top-down body pose (`33 * 3` floats: x, y, visibility). */
+- (BOOL)submitBodyPose:(const float *)poseXyv99
+            pointCount:(int)pointCount
+                 width:(int)width
+                height:(int)height
+            sampleTsMs:(int64_t)sampleTsMs;
+- (void)submitBodyMissAtMs:(int64_t)sampleTsMs;
+
+/** v3.2: Submit distilled Face Blendshapes for reactive 3D AR / sticker animation. */
+- (void)submitFaceBlendshapesWithSmile:(float)smile
+                               jawOpen:(float)jawOpen
+                                browUp:(float)browUp
+                                 blink:(float)blink
+                             cheekPuff:(float)cheekPuff
+                             tongueOut:(float)tongueOut;
+
+/** v3.2: Submit top-down RGBA sample for built-in C++17 + ARM NEON occlusion & Face-ROI skin residual. */
+- (BOOL)submitAuxRgbaSample:(const uint8_t *)rgbaTopDown
+                      width:(int)width
+                     height:(int)height
+            retouchStrength:(float)retouchStrength;
+
+/** v3.2: Configure virtual background CGImage (`mode`: @"none" / @"blur" / @"virtual_image" / @"virtual_blur"). */
+- (BOOL)setVirtualBackgroundImage:(nullable CGImageRef)image
+                             mode:(NSString *)mode
+                         strength:(float)strength;
+
+/**
+ * v3.2: Drive built-in asynchronous Apple Vision ANE tracker (`VNGeneratePersonSegmentationRequest` +
+ * `VNDetectHumanBodyPoseRequest` + C++17 NEON face aux) directly from a camera `CVPixelBufferRef`.
+ */
+- (void)submitVisionPixelBuffer:(CVPixelBufferRef)pixelBuffer
+               frameTimestampMs:(int64_t)frameTsMs;
+
+/** v3.5: Parse and apply a declarative `.lbfx` Effect Bundle JSON manifest. */
+- (BOOL)applyEffectBundleJson:(NSString *)manifestJson;
+
 - (void)resetTracking;
 
 /** Query live C++17 performance telemetry & resolved hardware tier. */

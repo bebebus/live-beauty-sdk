@@ -5,7 +5,8 @@
 
 namespace livebeauty {
 
-LiveBeautyEngine::LiveBeautyEngine(rhi::IRhiDevice& device) : pipeline_(device) {}
+LiveBeautyEngine::LiveBeautyEngine(rhi::IRhiDevice& device)
+    : device_(device), pipeline_(device) {}
 
 void LiveBeautyEngine::setConfig(const BeautyConfig& config) {
     config_ = config;
@@ -20,11 +21,46 @@ void LiveBeautyEngine::resetTracking() {
     pipeline_.resetTemporal();
     hasPendingBody_ = false;
     pendingBodyTs_ = kTimeInvalid;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        occlusionSolver_.reset();
+        faceParsingMapper_.reset();
+        expressionBus_.reset();
+        hasLatestFaceBounds_ = false;
+        stagedOccDirty_ = false;
+        stagedParseHairDirty_ = false;
+        stagedParseHairTsMs_ = kTimeInvalid;
+        stagedResidualDirty_ = false;
+        stagedResidualActive_ = false;
+    }
+    autoResidualStrength_ = 0.0f;
+    autoParseHairTsMs_ = kTimeInvalid;
 }
 
-void LiveBeautyEngine::setSticker(int slot, const math::StickerLayerConfig& layer) {
+void LiveBeautyEngine::releaseGpuResources() {
+    if (autoOccTex_ != rhi::kInvalidTexture) {
+        device_.destroyTexture(autoOccTex_);
+        autoOccTex_ = rhi::kInvalidTexture;
+        autoOccTexSize_ = 0;
+    }
+    if (autoParseHairTex_ != rhi::kInvalidTexture) {
+        device_.destroyTexture(autoParseHairTex_);
+        autoParseHairTex_ = rhi::kInvalidTexture;
+        autoParseHairTsMs_ = kTimeInvalid;
+    }
+    if (autoResidualTex_ != rhi::kInvalidTexture) {
+        device_.destroyTexture(autoResidualTex_);
+        autoResidualTex_ = rhi::kInvalidTexture;
+    }
+    autoResidualStrength_ = 0.0f;
+    pipeline_.releaseGpuResources();
+}
+
+void LiveBeautyEngine::setSticker(
+    int slot, const math::StickerLayerConfig& layer, bundle::BundleTriggerRule trigger) {
     if (slot < 0 || slot >= math::kMaxStickerLayers) return;
     stickers_[slot] = layer;
+    stickerTriggers_[slot] = trigger;
     int maxActive = 0;
     for (int i = 0; i < math::kMaxStickerLayers; ++i) {
         if (stickers_[i].enabled && stickers_[i].texture != rhi::kInvalidTexture) {
@@ -36,12 +72,15 @@ void LiveBeautyEngine::setSticker(int slot, const math::StickerLayerConfig& laye
 
 void LiveBeautyEngine::clearStickers() {
     for (auto& s : stickers_) s = math::StickerLayerConfig{};
+    stickerTriggers_.fill(bundle::BundleTriggerRule::kAlways);
     stickerCount_ = 0;
 }
 
-void LiveBeautyEngine::setAr3dAccessory(int slot, const math::Ar3dAccessoryConfig& layer) {
+void LiveBeautyEngine::setAr3dAccessory(
+    int slot, const math::Ar3dAccessoryConfig& layer, bundle::BundleTriggerRule trigger) {
     if (slot < 0 || slot >= math::kMaxAr3dLayers) return;
     ar3dAccessories_[slot] = layer;
+    ar3dTriggers_[slot] = trigger;
     int maxActive = 0;
     for (int i = 0; i < math::kMaxAr3dLayers; ++i) {
         if (ar3dAccessories_[i].enabled && ar3dAccessories_[i].texture != rhi::kInvalidTexture) {
@@ -53,7 +92,44 @@ void LiveBeautyEngine::setAr3dAccessory(int slot, const math::Ar3dAccessoryConfi
 
 void LiveBeautyEngine::clearAr3dAccessories() {
     for (auto& a : ar3dAccessories_) a = math::Ar3dAccessoryConfig{};
+    ar3dTriggers_.fill(bundle::BundleTriggerRule::kAlways);
     ar3dCount_ = 0;
+}
+
+bool LiveBeautyEngine::applyEffectBundle(
+    const bundle::EffectBundleManifest& manifest,
+    const bundle::BundleTextureResolver& textureResolver) {
+    if (manifest.hasBeautySection) {
+        setConfig(manifest.beauty);
+    }
+    clearStickers();
+    for (const auto& s : manifest.stickers) {
+        auto layer = s.layer;
+        if (layer.texture == rhi::kInvalidTexture && textureResolver && !s.assetPath.empty()) {
+            layer.texture = textureResolver(s.assetPath);
+        }
+        setSticker(s.slot, layer, s.trigger);
+    }
+    clearAr3dAccessories();
+    for (const auto& a : manifest.ar3d) {
+        auto layer = a.layer;
+        if (layer.texture == rhi::kInvalidTexture && textureResolver && !a.assetPath.empty()) {
+            layer.texture = textureResolver(a.assetPath);
+        }
+        setAr3dAccessory(a.slot, layer, a.trigger);
+    }
+    return true;
+}
+
+bool LiveBeautyEngine::applyEffectBundleJson(
+    const std::string& manifestJson,
+    const bundle::BundleTextureResolver& textureResolver,
+    std::string* outError) {
+    bundle::EffectBundleManifest parsed{};
+    if (!bundle::EffectBundleParser::parseJson(manifestJson, parsed, outError)) {
+        return false;
+    }
+    return applyEffectBundle(parsed, textureResolver);
 }
 
 void LiveBeautyEngine::setHardwareProfile(const std::string& gpuRenderer, int cpuCores, int totalRamMb) {
@@ -78,6 +154,114 @@ void LiveBeautyEngine::setAiResidual(rhi::TextureId residualTex, const CropRect&
     aiResidualStrength_ = detail::clampf(strength, 0.0f, 1.0f);
 }
 
+void LiveBeautyEngine::submitFaceBlendshapes(const math::BlendshapeInput& blendshapes) {
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    expressionBus_.update(&blendshapes);
+}
+
+math::ExpressionReaction LiveBeautyEngine::expressionReaction() const {
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    return expressionBus_.latest();
+}
+
+bool LiveBeautyEngine::submitAuxRgbaSample(
+    const uint8_t* rgbaTopDown,
+    int srcWidth,
+    int srcHeight,
+    float retouchStrength) {
+    if (!rgbaTopDown || srcWidth <= 0 || srcHeight <= 0) return false;
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    if (!hasLatestFaceBounds_) {
+        stagedResidualActive_ = false;
+        stagedResidualDirty_ = true;
+        return false;
+    }
+    const CropRect bounds = latestFaceBounds_;
+    occlusionSolver_.compute(rgbaTopDown, srcWidth, srcHeight, &bounds, stagedOccMask_.data());
+    stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
+    stagedOccDirty_ = true;
+    const float clampedStrength = detail::clampf(retouchStrength, 0.0f, 1.0f);
+    std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> biRes{};
+    std::array<uint8_t, math::NeuralSkinResidualAdapter::kOutPixels * 4> microRes{};
+    if (clampedStrength > 0.02f &&
+        residualSolver_.compute(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, biRes.data()) &&
+        neuralResidualAdapter_.evaluateMicroKernel(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, microRes.data())) {
+        // Combine bilateral chroma de-speckling + multi-scale depthwise-separable structural shadow lift
+        for (size_t i = 0; i < stagedResidualRgba_.size(); i += 4) {
+            for (size_t c = 0; c < 3; ++c) {
+                const int d0 = static_cast<int>(biRes[i + c]) - 128;
+                const int d1 = static_cast<int>(microRes[i + c]) - 128;
+                stagedResidualRgba_[i + c] = static_cast<uint8_t>(std::clamp(128 + d0 + (d1 * 3) / 4, 0, 255));
+            }
+            stagedResidualRgba_[i + 3] = std::max(biRes[i + 3], microRes[i + 3]);
+        }
+        stagedResidualActive_ = true;
+        stagedResidualRect_ = bounds;
+        stagedResidualStrength_ = clampedStrength;
+    } else {
+        stagedResidualActive_ = false;
+        stagedResidualStrength_ = 0.0f;
+    }
+    stagedResidualDirty_ = true;
+    return true;
+}
+
+bool LiveBeautyEngine::submitFaceParsingClassMap(
+    const uint8_t* classIds, int srcWidth, int srcHeight, int64_t sampleTsMs) {
+    if (!classIds || srcWidth <= 0 || srcHeight <= 0) return false;
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    if (!faceParsingMapper_.mapClassIds(
+            classIds, srcWidth, srcHeight, stagedOccMask_.data(), stagedParseHair_.data(), nullptr)) {
+        return false;
+    }
+    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
+    stagedOccDirty_ = true;
+    stagedParseHairDirty_ = true;
+    stagedParseHairTsMs_ = sampleTsMs;
+    return true;
+}
+
+bool LiveBeautyEngine::submitFaceParsingLogits(
+    const float* logitsNchw, int numClasses, int srcWidth, int srcHeight, int64_t sampleTsMs) {
+    if (!logitsNchw || numClasses < 19 || srcWidth <= 0 || srcHeight <= 0) return false;
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    if (!faceParsingMapper_.mapLogitsNchw(
+            logitsNchw, numClasses, srcWidth, srcHeight, stagedOccMask_.data(), stagedParseHair_.data(), nullptr)) {
+        return false;
+    }
+    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
+    stagedOccDirty_ = true;
+    stagedParseHairDirty_ = true;
+    stagedParseHairTsMs_ = sampleTsMs;
+    return true;
+}
+
+bool LiveBeautyEngine::submitNeuralResidualTensor(
+    const float* tensorNchw,
+    int channels,
+    int srcWidth,
+    int srcHeight,
+    const CropRect& roiRect,
+    float strength) {
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    const float clamped = detail::clampf(strength, 0.0f, 1.0f);
+    if (clamped <= 0.01f) {
+        stagedResidualActive_ = false;
+        stagedResidualStrength_ = 0.0f;
+        stagedResidualDirty_ = true;
+        return true;
+    }
+    if (!math::NeuralSkinResidualAdapter::packExternalTensorNchw(
+            tensorNchw, channels, srcWidth, srcHeight, stagedResidualRgba_.data())) {
+        return false;
+    }
+    stagedResidualActive_ = true;
+    stagedResidualRect_ = roiRect;
+    stagedResidualStrength_ = clamped;
+    stagedResidualDirty_ = true;
+    return true;
+}
+
 bool LiveBeautyEngine::submitFaceLandmarks(
     int64_t sampleTsMs, const float* mpXy, int pointCount,
     int frameWidth, int frameHeight, int64_t receivedMs) {
@@ -100,6 +284,18 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
     float cx = 0.0f, cy = 0.0f, fw = 0.0f;
     const int valid = faces_.submitFaces(
         sampleTsMs, faces, cappedCount, frameWidth, frameHeight, receivedMs, &cx, &cy, &fw);
+    if (valid > 0 && faces && faceCount > 0 && faces[0].mpXy != nullptr) {
+        CropRect fb{};
+        if (math::FaceOcclusionSolver::boundsFromLandmarks(faces[0].mpXy, faces[0].pointCount, fb)) {
+            std::lock_guard<std::mutex> lock(auxMutex_);
+            latestFaceBounds_ = fb;
+            hasLatestFaceBounds_ = true;
+        }
+    } else if (valid == 0) {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasLatestFaceBounds_ = false;
+        expressionBus_.update(nullptr);
+    }
     if (valid > 0 && fw > 0.0f && cappedCount == 1) {
         roiSelector_.onFace(cx, cy, fw, sampleTsMs, receivedMs);
     } else if (valid == 0 || cappedCount > 1) {
@@ -112,6 +308,9 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
 void LiveBeautyEngine::submitFaceMiss(int64_t sampleTsMs) {
     faces_.submitAllMiss(sampleTsMs);
     roiSelector_.onMiss();
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    hasLatestFaceBounds_ = false;
+    expressionBus_.update(nullptr);
 }
 
 bool LiveBeautyEngine::submitBodyPose(
@@ -163,8 +362,58 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const math::PerformanceTier resolvedTier = tierCaps.resolvedTier;
     const bool processing = config_.isProcessing() ||
         (config_.enabled && !config_.compareOriginal &&
-         (stickerCount_ > 0 || ar3dCount_ > 0 || (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f)));
+         (stickerCount_ > 0 || ar3dCount_ > 0 ||
+          (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f) ||
+          (autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f)));
     loadFades_.update(governor_.level(), nowMs);
+
+    // Sync staged C++17 + NEON occlusion & residual maps onto GPU RHI textures
+    math::ExpressionReaction exprReaction{};
+    bool faceBoundsAlive = false;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        exprReaction = expressionBus_.latest();
+        faceBoundsAlive = hasLatestFaceBounds_;
+        if (stagedOccDirty_) {
+            stagedOccDirty_ = false;
+            const int occS = stagedOccSize_;
+            if (autoOccTex_ != rhi::kInvalidTexture && autoOccTexSize_ != occS) {
+                device_.destroyTexture(autoOccTex_);
+                autoOccTex_ = rhi::kInvalidTexture;
+            }
+            if (autoOccTex_ == rhi::kInvalidTexture) {
+                autoOccTex_ = device_.createTexture2D(occS, occS, rhi::TextureFormat::kR8, stagedOccMask_.data());
+                autoOccTexSize_ = occS;
+            } else {
+                device_.updateTexture2D(autoOccTex_, occS, occS, rhi::TextureFormat::kR8, stagedOccMask_.data());
+            }
+        }
+        if (stagedParseHairDirty_) {
+            stagedParseHairDirty_ = false;
+            constexpr int kHairS = math::FaceParsingMapper::kOutSize;
+            if (autoParseHairTex_ == rhi::kInvalidTexture) {
+                autoParseHairTex_ = device_.createTexture2D(kHairS, kHairS, rhi::TextureFormat::kR8, stagedParseHair_.data());
+            } else {
+                device_.updateTexture2D(autoParseHairTex_, kHairS, kHairS, rhi::TextureFormat::kR8, stagedParseHair_.data());
+            }
+            autoParseHairTsMs_ = stagedParseHairTsMs_;
+        }
+        if (stagedResidualDirty_) {
+            stagedResidualDirty_ = false;
+            if (stagedResidualActive_) {
+                constexpr int kResS = math::FaceRoiResidualSolver::kRoiSize;
+                if (autoResidualTex_ == rhi::kInvalidTexture) {
+                    autoResidualTex_ = device_.createTexture2D(kResS, kResS, rhi::TextureFormat::kRgba8, stagedResidualRgba_.data());
+                } else {
+                    device_.updateTexture2D(autoResidualTex_, kResS, kResS, rhi::TextureFormat::kRgba8, stagedResidualRgba_.data());
+                }
+                autoResidualRect_ = stagedResidualRect_;
+                autoResidualStrength_ = stagedResidualStrength_;
+            } else {
+                autoResidualStrength_ = 0.0f;
+            }
+        }
+    }
 
     // Optional cross-backend FrameDelayRing (0..4 frames; aligns displayed camera frame with async MediaPipe landmarks)
     rhi::TextureId displayTex = inputTexture;
@@ -201,8 +450,10 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
 
     // Hair semantic temporal gate & rigid head-motion compensation affine (using aligned displayTsMs)
-    const bool hasHairTex = (hairMaskTex != rhi::kInvalidTexture);
-    const int64_t effHairStamp = (hairMaskStampMs != kTimeInvalid) ? hairMaskStampMs : displayTsMs;
+    const rhi::TextureId resolvedHairTex = (hairMaskTex != rhi::kInvalidTexture) ? hairMaskTex : autoParseHairTex_;
+    const int64_t resolvedHairStampArg = (hairMaskTex != rhi::kInvalidTexture) ? hairMaskStampMs : autoParseHairTsMs_;
+    const bool hasHairTex = (resolvedHairTex != rhi::kInvalidTexture);
+    const int64_t effHairStamp = (resolvedHairStampArg != kTimeInvalid) ? resolvedHairStampArg : displayTsMs;
     const float hairLevel = hairGate_.update(
         hasHairTex, effHairStamp, displayTsMs,
         loadFades_.body(), primaryTl.latest(), primaryTl.missSince(), nowMs);
@@ -272,18 +523,55 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.bodyState7 = bodyState;
     in.bodyPresence = bodySmoother_.presence();
     in.personMaskTex = personMaskTex;
-    in.hairMaskTex = hairMaskTex;
-    in.occlusionMaskTex = occlusionMaskTex_;
+    in.hairMaskTex = resolvedHairTex;
+    in.occlusionMaskTex = (occlusionMaskTex_ != rhi::kInvalidTexture)
+        ? occlusionMaskTex_
+        : ((faceBoundsAlive || autoOccTexSize_ == math::FaceParsingMapper::kOutSize) && hasMesh
+               ? autoOccTex_
+               : rhi::kInvalidTexture);
     in.hairShown = hairShown;
     in.hairBgShown = hairBgShown;
     in.hairAffine = hairAffine;
     in.ambientRgb = ambientRgb_;
-    in.aiResidualTex = aiResidualTex_;
-    in.aiResidualRect = aiResidualRect_;
-    in.aiResidualStrength = aiResidualStrength_;
-    in.stickers = stickers_;
+    if (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f) {
+        in.aiResidualTex = aiResidualTex_;
+        in.aiResidualRect = aiResidualRect_;
+        in.aiResidualStrength = aiResidualStrength_;
+    } else if (faceBoundsAlive && hasMesh && autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f) {
+        in.aiResidualTex = autoResidualTex_;
+        in.aiResidualRect = autoResidualRect_;
+        in.aiResidualStrength = autoResidualStrength_;
+    }
+    std::array<math::StickerLayerConfig, math::kMaxStickerLayers> modulatedStickers = stickers_;
+    for (int i = 0; i < stickerCount_; ++i) {
+        if (!modulatedStickers[i].enabled) continue;
+        if (stickerTriggers_[i] != bundle::BundleTriggerRule::kAlways) {
+            const float gain = bundle::EffectBundleParser::evaluateTriggerGain(stickerTriggers_[i], exprReaction);
+            modulatedStickers[i].opacity *= gain;
+            if (modulatedStickers[i].opacity <= 1e-4f) modulatedStickers[i].enabled = false;
+        }
+    }
+    in.stickers = modulatedStickers;
     in.stickerCount = stickerCount_;
-    in.ar3dAccessories = ar3dAccessories_;
+
+    std::array<math::Ar3dAccessoryConfig, math::kMaxAr3dLayers> modulatedAr3d = ar3dAccessories_;
+    for (int i = 0; i < ar3dCount_; ++i) {
+        if (!modulatedAr3d[i].enabled) continue;
+        if (ar3dTriggers_[i] != bundle::BundleTriggerRule::kAlways) {
+            const float gain = bundle::EffectBundleParser::evaluateTriggerGain(ar3dTriggers_[i], exprReaction);
+            modulatedAr3d[i].opacity *= gain;
+            if (modulatedAr3d[i].opacity <= 1e-4f) {
+                modulatedAr3d[i].enabled = false;
+                continue;
+            }
+        }
+        if (expressionReactive_ && exprReaction.trigger != math::ExpressionTrigger::kNone) {
+            modulatedAr3d[i].scale *= exprReaction.scaleMultiplier;
+            modulatedAr3d[i].offsetY += exprReaction.offsetYBoost;
+            modulatedAr3d[i].opacity = detail::clampf(modulatedAr3d[i].opacity * exprReaction.opacityBoost, 0.0f, 1.0f);
+        }
+    }
+    in.ar3dAccessories = modulatedAr3d;
     in.ar3dCount = ar3dCount_;
     in.tierCaps = tierCaps;
     in.loadFadeBody = loadFades_.body();

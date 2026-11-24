@@ -85,6 +85,10 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val blemishRemove: Float = 0f,
     /** P4: 芯片分级调度档位（auto/lite/standard/ultra）。 */
     val performanceTier: String = "auto",
+    /** v3.4: 实时沙龙染发强度（0..1）、发色（milk_tea_brown/haze_blue/ash_purple/rose_gold/cool_black/caramel_copper）与天使光圈柔亮（0..1）。 */
+    val hairDye: Float = 0f,
+    val hairDyeColor: String = "milk_tea_brown",
+    val hairShine: Float = 0f,
 ) {
     /** 任意一项面部与颅顶网格微整处于非零状态。 */
     fun hasFaceReshape(): Boolean =
@@ -110,6 +114,7 @@ data class VideoEffectsConfig @JvmOverloads constructor(
         val CONTACT_LENS_STYLES = setOf("hazel", "chocolate", "mist_grey", "sakura_pink")
         val RELIGHT_STYLES = setOf("natural", "studio_softbox", "butterfly", "rembrandt")
         val PERFORMANCE_TIERS = setOf("auto", "lite", "standard", "ultra")
+        val HAIR_DYE_COLORS = setOf("milk_tea_brown", "haze_blue", "ash_purple", "rose_gold", "cool_black", "caramel_copper")
         val original = VideoEffectsConfig(false, 0f, 0f, "none")
 
         fun isValidLutUrl(url: String): Boolean {
@@ -186,7 +191,10 @@ data class VideoEffectsConfig @JvmOverloads constructor(
                 ambientMakeupBlend = unit("ambientMakeupBlend", 0.5f),
                 matteTemporal = unit("matteTemporal", 0.6f),
                 blemishRemove = unit("blemishRemove", 0f),
-                performanceTier = enumStr("performanceTier", "auto", PERFORMANCE_TIERS))
+                performanceTier = enumStr("performanceTier", "auto", PERFORMANCE_TIERS),
+                hairDye = unit("hairDye", 0f),
+                hairDyeColor = enumStr("hairDyeColor", "milk_tea_brown", HAIR_DYE_COLORS),
+                hairShine = unit("hairShine", 0f))
         }
     }
 }

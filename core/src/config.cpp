@@ -29,7 +29,8 @@ bool BeautyConfig::needsFaceTracking() const {
     if (!enabled || compareOriginal) return false;
     return hasFaceReshape() || hasRetouch() || hasMakeup() ||
            (smoothing > 0.0f && skinOnly) || whiten > 0.0f || rosy > 0.0f ||
-           radiance > 0.0f || relight > 0.0f || blemishRemove > 0.0f;
+           radiance > 0.0f || relight > 0.0f || blemishRemove > 0.0f ||
+           hairDye > 0.0f || hairShine > 0.0f;
 }
 
 bool BeautyConfig::isProcessing() const {
@@ -37,7 +38,8 @@ bool BeautyConfig::isProcessing() const {
     return smoothing > 0.0f || brightness != 0.0f || filter != ColorFilterStyle::kNone ||
            sharpness > 0.0f || std::fabs(saturation - 1.0f) > 1e-4f || whiten > 0.0f ||
            rosy > 0.0f || radiance > 0.0f || relight > 0.0f || oilControl > 0.0f ||
-           blemishRemove > 0.0f || backgroundBlur > 0.0f ||
+           blemishRemove > 0.0f || hairDye > 0.0f || hairShine > 0.0f ||
+           backgroundBlur > 0.0f ||
            backgroundMode == BackgroundMode::kVirtualImage ||
            backgroundMode == BackgroundMode::kVirtualBlur ||
            !lutUrl.empty() ||
@@ -190,6 +192,15 @@ ContactLensStyle parseContactLensStyle(const std::string& s) {
     if (s == "mist_grey") return ContactLensStyle::kMistGrey;
     if (s == "sakura_pink") return ContactLensStyle::kSakuraPink;
     return ContactLensStyle::kHazel;
+}
+
+HairDyeColor parseHairDyeColor(const std::string& s) {
+    if (s == "haze_blue") return HairDyeColor::kHazeBlue;
+    if (s == "ash_purple") return HairDyeColor::kAshPurple;
+    if (s == "rose_gold") return HairDyeColor::kRoseGold;
+    if (s == "cool_black") return HairDyeColor::kCoolBlack;
+    if (s == "caramel_copper") return HairDyeColor::kCaramelCopper;
+    return HairDyeColor::kMilkTeaBrown;
 }
 
 BackgroundMode parseBackgroundMode(const std::string& s) {

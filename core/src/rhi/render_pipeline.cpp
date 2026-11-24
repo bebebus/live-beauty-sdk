@@ -139,6 +139,13 @@ void RenderPipeline::releaseGpuResources() {
     killBuf(vbSticker_);
     killBuf(vbAr3dHead_);
     killBuf(vbAr3dQuad_);
+    killBuf(ibAr3dGlasses_);
+    killBuf(ibAr3dTiara_);
+    for (int i = 0; i < math::kMaxAr3dLayers; ++i) {
+        killBuf(ibAr3dCustom_[i]);
+        ibAr3dCustomPtr_[i] = nullptr;
+        ibAr3dCustomCount_[i] = 0;
+    }
     killBuf(ibFullMesh_);
     killBuf(ibNeckApron_);
     killBuf(ibSkinRetouch_);
@@ -152,6 +159,7 @@ void RenderPipeline::releaseGpuResources() {
 
     staticBuffersReady_ = false;
     width_ = height_ = 0;
+    halfFloatActive_ = false;
     denoiseHistoryValid_ = false;
     matteHistoryValid_ = false;
 }
@@ -170,7 +178,20 @@ void RenderPipeline::ensureStaticBuffers() {
     vbMakeup_ = device_.createDynamicVertexBuffer(sizeof(float) * math::FaceMakeupUv::kVertexDataSize);
     vbSticker_ = device_.createDynamicVertexBuffer(sizeof(float) * math::StickerTransform::kQuadFloats);
     vbAr3dHead_ = device_.createDynamicVertexBuffer(sizeof(float) * math::Ar3dSolver::kHeadShellFloats);
-    vbAr3dQuad_ = device_.createDynamicVertexBuffer(sizeof(float) * math::Ar3dSolver::kQuadFloats);
+    vbAr3dQuad_ = device_.createDynamicVertexBuffer(sizeof(float) * math::Ar3dSolver::kMaxMeshFloats);
+    {
+        const math::Ar3dMeshVertex* gv = nullptr;
+        const uint16_t* gi = nullptr;
+        int gvc = 0, gic = 0;
+        math::Ar3dSolver::getCurvedGlassesMesh(gv, gvc, gi, gic);
+        ibAr3dGlasses_ = device_.createStaticIndexBuffer(gi, static_cast<size_t>(gic));
+
+        const math::Ar3dMeshVertex* tv = nullptr;
+        const uint16_t* ti = nullptr;
+        int tvc = 0, tic = 0;
+        math::Ar3dSolver::getCurvedTiaraMesh(tv, tvc, ti, tic);
+        ibAr3dTiara_ = device_.createStaticIndexBuffer(ti, static_cast<size_t>(tic));
+    }
 
     ibFullMesh_ = device_.createStaticIndexBuffer(
         math::FaceMeshTopology::kFullIndices.data(),
@@ -214,17 +235,19 @@ void RenderPipeline::ensureStaticBuffers() {
     staticBuffersReady_ = true;
 }
 
-void RenderPipeline::ensureResources(int width, int height) {
+void RenderPipeline::ensureResources(int width, int height, bool useHalfFloat) {
     ensureStaticBuffers();
-    if (width == width_ && height == height_) return;
+    if (width == width_ && height == height_ && useHalfFloat == halfFloatActive_) return;
 
-    auto recreate = [&](RenderTargetId& rt, int w, int h) {
+    auto recreateFmt = [&](RenderTargetId& rt, int w, int h, TextureFormat fmt) {
         if (rt != kInvalidRenderTarget) device_.destroyRenderTarget(rt);
-        rt = device_.createRenderTarget(w, h, TextureFormat::kRgba8);
+        rt = device_.createRenderTarget(w, h, fmt);
     };
+    const TextureFormat interFmt = useHalfFloat ? TextureFormat::kRgba16f : TextureFormat::kRgba8;
 
     width_ = width;
     height_ = height;
+    halfFloatActive_ = useHalfFloat;
     guidedW_ = std::max(1, (width + 2) / 3);
     guidedH_ = std::max(1, (height + 2) / 3);
     macroW_ = std::max(1, (guidedW_ + 2) / 3);
@@ -234,22 +257,24 @@ void RenderPipeline::ensureResources(int width, int height) {
     bgW_ = std::max(1, (width + 3) / 4);
     bgH_ = std::max(1, (height + 3) / 4);
 
-    recreate(rtBody_, width_, height_);
-    recreate(rtWarp_, width_, height_);
-    recreate(rtComposite_, width_, height_);
-    recreate(rtMakeup_, width_, height_);
-    recreate(rtDenoise_[0], width_, height_);
-    recreate(rtDenoise_[1], width_, height_);
-    for (int i = 0; i < 3; ++i) recreate(rtGuided_[i], guidedW_, guidedH_);
-    for (int i = 0; i < 2; ++i) recreate(rtMacro_[i], macroW_, macroH_);
-    recreate(rtSkinMask_, skinW_, skinH_);
-    recreate(rtSkinMaskTmp_, skinW_, skinH_);
-    for (int i = 0; i < 2; ++i) recreate(rtBg_[i], bgW_, bgH_);
-    recreate(rtBgHair_, bgW_, bgH_);
-    recreate(rtBgOut_, width_, height_);
-    for (int i = 0; i < 2; ++i) recreate(rtMatte_[i], bgW_, bgH_);
-    for (int i = 0; i < 2; ++i) recreate(rtMatteRgb_[i], bgW_, bgH_);
-    recreate(rtHeadDepth_, skinW_, skinH_);
+    // Promote multi-pass accumulation & dual-band guided filter targets to RGBA16F while keeping
+    // final output targets (rtComposite_, rtMakeup_, rtBgOut_) strictly RGBA8 for host ABI compatibility.
+    recreateFmt(rtBody_, width_, height_, interFmt);
+    recreateFmt(rtWarp_, width_, height_, interFmt);
+    recreateFmt(rtComposite_, width_, height_, TextureFormat::kRgba8);
+    recreateFmt(rtMakeup_, width_, height_, TextureFormat::kRgba8);
+    recreateFmt(rtDenoise_[0], width_, height_, TextureFormat::kRgba8);
+    recreateFmt(rtDenoise_[1], width_, height_, TextureFormat::kRgba8);
+    for (int i = 0; i < 3; ++i) recreateFmt(rtGuided_[i], guidedW_, guidedH_, interFmt);
+    for (int i = 0; i < 2; ++i) recreateFmt(rtMacro_[i], macroW_, macroH_, interFmt);
+    recreateFmt(rtSkinMask_, skinW_, skinH_, TextureFormat::kRgba8);
+    recreateFmt(rtSkinMaskTmp_, skinW_, skinH_, TextureFormat::kRgba8);
+    for (int i = 0; i < 2; ++i) recreateFmt(rtBg_[i], bgW_, bgH_, TextureFormat::kRgba8);
+    recreateFmt(rtBgHair_, bgW_, bgH_, TextureFormat::kRgba8);
+    recreateFmt(rtBgOut_, width_, height_, TextureFormat::kRgba8);
+    for (int i = 0; i < 2; ++i) recreateFmt(rtMatte_[i], bgW_, bgH_, TextureFormat::kRgba8);
+    for (int i = 0; i < 2; ++i) recreateFmt(rtMatteRgb_[i], bgW_, bgH_, TextureFormat::kRgba8);
+    recreateFmt(rtHeadDepth_, skinW_, skinH_, TextureFormat::kRgba8);
     denoiseHistoryValid_ = false;
     matteHistoryValid_ = false;
 }
@@ -660,7 +685,9 @@ void RenderPipeline::renderMakeup(
                       cfg.aegyoSal * 0.62f * eyeGain, {0.0f, 0.0f, 0.0f, 1.0f},
                       {2.0f, 1.0f, 0.0f, 0.0f}, 0.35f, 0.0f);
     }
-    // 6. Physically-based Beer-Lambert Lipstick (120 lip-band triangles only, occlusion-gated & ambient WB)
+    // 6. Physically-based Beer-Lambert Lipstick (120 lip-band triangles only, occlusion-gated, ambient WB & 6-DoF yaw glaze)
+    const float rawSignedYaw = meta15 ? detail::clampf(meta15[math::FaceMeshFrame::kMetaSignedYaw], -1.0f, 1.0f) : 0.0f;
+    const float uvLipYaw = (frontFaceCw ? 1.0f : -1.0f) * rawSignedYaw;
     if (cfg.lipstick > 0.0f && assets_.contourHighlightAtlas != kInvalidTexture) {
         const Vec3 lipRgb = math::FaceMakeupUv::lipstickRgb(cfg.lipstickColor);
         const float lipAlpha = cfg.lipstick * 0.85f * faceGain;
@@ -671,14 +698,14 @@ void RenderPipeline::renderMakeup(
             tb.bind(1, assets_.contourHighlightAtlas);
             tb.bind(2, maskTex);
             ub.push(lipRgb.x, lipRgb.y, lipRgb.z, lipAlpha);
-            ub.push(cfg.lipstickFinish == LipstickFinish::kGlossy ? 1.0f : 0.0f, invW, invH, 0.0f);
+            ub.push(cfg.lipstickFinish == LipstickFinish::kGlossy ? 1.0f : 0.0f, invW, invH, uvLipYaw);
             ub.push(ambientRgb.x, ambientRgb.y, ambientRgb.z, ambW);
             device_.drawIndexed(
                 ShaderId::kMakeupLip, layerState, vbMakeup_, ibLipBand_,
                 0, math::FaceMeshTopology::kLipBandIndexCount, VertexLayout::kMakeupPos2Uv2Uv2, tb, ub);
         }
     }
-    // 7. Contact lens & twin catchlights (14+14 eye opening triangles, blink gated)
+    // 7. Contact lens & corneal parallax catchlights (14+14 eye opening triangles, blink gated)
     if ((cfg.contactLens > 0.0f || cfg.catchlight > 0.0f) && hasIris && assets_.irisAtlas != kInvalidTexture) {
         const float aspect = static_cast<float>(width) / static_cast<float>(height);
         const Vec2 tile = math::FaceMakeupUv::irisTile(cfg.contactLensStyle);
@@ -697,7 +724,7 @@ void RenderPipeline::renderMakeup(
             tb.bind(0, baseTex);
             tb.bind(1, assets_.irisAtlas);
             ub.push(circle[0], circle[1], circle[2], circle[3]);
-            ub.push(tile.x, tile.y, effOpen, 0.0f);
+            ub.push(tile.x, tile.y, effOpen, rawSignedYaw);
             ub.push(lensS, clS, 0.0f, 0.0f);
             device_.drawIndexed(
                 ShaderId::kMakeupIris, layerState, vbMakeup_, eyeIb,
@@ -838,22 +865,48 @@ void RenderPipeline::renderAr3dAccessories(
     RenderState st{};
     st.blendEnable = true;
     const TextureId headDepthTex = device_.textureOf(rtHeadDepth_);
-    float quadVerts[math::Ar3dSolver::kQuadFloats];
     for (int i = 0; i < n; ++i) {
         const auto& layer = in.ar3dAccessories[i];
         if (!layer.enabled || layer.texture == kInvalidTexture || layer.opacity <= 1e-4f) continue;
         float anchorX = 0.5f, anchorY = 0.5f;
-        if (!math::Ar3dSolver::buildAccessoryQuad(
-                layer, landmarks478x2, pose, aspect, nullptr, quadVerts, anchorX, anchorY)) {
+        int vertCount = 0;
+        const uint16_t* meshIdx = nullptr;
+        int idxCount = 0;
+        if (!math::Ar3dSolver::buildAccessoryMesh(
+                layer, landmarks478x2, pose, aspect, nullptr,
+                ar3dMeshVerts_.data(), math::Ar3dSolver::kMaxMeshVertices,
+                vertCount, meshIdx, idxCount, anchorX, anchorY)) {
             continue;
         }
         if (layer.springStiffness > 1e-3f) {
             ar3dSprings_[i].update(
                 anchorX, anchorY, pose.rollRad, layer.springStiffness, layer.springDamping, in.nowMs);
-            math::Ar3dSolver::buildAccessoryQuad(
-                layer, landmarks478x2, pose, aspect, &ar3dSprings_[i], quadVerts, anchorX, anchorY);
+            math::Ar3dSolver::buildAccessoryMesh(
+                layer, landmarks478x2, pose, aspect, &ar3dSprings_[i],
+                ar3dMeshVerts_.data(), math::Ar3dSolver::kMaxMeshVertices,
+                vertCount, meshIdx, idxCount, anchorX, anchorY);
         }
-        device_.updateVertexBuffer(vbAr3dQuad_, quadVerts, sizeof(quadVerts));
+        BufferId activeIb = ibSticker_;
+        if (layer.customVertices != nullptr && layer.customIndices != nullptr &&
+            layer.customVertexCount >= 3 && layer.customIndexCount >= 3) {
+            if (ibAr3dCustom_[i] == kInvalidBuffer ||
+                ibAr3dCustomPtr_[i] != meshIdx ||
+                ibAr3dCustomCount_[i] != idxCount) {
+                if (ibAr3dCustom_[i] != kInvalidBuffer) device_.destroyBuffer(ibAr3dCustom_[i]);
+                ibAr3dCustom_[i] = device_.createStaticIndexBuffer(meshIdx, static_cast<size_t>(idxCount));
+                ibAr3dCustomPtr_[i] = meshIdx;
+                ibAr3dCustomCount_[i] = idxCount;
+            }
+            activeIb = ibAr3dCustom_[i];
+        } else if (layer.meshPreset == math::Ar3dMeshPreset::kCurvedGlasses) {
+            activeIb = ibAr3dGlasses_;
+        } else if (layer.meshPreset == math::Ar3dMeshPreset::kCurvedTiara) {
+            activeIb = ibAr3dTiara_;
+        }
+
+        device_.updateVertexBuffer(
+            vbAr3dQuad_, ar3dMeshVerts_.data(),
+            sizeof(float) * static_cast<size_t>(vertCount * math::Ar3dSolver::kFloatsPerVertex));
         TextureBindings tb{};
         UniformBlock ub{};
         tb.bind(0, layer.texture);
@@ -861,7 +914,7 @@ void RenderPipeline::renderAr3dAccessories(
         ub.push(detail::clampf(layer.opacity * presence, 0.0f, 1.0f),
                 layer.headOcclusion ? 1.0f : 0.0f, 0.0f, 0.0f);
         device_.drawIndexed(
-            ShaderId::kAr3dMesh, st, vbAr3dQuad_, ibSticker_, 0, 6,
+            ShaderId::kAr3dMesh, st, vbAr3dQuad_, activeIb, 0, idxCount,
             VertexLayout::kAr3dPos2Uv2Z1, tb, ub);
     }
     device_.endPass();
@@ -930,7 +983,8 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         return in.inputTexture;
     }
 
-    ensureResources(in.width, in.height);
+    const bool useHalfFloat = config.preferHalfFloat && (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
+    ensureResources(in.width, in.height, useHalfFloat);
     const float aspect = static_cast<float>(in.width) / static_cast<float>(in.height);
     TextureId currentTex = in.inputTexture;
 
@@ -1546,6 +1600,59 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         device_.endPass();
         currentTex = device_.textureOf(rtComposite_);
         lastActivePassesMask_ |= kPassComposite;
+    }
+
+    // 6b. v3.4: Real-Time Strand-Preserving Hair Dyeing & Crown Angel-Ring Shine (into RGBA8 rtBgOut_)
+    const float effHairDye = detail::clampf(config.hairDye * in.loadFadeSmooth, 0.0f, 1.0f);
+    const float effHairShine = detail::clampf(config.hairShine * in.loadFadeSmooth, 0.0f, 1.0f);
+    if ((effHairDye > 1e-4f || effHairShine > 1e-4f) &&
+        in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) {
+        const TextureId fallbackTex = (assets_.whiteAlphaFallbackTex != kInvalidTexture)
+            ? assets_.whiteAlphaFallbackTex
+            : ownedFallbackTex_;
+        const Vec3 dyeRgb = math::FaceMakeupUv::hairDyeRgb(config.hairDyeColor);
+        float ux = 1.0f, uy = 0.0f;
+        float crownCx = 0.5f, crownCy = 0.72f, crownRx = 0.28f, crownRy = 0.14f;
+        float signedYaw = 0.0f;
+        if (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) {
+            const float ax = in.faceMeta15[math::FaceMeshFrame::kMetaAxisX];
+            const float ay = in.faceMeta15[math::FaceMeshFrame::kMetaAxisY];
+            const float n = std::hypot(ax, ay);
+            if (n > 1e-4f) { ux = ax / n; uy = ay / n; }
+            const float vx = -uy, vy = ux;
+            const float fw = in.faceMeta15[math::FaceMeshFrame::kMetaFaceWidth];
+            const float fh = in.faceMeta15[math::FaceMeshFrame::kMetaFaceHeight];
+            crownCx = postWarpLandmarks[10 * 2] + vx * (0.08f * fh);
+            crownCy = postWarpLandmarks[10 * 2 + 1] + (vy * (0.08f * fh)) * aspect;
+            crownRx = std::max(fw * 0.72f, 0.08f);
+            crownRy = std::max(fh * 0.28f, 0.06f);
+            signedYaw = detail::clampf(in.faceMeta15[math::FaceMeshFrame::kMetaSignedYaw], -1.0f, 1.0f);
+        } else if (activeFaceState) {
+            ux = activeFaceState[26];
+            uy = activeFaceState[27];
+            const float vx = -uy, vy = ux;
+            crownCx = activeFaceState[22] + vx * (activeFaceState[25] * 0.82f);
+            crownCy = activeFaceState[23] + (vy * (activeFaceState[25] * 0.82f)) * aspect;
+            crownRx = std::max(activeFaceState[24] * 1.35f, 0.12f);
+            crownRy = std::max(activeFaceState[25] * 0.55f, 0.08f);
+        }
+
+        RenderState st{};
+        TextureBindings tb{};
+        UniformBlock ub{};
+        tb.bind(0, currentTex);
+        tb.bind(1, in.hairMaskTex);
+        tb.bind(2, polySkinMaskReady ? device_.textureOf(rtSkinMask_) : fallbackTex);
+        ub.push(in.hairAffine[0], in.hairAffine[1], in.hairAffine[2], effHairDye * in.hairShown);
+        ub.push(in.hairAffine[4], in.hairAffine[5], in.hairAffine[6], effHairShine * in.hairShown);
+        ub.push(dyeRgb.x, dyeRgb.y, dyeRgb.z, polySkinMaskReady ? 1.0f : 0.0f);
+        ub.push(crownCx, crownCy, crownRx, crownRy);
+        ub.push(ux, uy, aspect, signedYaw);
+        device_.beginPass(rtBgOut_, in.width, in.height, false);
+        device_.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
+        device_.endPass();
+        currentTex = device_.textureOf(rtBgOut_);
+        lastActivePassesMask_ |= kPassHairDye;
     }
 
     // 7. 6-Layer Real-Time UV Makeup (with P1 ambient WB + micro-pore & P2 bangs/occlusion mask)

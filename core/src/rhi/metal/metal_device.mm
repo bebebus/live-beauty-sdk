@@ -19,6 +19,16 @@ struct MetalDevice::Impl {
     // Active command buffer & render pass state (one command buffer per frame or flush)
     id<MTLCommandBuffer> cmdBuf = nil;
     id<MTLRenderCommandEncoder> encoder = nil;
+    TextureFormat activeRtFormat = TextureFormat::kRgba8;
+
+    static MTLPixelFormat mtlFormatFor(TextureFormat format) {
+        switch (format) {
+            case TextureFormat::kR8:      return MTLPixelFormatR8Unorm;
+            case TextureFormat::kRgba16f: return MTLPixelFormatRGBA16Float;
+            case TextureFormat::kRgba8:
+            default:                      return MTLPixelFormatRGBA8Unorm;
+        }
+    }
 
     struct RtRec {
         TextureId texId = kInvalidTexture;
@@ -161,13 +171,15 @@ struct MetalDevice::Impl {
             case ShaderId::kAiResidualBlend: vsName = @"vs_quad";      fsName = @"fs_ai_residual_blend"; break;
             case ShaderId::kHeadDepthShell:  vsName = @"vs_ar3d";      fsName = @"fs_head_depth_shell"; break;
             case ShaderId::kAr3dMesh:        vsName = @"vs_ar3d";      fsName = @"fs_ar3d_mesh"; break;
+            case ShaderId::kHairDye:         vsName = @"vs_quad";      fsName = @"fs_hair_dye"; break;
             case ShaderId::kPassThrough:
             default:                         vsName = @"vs_quad";      fsName = @"fs_pass_through"; break;
         }
     }
 
     id<MTLRenderPipelineState> getPipeline(ShaderId shaderId, VertexLayout layout, const RenderState& st) {
-        const uint32_t key = (static_cast<uint32_t>(shaderId) << 8) |
+        const uint32_t key = (static_cast<uint32_t>(activeRtFormat) << 16) |
+                             (static_cast<uint32_t>(shaderId) << 8) |
                              (static_cast<uint32_t>(layout) << 4) |
                              (st.blendEnable ? 2u : 0u) |
                              (st.colorMaskAlphaOnly ? 1u : 0u);
@@ -185,7 +197,7 @@ struct MetalDevice::Impl {
         desc.vertexFunction = vf;
         desc.fragmentFunction = ff;
         desc.vertexDescriptor = vertexDescFor(layout);
-        desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        desc.colorAttachments[0].pixelFormat = mtlFormatFor(activeRtFormat);
         if (st.blendEnable) {
             desc.colorAttachments[0].blendingEnabled = YES;
             desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
@@ -270,7 +282,7 @@ bool MetalDevice::readbackTextureRgba8(TextureId tex, uint8_t* outRgba, int widt
 RenderTargetId MetalDevice::createRenderTarget(int width, int height, TextureFormat format) {
     if (!isReady()) return kInvalidRenderTarget;
     MTLTextureDescriptor* desc = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:(format == TextureFormat::kR8 ? MTLPixelFormatR8Unorm : MTLPixelFormatRGBA8Unorm)
+        texture2DDescriptorWithPixelFormat:Impl::mtlFormatFor(format)
                                      width:static_cast<NSUInteger>(width)
                                     height:static_cast<NSUInteger>(height)
                                  mipmapped:NO];
@@ -299,7 +311,7 @@ TextureId MetalDevice::textureOf(RenderTargetId rt) const {
 TextureId MetalDevice::createTexture2D(int width, int height, TextureFormat format, const uint8_t* pixels) {
     if (!isReady()) return kInvalidTexture;
     MTLTextureDescriptor* desc = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:(format == TextureFormat::kR8 ? MTLPixelFormatR8Unorm : MTLPixelFormatRGBA8Unorm)
+        texture2DDescriptorWithPixelFormat:Impl::mtlFormatFor(format)
                                      width:static_cast<NSUInteger>(width)
                                     height:static_cast<NSUInteger>(height)
                                  mipmapped:NO];
@@ -307,7 +319,7 @@ TextureId MetalDevice::createTexture2D(int width, int height, TextureFormat form
     desc.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [impl_->device newTextureWithDescriptor:desc];
     if (pixels) {
-        const NSUInteger bpp = (format == TextureFormat::kR8) ? 1 : 4;
+        const NSUInteger bpp = (format == TextureFormat::kR8) ? 1 : (format == TextureFormat::kRgba16f ? 8 : 4);
         [tex replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(width), static_cast<NSUInteger>(height))
                mipmapLevel:0
                  withBytes:pixels
@@ -369,6 +381,7 @@ void MetalDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, boo
     if (it == impl_->rts.end()) return;
     id<MTLTexture> targetTex = unwrapMetalTexture(it->second.texId);
     if (!targetTex) return;
+    impl_->activeRtFormat = it->second.format;
 
     id<MTLCommandBuffer> cb = impl_->ensureCmdBuf();
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -422,6 +435,7 @@ void MetalDevice::endPass() {
         [impl_->encoder endEncoding];
         impl_->encoder = nil;
     }
+    impl_->activeRtFormat = TextureFormat::kRgba8;
 }
 
 void MetalDevice::flush() {

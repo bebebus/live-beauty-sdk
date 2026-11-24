@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'LiveBeautySDK'
-  s.version          = '3.0.1'
+  s.version          = '3.5.0'
   s.summary          = 'Real-time GPU face reshape, guided skin smoothing, makeup, and 3D LUT beauty SDK for iOS.'
   s.description      = <<-DESC
 Bebebus Live Beauty SDK provides real-time CoreImage & MediaPipe face tracking, skin-aware variance-guided smoothing, whitening, rosy tone, and facial reshape filters for live streaming and RTC pipelines on iOS. Live demo & experience testbed: https://dh.video
@@ -14,13 +14,14 @@ Bebebus Live Beauty SDK provides real-time CoreImage & MediaPipe face tracking, 
     '../core/include/**/*.h',
     '../core/src/config.cpp',
     '../core/src/engine.cpp',
+    '../core/src/bundle/*.cpp',
     '../core/src/math/*.cpp',
     '../core/src/rhi/render_pipeline.cpp',
     '../core/src/rhi/metal/*.{h,mm}',
   ]
   s.public_header_files = 'Classes/**/*.h'
   s.static_framework = true
-  s.frameworks       = 'Foundation', 'CoreImage', 'CoreGraphics', 'CoreMedia', 'CoreVideo', 'QuartzCore', 'Metal'
+  s.frameworks       = 'Foundation', 'CoreImage', 'CoreGraphics', 'CoreMedia', 'CoreVideo', 'QuartzCore', 'Metal', 'Vision'
   s.libraries        = 'c++'
   s.resource_bundles = {
     'LiveBeautyModels' => [

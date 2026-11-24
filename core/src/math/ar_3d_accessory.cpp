@@ -101,6 +101,74 @@ void SpringPendulum::update(
     offsetY_ = (1.0f - std::cos(angle_)) * 0.008f;
 }
 
+void Ar3dSolver::getCurvedGlassesMesh(
+    const Ar3dMeshVertex*& outVerts, int& outVertCount,
+    const uint16_t*& outIndices, int& outIndexCount) {
+    // 5x2 curved front frame (10 verts) + left 3D temple (4 verts) + right 3D temple (4 verts) = 18 verts, 36 indices
+    static const Ar3dMeshVertex kVerts[18] = {
+        // Row 0 (bottom, v=1.0) & Row 1 (top, v=0.0) across curved front bridge
+        {-1.00f, -1.00f, -0.16f, 0.00f, 1.00f}, {-1.00f,  1.00f, -0.16f, 0.00f, 0.00f},
+        {-0.50f, -1.00f, -0.04f, 0.25f, 1.00f}, {-0.50f,  1.00f, -0.04f, 0.25f, 0.00f},
+        { 0.00f, -1.00f,  0.02f, 0.50f, 1.00f}, { 0.00f,  1.00f,  0.02f, 0.50f, 0.00f},
+        { 0.50f, -1.00f, -0.04f, 0.75f, 1.00f}, { 0.50f,  1.00f, -0.04f, 0.75f, 0.00f},
+        { 1.00f, -1.00f, -0.16f, 1.00f, 1.00f}, { 1.00f,  1.00f, -0.16f, 1.00f, 0.00f},
+        // Left side temple receding to ear (-Z)
+        {-0.96f,  0.18f, -0.16f, 0.03f, 0.42f}, {-0.96f,  0.46f, -0.16f, 0.03f, 0.28f},
+        {-0.92f, -0.05f, -1.30f, 0.08f, 0.42f}, {-0.92f,  0.22f, -1.30f, 0.08f, 0.28f},
+        // Right side temple receding to ear (-Z)
+        { 0.96f,  0.18f, -0.16f, 0.97f, 0.42f}, { 0.96f,  0.46f, -0.16f, 0.97f, 0.28f},
+        { 0.92f, -0.05f, -1.30f, 0.92f, 0.42f}, { 0.92f,  0.22f, -1.30f, 0.92f, 0.28f},
+    };
+    static const uint16_t kIndices[36] = {
+        0, 2, 1,  1, 2, 3,
+        2, 4, 3,  3, 4, 5,
+        4, 6, 5,  5, 6, 7,
+        6, 8, 7,  7, 8, 9,
+        10, 12, 11,  11, 12, 13,
+        14, 16, 15,  15, 16, 17,
+    };
+    outVerts = kVerts;
+    outVertCount = 18;
+    outIndices = kIndices;
+    outIndexCount = 36;
+}
+
+void Ar3dSolver::getCurvedTiaraMesh(
+    const Ar3dMeshVertex*& outVerts, int& outVertCount,
+    const uint16_t*& outIndices, int& outIndexCount) {
+    struct StaticTiara {
+        Ar3dMeshVertex verts[18];
+        uint16_t indices[48];
+        StaticTiara() {
+            constexpr int kCols = 9;
+            constexpr float kMaxTheta = 0.85f;
+            const float invSin = 1.0f / std::sin(kMaxTheta);
+            for (int c = 0; c < kCols; ++c) {
+                const float u = static_cast<float>(c) / static_cast<float>(kCols - 1);
+                const float theta = (u * 2.0f - 1.0f) * kMaxTheta;
+                const float x = std::sin(theta) * invSin;
+                const float z = (std::cos(theta) - 1.0f) * 1.15f;
+                verts[c * 2 + 0] = {x, -1.0f, z, u, 1.0f};
+                verts[c * 2 + 1] = {x,  1.0f, z, u, 0.0f};
+            }
+            int idx = 0;
+            for (int c = 0; c < kCols - 1; ++c) {
+                const uint16_t b0 = static_cast<uint16_t>(c * 2);
+                const uint16_t t0 = static_cast<uint16_t>(b0 + 1);
+                const uint16_t b1 = static_cast<uint16_t>(b0 + 2);
+                const uint16_t t1 = static_cast<uint16_t>(b0 + 3);
+                indices[idx++] = b0; indices[idx++] = b1; indices[idx++] = t0;
+                indices[idx++] = t0; indices[idx++] = b1; indices[idx++] = t1;
+            }
+        }
+    };
+    static const StaticTiara kTiara;
+    outVerts = kTiara.verts;
+    outVertCount = 18;
+    outIndices = kTiara.indices;
+    outIndexCount = 48;
+}
+
 void Ar3dSolver::buildHeadDepthShell(
     const float* landmarks478x2,
     const HeadPose3D& pose,
@@ -250,6 +318,166 @@ bool Ar3dSolver::buildAccessoryQuad(
         outQuad20[k + 3] = corners[i][3];
         outQuad20[k + 4] = normalizeDepth(vz);
     }
+    return true;
+}
+
+bool Ar3dSolver::buildAccessoryMesh(
+    const Ar3dAccessoryConfig& cfg,
+    const float* landmarks478x2,
+    const HeadPose3D& pose,
+    float aspect,
+    const SpringPendulum* spring,
+    float* outVertices,
+    int maxVertices,
+    int& outVertCount,
+    const uint16_t*& outIndices,
+    int& outIndexCount,
+    float& outAnchorX,
+    float& outAnchorY) {
+    outVertCount = 0;
+    outIndices = nullptr;
+    outIndexCount = 0;
+    if (!cfg.enabled || cfg.texture == rhi::kInvalidTexture || cfg.opacity <= 1e-4f ||
+        !landmarks478x2 || !pose.valid || !outVertices || maxVertices < 4 || !(aspect > 0.0f)) {
+        return false;
+    }
+
+    static const Ar3dMeshVertex kQuadVerts[4] = {
+        {-1.0f, -1.0f, 0.0f, 0.0f, 1.0f},
+        { 1.0f, -1.0f, 0.0f, 1.0f, 1.0f},
+        {-1.0f,  1.0f, 0.0f, 0.0f, 0.0f},
+        { 1.0f,  1.0f, 0.0f, 1.0f, 0.0f},
+    };
+    static const uint16_t kQuadIndices[6] = {0, 1, 2, 2, 1, 3};
+
+    const Ar3dMeshVertex* srcVerts = kQuadVerts;
+    int srcVertCount = 4;
+    const uint16_t* srcIdx = kQuadIndices;
+    int srcIdxCount = 6;
+
+    if (cfg.customVertices != nullptr && cfg.customIndices != nullptr &&
+        cfg.customVertexCount >= 3 && cfg.customVertexCount <= maxVertices &&
+        cfg.customIndexCount >= 3) {
+        srcVerts = cfg.customVertices;
+        srcVertCount = cfg.customVertexCount;
+        srcIdx = cfg.customIndices;
+        srcIdxCount = cfg.customIndexCount;
+    } else if (cfg.meshPreset == Ar3dMeshPreset::kCurvedGlasses) {
+        getCurvedGlassesMesh(srcVerts, srcVertCount, srcIdx, srcIdxCount);
+    } else if (cfg.meshPreset == Ar3dMeshPreset::kCurvedTiara) {
+        getCurvedTiaraMesh(srcVerts, srcVertCount, srcIdx, srcIdxCount);
+    }
+    if (srcVertCount > maxVertices) return false;
+
+    const float fw = std::max(pose.scale, 0.02f);
+    constexpr float kCanonicalFw = 15.328f;
+    const float pxPerCanonical = fw / kCanonicalFw;
+
+    float ax = pose.centerX;
+    float ay = pose.centerY;
+    float baseZ = 4.5f;
+    float defaultWidth = 0.85f * fw;
+    auto lm = [&](int idx) -> std::pair<float, float> {
+        return {landmarks478x2[idx * 2], landmarks478x2[idx * 2 + 1]};
+    };
+    switch (cfg.anchor) {
+        case Ar3dAnchor::kHeadCrown: {
+            const auto p10 = lm(10);
+            const auto p152 = lm(152);
+            ax = p10.first + (p10.first - p152.first) * 0.24f;
+            ay = p10.second + (p10.second - p152.second) * 0.24f;
+            baseZ = 4.6f;
+            defaultWidth = 1.25f * fw;
+            break;
+        }
+        case Ar3dAnchor::kGlassesBridge: {
+            const auto p168 = lm(168);
+            ax = p168.first;
+            ay = p168.second;
+            baseZ = 6.2f;
+            defaultWidth = 1.12f * fw;
+            break;
+        }
+        case Ar3dAnchor::kLeftEar: {
+            const auto p454 = lm(454);
+            const auto p361 = lm(361);
+            ax = 0.5f * (p454.first + p361.first) + 0.06f * fw;
+            ay = 0.5f * (p454.second + p361.second) - 0.14f * fw * aspect;
+            baseZ = -2.2f;
+            defaultWidth = 0.34f * fw;
+            break;
+        }
+        case Ar3dAnchor::kRightEar: {
+            const auto p234 = lm(234);
+            const auto p132 = lm(132);
+            ax = 0.5f * (p234.first + p132.first) - 0.06f * fw;
+            ay = 0.5f * (p234.second + p132.second) - 0.14f * fw * aspect;
+            baseZ = -2.2f;
+            defaultWidth = 0.34f * fw;
+            break;
+        }
+        case Ar3dAnchor::kNoseTip: {
+            const auto p1 = lm(1);
+            ax = p1.first;
+            ay = p1.second;
+            baseZ = 8.2f;
+            defaultWidth = 0.36f * fw;
+            break;
+        }
+        case Ar3dAnchor::kChin: {
+            const auto p152 = lm(152);
+            ax = p152.first;
+            ay = p152.second - 0.08f * fw * aspect;
+            baseZ = 4.4f;
+            defaultWidth = 0.80f * fw;
+            break;
+        }
+    }
+
+    outAnchorX = ax;
+    outAnchorY = ay;
+
+    const Vec3 offCanonical{
+        cfg.offsetX * kCanonicalFw,
+        cfg.offsetY * kCanonicalFw,
+        cfg.offsetZ * kCanonicalFw,
+    };
+    const Vec3 offWorld = FaceRelightSolver::rotateVec(pose, offCanonical);
+    const float swayDx = spring ? spring->swayOffsetX() : 0.0f;
+    const float swayDy = spring ? spring->swayOffsetY() : 0.0f;
+    const float swayAngle = spring ? spring->swayAngleRad() : 0.0f;
+
+    const float cxIso = ax + offWorld.x * pxPerCanonical + swayDx;
+    const float cyIso = ay / aspect + offWorld.y * pxPerCanonical + swayDy;
+    const float czWorld = baseZ + offWorld.z;
+
+    const float halfW = 0.5f * defaultWidth * detail::clampf(cfg.scale, 0.1f, 3.0f);
+    const float texAsp = (cfg.textureAspect > 0.05f) ? cfg.textureAspect : 1.0f;
+    const float halfH = halfW / texAsp;
+    const float halfWCan = halfW / std::max(pxPerCanonical, 1e-5f);
+    const float halfHCan = halfH / std::max(pxPerCanonical, 1e-5f);
+
+    for (int i = 0; i < srcVertCount; ++i) {
+        const auto& sv = srcVerts[i];
+        const Vec3 cLocal = rotateLocalEuler(
+            {sv.x * halfWCan, sv.y * halfHCan, sv.z * halfWCan},
+            cfg.yawOffsetRad, cfg.pitchOffsetRad, cfg.rollOffsetRad + swayAngle);
+        const Vec3 cWorld = FaceRelightSolver::rotateVec(pose, cLocal);
+        const float persp = 1.0f / std::max(1.0f - (cWorld.z * 0.012f), 0.72f);
+        const float vx = cxIso + (cWorld.x * persp) * pxPerCanonical;
+        const float vy = (cyIso + (cWorld.y * persp) * pxPerCanonical) * aspect;
+        const float vz = czWorld + cWorld.z;
+        const int k = i * kFloatsPerVertex;
+        outVertices[k + 0] = vx * 2.0f - 1.0f;
+        outVertices[k + 1] = vy * 2.0f - 1.0f;
+        outVertices[k + 2] = sv.u;
+        outVertices[k + 3] = sv.v;
+        outVertices[k + 4] = normalizeDepth(vz);
+    }
+
+    outVertCount = srcVertCount;
+    outIndices = srcIdx;
+    outIndexCount = srcIdxCount;
     return true;
 }
 

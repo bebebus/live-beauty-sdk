@@ -3,13 +3,17 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
+#include "livebeauty/bundle/effect_bundle.h"
 #include "livebeauty/config.h"
 #include "livebeauty/math/ar_3d_accessory.h"
 #include "livebeauty/math/beauty_tuning.h"
 #include "livebeauty/math/body_geometry.h"
 #include "livebeauty/math/device_tier.h"
+#include "livebeauty/math/face_aux_vision.h"
 #include "livebeauty/math/face_geometry.h"
+#include "livebeauty/math/face_parsing.h"
 #include "livebeauty/math/face_roi_selector.h"
 #include "livebeauty/math/face_timeline.h"
 #include "livebeauty/math/hair_mask_tuning.h"
@@ -50,15 +54,30 @@ public:
 
     void setAssets(const rhi::PipelineAssets& assets) { pipeline_.setAssets(assets); }
     void resetTracking();
-    void releaseGpuResources() { pipeline_.releaseGpuResources(); }
+    void releaseGpuResources();
 
     /** Configure or clear one of up to 4 face-anchored 2D AR sticker layers. */
-    void setSticker(int slot, const math::StickerLayerConfig& layer);
+    void setSticker(int slot, const math::StickerLayerConfig& layer,
+                    bundle::BundleTriggerRule trigger = bundle::BundleTriggerRule::kAlways);
     void clearStickers();
 
     /** P4: Configure or clear one of up to 4 head-occluded 3D AR accessories with spring physics. */
-    void setAr3dAccessory(int slot, const math::Ar3dAccessoryConfig& layer);
+    void setAr3dAccessory(int slot, const math::Ar3dAccessoryConfig& layer,
+                          bundle::BundleTriggerRule trigger = bundle::BundleTriggerRule::kAlways);
     void clearAr3dAccessories();
+
+    /**
+     * v3.5: Load and apply a declarative `.lbfx` Effect Bundle manifest (or raw JSON text),
+     * automatically configuring beauty look overrides, 2D stickers, 3D meshes, hair dye, and
+     * expression-reactive trigger rules (`smile`, `mouth_open`, `brow_up`, `blink`, etc.).
+     */
+    bool applyEffectBundle(
+        const bundle::EffectBundleManifest& manifest,
+        const bundle::BundleTextureResolver& textureResolver = nullptr);
+    bool applyEffectBundleJson(
+        const std::string& manifestJson,
+        const bundle::BundleTextureResolver& textureResolver = nullptr,
+        std::string* outError = nullptr);
 
     /** P4: Declare device hardware profile once so DeviceTierPolicy can auto-schedule Lite/Standard/Ultra. */
     void setHardwareProfile(const std::string& gpuRenderer, int cpuCores, int totalRamMb);
@@ -71,6 +90,43 @@ public:
 
     /** P3: Attach optional external Face-ROI AI retouching residual texture (RGBA8, 0.5=zero delta). */
     void setAiResidual(rhi::TextureId residualTex, const CropRect& roiRect, float strength);
+
+    /** v3.2: Submit 52-channel distilled Face Blendshapes for reactive 2D/3D AR triggers (thread-safe). */
+    void submitFaceBlendshapes(const math::BlendshapeInput& blendshapes);
+    void setExpressionReactive(bool enabled) { expressionReactive_ = enabled; }
+    math::ExpressionReaction expressionReaction() const;
+
+    /**
+     * v3.2: Submit a top-down RGBA vision sample on any worker thread to run C++17 + ARM NEON
+     * foreground occlusion detection (`64x64` R8) and high-frequency-preserving Face-ROI skin residual
+     * (`64x64` RGBA8). Automatically uploaded and bound on the GPU thread during `processFrame()`
+     * whenever external textures are not explicitly overriding them.
+     */
+    bool submitAuxRgbaSample(
+        const uint8_t* rgbaTopDown,
+        int srcWidth,
+        int srcHeight,
+        float retouchStrength);
+
+    /**
+     * v3.3: Submit 19-class CelebAMask-HQ / BiSeNetV2 / SegFormer semantic face-parsing class IDs (`0..19`)
+     * or NCHW float logits on any worker thread. Automatically generates `128x128` occlusion, hair, and
+     * person masks and uploads/binds them on the GPU thread in `processFrame()`.
+     */
+    bool submitFaceParsingClassMap(const uint8_t* classIds, int srcWidth, int srcHeight, int64_t sampleTsMs);
+    bool submitFaceParsingLogits(const float* logitsNchw, int numClasses, int srcWidth, int srcHeight, int64_t sampleTsMs);
+
+    /**
+     * v3.3: Submit external Face-ROI neural skin retouching tensor (`3xHxW` or `4xHxW` float NCHW in `[-0.24, +0.24]`)
+     * from any ONNX/CoreML/TFLite worker thread.
+     */
+    bool submitNeuralResidualTensor(
+        const float* tensorNchw,
+        int channels,
+        int srcWidth,
+        int srcHeight,
+        const CropRect& roiRect,
+        float strength);
 
     /** Feed asynchronous MediaPipe 468/478-pt single primary face landmarks (y-down normalized). */
     bool submitFaceLandmarks(int64_t sampleTsMs, const float* mpXy, int pointCount,
@@ -109,6 +165,7 @@ public:
     const PerfStats& stats() const { return stats_; }
 
 private:
+    rhi::IRhiDevice& device_;
     BeautyConfig config_;
     rhi::RenderPipeline pipeline_;
     math::MultiFaceTracker faces_;
@@ -120,8 +177,10 @@ private:
     math::HairMaskGate hairGate_;
 
     std::array<math::StickerLayerConfig, math::kMaxStickerLayers> stickers_{};
+    std::array<bundle::BundleTriggerRule, math::kMaxStickerLayers> stickerTriggers_{};
     int stickerCount_ = 0;
     std::array<math::Ar3dAccessoryConfig, math::kMaxAr3dLayers> ar3dAccessories_{};
+    std::array<bundle::BundleTriggerRule, math::kMaxAr3dLayers> ar3dTriggers_{};
     int ar3dCount_ = 0;
 
     math::PerformanceTier hardwareTier_ = math::PerformanceTier::kStandard;
@@ -130,6 +189,35 @@ private:
     rhi::TextureId aiResidualTex_ = rhi::kInvalidTexture;
     CropRect aiResidualRect_ = CropRect::full();
     float aiResidualStrength_ = 0.0f;
+
+    // v3.2 built-in C++17 + NEON occlusion, ROI residual & blendshape expression bus
+    mutable std::mutex auxMutex_;
+    math::FaceOcclusionSolver occlusionSolver_;
+    math::FaceRoiResidualSolver residualSolver_;
+    math::FaceParsingMapper faceParsingMapper_;
+    math::NeuralSkinResidualAdapter neuralResidualAdapter_;
+    math::FaceExpressionBus expressionBus_;
+    bool expressionReactive_ = true;
+    bool hasLatestFaceBounds_ = false;
+    CropRect latestFaceBounds_ = CropRect::full();
+    bool stagedOccDirty_ = false;
+    int stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> stagedOccMask_{};
+    bool stagedParseHairDirty_ = false;
+    int64_t stagedParseHairTsMs_ = kTimeInvalid;
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> stagedParseHair_{};
+    bool stagedResidualDirty_ = false;
+    bool stagedResidualActive_ = false;
+    CropRect stagedResidualRect_ = CropRect::full();
+    float stagedResidualStrength_ = 0.0f;
+    std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> stagedResidualRgba_{};
+    rhi::TextureId autoOccTex_ = rhi::kInvalidTexture;
+    int autoOccTexSize_ = 0;
+    rhi::TextureId autoParseHairTex_ = rhi::kInvalidTexture;
+    int64_t autoParseHairTsMs_ = kTimeInvalid;
+    rhi::TextureId autoResidualTex_ = rhi::kInvalidTexture;
+    CropRect autoResidualRect_ = CropRect::full();
+    float autoResidualStrength_ = 0.0f;
 
     int lastWidth_ = 0;
     int lastHeight_ = 0;

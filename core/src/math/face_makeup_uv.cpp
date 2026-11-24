@@ -321,6 +321,18 @@ Vec2 FaceMakeupUv::irisTile(ContactLensStyle style) {
     }
 }
 
+Vec3 FaceMakeupUv::hairDyeRgb(HairDyeColor color) {
+    switch (color) {
+        case HairDyeColor::kHazeBlue:       return {0.28f, 0.42f, 0.66f};
+        case HairDyeColor::kAshPurple:      return {0.54f, 0.40f, 0.65f};
+        case HairDyeColor::kRoseGold:       return {0.78f, 0.46f, 0.44f};
+        case HairDyeColor::kCoolBlack:      return {0.20f, 0.23f, 0.30f};
+        case HairDyeColor::kCaramelCopper:  return {0.74f, 0.38f, 0.20f};
+        case HairDyeColor::kMilkTeaBrown:
+        default:                            return {0.62f, 0.44f, 0.31f};
+    }
+}
+
 const std::array<float, FaceMeshTopology::kFaceVertexCount>& FaceRetouchSubMesh::staticTearWeights() {
     return retouchTables().tearWeights;
 }

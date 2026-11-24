@@ -723,6 +723,87 @@ void testP1ToP4GpuPixelGates(MetalDevice& dev) {
         dev.destroyTexture(goldTex);
         dev.destroyTexture(baseTex);
     }
+
+    // 5. v3.4 Real-time Hair Dyeing + Crown Angel-Ring Shine + View-Dependent PBR Lip Yaw Glaze
+    {
+        constexpr int kW = 32, kH = 32;
+        // Dark natural hair (34, 28, 25) on top half, warm cheek skin (200, 155, 138) on bottom half
+        std::vector<uint8_t> img(kW * kH * 4);
+        std::vector<uint8_t> hairMask(kW * kH, 0);
+        std::vector<uint8_t> sem(kW * kH * 4);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int idx4 = (y * kW + x) * 4;
+                if (y < kH / 2) {
+                    // Top-down y < 16 = hair region (corresponds to GL uv.y > 0.5)
+                    img[idx4 + 0] = 34;
+                    img[idx4 + 1] = 28;
+                    img[idx4 + 2] = 25;
+                    img[idx4 + 3] = 255;
+                    hairMask[y * kW + x] = 255;
+                    sem[idx4 + 0] = 0; sem[idx4 + 1] = 0; sem[idx4 + 2] = 0; sem[idx4 + 3] = 0;
+                } else {
+                    img[idx4 + 0] = 200;
+                    img[idx4 + 1] = 155;
+                    img[idx4 + 2] = 138;
+                    img[idx4 + 3] = 255;
+                    hairMask[y * kW + x] = 0;
+                    sem[idx4 + 0] = 255; sem[idx4 + 1] = 0; sem[idx4 + 2] = 0; sem[idx4 + 3] = 255;
+                }
+            }
+        }
+        const TextureId imgTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, img.data());
+        const TextureId hairTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, hairMask.data());
+        const TextureId semTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, sem.data());
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        const Vec3 hazeBlue = FaceMakeupUv::hairDyeRgb(HairDyeColor::kHazeBlue);
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, imgTex); tb.bind(1, hairTex); tb.bind(2, semTex);
+        UniformBlock ub{};
+        ub.push(1.0f, 0.0f, 0.0f, 0.90f);  // hairDye=0.90
+        ub.push(0.0f, 1.0f, 0.0f, 0.85f);  // hairShine=0.85
+        ub.push(hazeBlue.x, hazeBlue.y, hazeBlue.z, 1.0f);
+        ub.push(0.50f, 0.75f, 0.30f, 0.15f);  // crown centered at (0.50, 0.75) in GL UV (top-down y=8)
+        ub.push(1.0f, 0.0f, 1.0f, 0.0f);
+        dev.beginPass(rt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        // Top-down y=8, x=16 is right on the crown Angel-Ring band inside hair
+        const int hairCrownPx = (8 * kW + 16) * 4;
+        // Top-down y=2, x=16 is upper hair away from Angel-Ring peak
+        const int hairBasePx = (2 * kW + 16) * 4;
+        // Top-down y=24, x=16 is bare cheek skin -> exact 0/255 change!
+        const int skinPx = (24 * kW + 16) * 4;
+
+        // Hair dyed unmistakably into cool Haze-Blue (B > R + 16) and crown Angel-Ring lifts brightness vs hairBasePx
+        EXPECT_TRUE(int(out[hairBasePx + 2]) > int(out[hairBasePx + 0]) + 16);
+        EXPECT_TRUE(int(out[hairCrownPx + 2]) > int(out[hairBasePx + 2]) + 8);
+        // Bare skin untouched (exact 0/255 bleed)
+        EXPECT_TRUE(out[skinPx + 0] == 200 && out[skinPx + 1] == 155 && out[skinPx + 2] == 138);
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(hairTex);
+        dev.destroyTexture(imgTex);
+
+        // View-dependent PBR lip specular glaze: turning head shifts specular belly onto off-center lip UV (u=0.56, v=0.714)
+        const Vec3 rose = FaceMakeupUv::lipstickRgb(LipstickColor::kRoseBean);
+        UniformBlock ubFrontal{};
+        ubFrontal.push(rose.x, rose.y, rose.z, 0.85f);
+        ubFrontal.push(1.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);  // yaw=0
+        UniformBlock ubTurned{};
+        ubTurned.push(rose.x, rose.y, rose.z, 0.85f);
+        ubTurned.push(1.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.35f); // yaw=+0.35 shifts belly toward u=0.563
+
+        const Rgba lipFrontalOff = evalMakeupShader(dev, ShaderId::kMakeupLip, {180, 118, 116, 255}, {0, 0, 255, 255}, ubFrontal, 0.56f, 0.714f);
+        const Rgba lipTurnedOff = evalMakeupShader(dev, ShaderId::kMakeupLip, {180, 118, 116, 255}, {0, 0, 255, 255}, ubTurned, 0.56f, 0.714f);
+        EXPECT_TRUE(int(lipTurnedOff.r) > int(lipFrontalOff.r) + 8 && int(lipTurnedOff.g) > int(lipFrontalOff.g) + 8);
+    }
 }
 
 }  // namespace

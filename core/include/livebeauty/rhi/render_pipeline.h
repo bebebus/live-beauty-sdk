@@ -40,6 +40,7 @@ enum PassBit : uint32_t {
     kPassAiResidual  = 1u << 15,  // P3: pluggable neural face-ROI residual fusion
     kPassAr3d        = 1u << 16,  // P4: 3D head-occluded AR accessories + spring physics
     kPassRelight3d   = 1u << 17,  // P1: real 3D rotated vertex normal studio relighting
+    kPassHairDye     = 1u << 18,  // v3.4: real-time strand-preserving hair dyeing & crown Angel-Ring sheen
 };
 
 /** Static makeup atlases, virtual background & 3D LUT texture handles uploaded once by platform host. */
@@ -162,7 +163,7 @@ public:
     uint32_t lastActivePassesMask() const { return lastActivePassesMask_; }
 
 private:
-    void ensureResources(int width, int height);
+    void ensureResources(int width, int height, bool useHalfFloat);
     void ensureStaticBuffers();
     void renderGuidedFilter(TextureId srcTex, int width, int height, float eps, float evenness, float spread,
                             TextureId hairWeightTex = kInvalidTexture);
@@ -204,6 +205,7 @@ private:
     int skinH_ = 0;
     int bgW_ = 0;
     int bgH_ = 0;
+    bool halfFloatActive_ = false;
 
     // Full-res ping-pong render targets
     RenderTargetId rtBody_ = kInvalidRenderTarget;
@@ -248,6 +250,13 @@ private:
     BufferId vbSticker_ = kInvalidBuffer;
     BufferId vbAr3dHead_ = kInvalidBuffer;
     BufferId vbAr3dQuad_ = kInvalidBuffer;
+    BufferId ibAr3dGlasses_ = kInvalidBuffer;
+    BufferId ibAr3dTiara_ = kInvalidBuffer;
+    std::array<BufferId, math::kMaxAr3dLayers> ibAr3dCustom_ = {
+        kInvalidBuffer, kInvalidBuffer, kInvalidBuffer, kInvalidBuffer,
+    };
+    std::array<const uint16_t*, math::kMaxAr3dLayers> ibAr3dCustomPtr_{};
+    std::array<int, math::kMaxAr3dLayers> ibAr3dCustomCount_{};
     BufferId ibFullMesh_ = kInvalidBuffer;
     BufferId ibNeckApron_ = kInvalidBuffer;
     BufferId ibSkinRetouch_ = kInvalidBuffer;
@@ -291,6 +300,7 @@ private:
     std::array<float, math::FaceRetouchSubMesh::kVertexDataSize> retouchVerts_{};
     std::array<float, math::FaceMakeupUv::kVertexDataSize> makeupVerts_{};
     std::array<float, math::Ar3dSolver::kHeadShellFloats> ar3dHeadVerts_{};
+    std::array<float, math::Ar3dSolver::kMaxMeshFloats> ar3dMeshVerts_{};
     std::array<float, (math::FaceMeshTopology::kFaceVertexCount + math::FaceMeshTopology::kOvalVertexCount) * 3> staticSkinWeights_{};
     bool staticSkinWeightsReady_ = false;
 };

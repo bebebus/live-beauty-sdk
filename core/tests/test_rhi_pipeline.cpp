@@ -7,6 +7,9 @@
 #include "livebeauty/math/face_mesh_filter.h"
 #include "livebeauty/math/face_mesh_topology.h"
 #include "livebeauty/rhi/rhi_device.h"
+#ifdef LIVEBEAUTY_HAS_WEBGL_RHI
+#include "livebeauty/rhi/webgl/webgl2_device.h"
+#endif
 
 using namespace livebeauty;
 using namespace livebeauty::rhi;
@@ -38,10 +41,12 @@ struct DrawCall {
 class MockRhiDevice final : public IRhiDevice {
 public:
     std::vector<DrawCall> calls;
+    std::vector<TextureFormat> createdRtFormats;
     bool feedbackLoopDetected = false;
     RenderTargetId activeRt = kInvalidRenderTarget;
 
-    RenderTargetId createRenderTarget(int w, int h, TextureFormat /*fmt*/) override {
+    RenderTargetId createRenderTarget(int /*w*/, int /*h*/, TextureFormat fmt) override {
+        createdRtFormats.push_back(fmt);
         const RenderTargetId rt = nextId_++;
         const TextureId tex = nextId_++;
         rtToTex_[rt] = tex;
@@ -496,6 +501,229 @@ void testP1ToP4PassesAndHardwareTierGating() {
     EXPECT_TRUE((stLite.activePassesMask & kPassAr3d) == 0);
 }
 
+void testV34HairDyeHalfFloatAndFaceParsingIntegration() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    engine.setHardwareProfile("Apple M3 GPU", 8, 8192);
+
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    PipelineAssets assets{};
+    assets.contourHighlightAtlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+    assets.blushAtlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+    engine.setAssets(assets);
+
+    auto cfg = BeautyConfig::clearColdWhite();
+    cfg.lutUrl = "";
+    cfg.hairDye = 0.80f;
+    cfg.hairDyeColor = HairDyeColor::kHazeBlue;
+    cfg.hairShine = 0.65f;
+    cfg.preferHalfFloat = true;
+    engine.setConfig(cfg);
+
+    // Feed 19-class CelebAMask-HQ semantic parsing map with hair (class 17) on upper half and skin (class 1) on center
+    std::vector<uint8_t> parsing(64 * 64, 0);
+    for (int y = 0; y < 64; ++y) {
+        for (int x = 0; x < 64; ++x) {
+            if (y < 24) parsing[y * 64 + x] = 17;       // hair
+            else if (y < 52) parsing[y * 64 + x] = 1;   // skin
+        }
+    }
+
+    std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+    makeMediaPipeFace(720.0f / 1280.0f, mpXy);
+
+    for (int f = 0; f < 8; ++f) {
+        const int64_t ts = 20000 + f * 33;
+        dev.calls.clear();
+        EXPECT_TRUE(engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts));
+        EXPECT_TRUE(engine.submitFaceParsingClassMap(parsing.data(), 64, 64, ts));
+        const TextureId out = engine.processFrame(inputTex, 720, 1280, ts, ts);
+        EXPECT_TRUE(out != kInvalidTexture && out != inputTex);
+    }
+
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    // Verify RGBA16F intermediate RTs were created when preferHalfFloat=true on non-Lite tier
+    int fp16Count = 0;
+    for (auto fmt : dev.createdRtFormats) {
+        if (fmt == TextureFormat::kRgba16f) ++fp16Count;
+    }
+    EXPECT_TRUE(fp16Count >= 7);  // rtBody_, rtWarp_, rtGuided_[0..2], rtMacro_[0..1]
+
+    int idxComposite = -1, idxHairDye = -1, idxLip = -1;
+    for (int i = 0; i < static_cast<int>(dev.calls.size()); ++i) {
+        if (dev.calls[i].shader == ShaderId::kCompositePro) idxComposite = i;
+        if (dev.calls[i].shader == ShaderId::kHairDye) idxHairDye = i;
+        if (dev.calls[i].shader == ShaderId::kMakeupLip) idxLip = i;
+    }
+    EXPECT_TRUE(idxComposite >= 0);
+    EXPECT_TRUE(idxHairDye > idxComposite);
+    EXPECT_TRUE(idxLip > idxHairDye);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) != 0);
+}
+
+void testV35EffectBundleTriggersAndWebGl2Backend() {
+    // 1. Declarative .lbfx EffectBundle with expression-gated sticker & 36-index curved 3D glasses
+    {
+        MockRhiDevice dev;
+        LiveBeautyEngine engine(dev);
+        engine.setHardwareProfile("Apple M3 GPU", 8, 8192);
+
+        const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        const TextureId heartTex = dev.createTexture2D(128, 128, TextureFormat::kRgba8, nullptr);
+        const TextureId glassesTex = dev.createTexture2D(256, 128, TextureFormat::kRgba8, nullptr);
+
+        const std::string json = R"JSON({
+            "schemaVersion": 1,
+            "id": "smile_sparkle_glasses",
+            "beauty": { "preset": "natural_studio", "lutUrl": "" },
+            "stickers": [
+                { "slot": 0, "anchor": "cheeks", "assetPath": "heart.png", "trigger": "smile", "opacity": 0.9 }
+            ],
+            "ar3d": [
+                { "slot": 0, "anchor": "glasses_bridge", "meshPreset": "curved_glasses", "assetPath": "glasses.png", "opacity": 0.95 }
+            ]
+        })JSON";
+
+        std::string err;
+        const bool loaded = engine.applyEffectBundleJson(
+            json,
+            [&](const std::string& path) -> TextureId {
+                if (path == "heart.png") return heartTex;
+                if (path == "glasses.png") return glassesTex;
+                return kInvalidTexture;
+            },
+            &err);
+        EXPECT_TRUE(loaded && err.empty());
+
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        makeMediaPipeFace(720.0f / 1280.0f, mpXy);
+
+        // Neutral face (smile = 0): curved_glasses (36 indices) renders, smile-gated sticker stays hidden!
+        engine.submitFaceBlendshapes({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+        for (int f = 0; f < 5; ++f) {
+            const int64_t ts = 30000 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts);
+            engine.processFrame(inputTex, 720, 1280, ts, ts);
+        }
+        bool sawStickerNeutral = false;
+        int glassesIndexCount = 0;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kStickerQuad) sawStickerNeutral = true;
+            if (c.shader == ShaderId::kAr3dMesh) glassesIndexCount = c.indexCount;
+        }
+        EXPECT_TRUE(!sawStickerNeutral);
+        EXPECT_TRUE(glassesIndexCount == 36);
+
+        // Smiling face (smile = 0.85): smile-gated sticker smoothly activates!
+        for (int f = 0; f < 4; ++f) {
+            engine.submitFaceBlendshapes({0.85f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+            const int64_t ts = 30300 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts);
+            engine.processFrame(inputTex, 720, 1280, ts, ts);
+        }
+        bool sawStickerSmile = false;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kStickerQuad) sawStickerSmile = true;
+        }
+        EXPECT_TRUE(sawStickerSmile);
+    }
+
+#ifdef LIVEBEAUTY_HAS_WEBGL_RHI
+    // 2. WebGL2 / Emscripten RHI backend full pipeline execution (GL_RGBA16F + GL_R8 + 31 shaders)
+    {
+        struct FakeWebGlState {
+            uint32_t nextHandle = 1;
+            int rgba16fCount = 0;
+            int r8Count = 0;
+            int drawCalls = 0;
+            int linkedPrograms = 0;
+        };
+        static FakeWebGlState sGl{};
+        sGl = FakeWebGlState{};
+
+        webgl::WebGl2DispatchTable tbl{};
+        tbl.genTextures = [](int n, uint32_t* ids) { for (int i = 0; i < n; ++i) ids[i] = sGl.nextHandle++; };
+        tbl.deleteTextures = [](int, const uint32_t*) {};
+        tbl.bindTexture = [](uint32_t, uint32_t) {};
+        tbl.activeTexture = [](uint32_t) {};
+        tbl.texParameteri = [](uint32_t, uint32_t, int) {};
+        tbl.pixelStorei = [](uint32_t, int) {};
+        tbl.texImage2D = [](uint32_t, int, int internalFmt, int, int, int, uint32_t, uint32_t, const void*) {
+            if (internalFmt == 0x881A) ++sGl.rgba16fCount;
+            if (internalFmt == 0x8229) ++sGl.r8Count;
+        };
+        tbl.texSubImage2D = [](uint32_t, int, int, int, int, int, uint32_t, uint32_t, const void*) {};
+        tbl.genFramebuffers = [](int n, uint32_t* ids) { for (int i = 0; i < n; ++i) ids[i] = sGl.nextHandle++; };
+        tbl.deleteFramebuffers = [](int, const uint32_t*) {};
+        tbl.bindFramebuffer = [](uint32_t, uint32_t) {};
+        tbl.framebufferTexture2D = [](uint32_t, uint32_t, uint32_t, uint32_t, int) {};
+        tbl.checkFramebufferStatus = [](uint32_t) -> uint32_t { return 0x8CD5u; };  // GL_FRAMEBUFFER_COMPLETE
+        tbl.genBuffers = [](int n, uint32_t* ids) { for (int i = 0; i < n; ++i) ids[i] = sGl.nextHandle++; };
+        tbl.deleteBuffers = [](int, const uint32_t*) {};
+        tbl.bindBuffer = [](uint32_t, uint32_t) {};
+        tbl.bufferData = [](uint32_t, ptrdiff_t, const void*, uint32_t) {};
+        tbl.createShader = [](uint32_t) -> uint32_t { return sGl.nextHandle++; };
+        tbl.deleteShader = [](uint32_t) {};
+        tbl.shaderSource = [](uint32_t, int, const char* const*, const int*) {};
+        tbl.compileShader = [](uint32_t) {};
+        tbl.getShaderiv = [](uint32_t, uint32_t, int* out) { *out = 1; };
+        tbl.createProgram = []() -> uint32_t { return sGl.nextHandle++; };
+        tbl.deleteProgram = [](uint32_t) {};
+        tbl.attachShader = [](uint32_t, uint32_t) {};
+        tbl.linkProgram = [](uint32_t) { ++sGl.linkedPrograms; };
+        tbl.getProgramiv = [](uint32_t, uint32_t, int* out) { *out = 1; };
+        tbl.useProgram = [](uint32_t) {};
+        tbl.getAttribLocation = [](uint32_t, const char*) -> int { return 0; };
+        tbl.getUniformLocation = [](uint32_t, const char*) -> int { return 0; };
+        tbl.enableVertexAttribArray = [](uint32_t) {};
+        tbl.disableVertexAttribArray = [](uint32_t) {};
+        tbl.vertexAttribPointer = [](uint32_t, int, uint32_t, uint8_t, int, const void*) {};
+        tbl.uniform1i = [](int, int) {};
+        tbl.uniform4f = [](int, float, float, float, float) {};
+        tbl.viewport = [](int, int, int, int) {};
+        tbl.enable = [](uint32_t) {};
+        tbl.disable = [](uint32_t) {};
+        tbl.blendFuncSeparate = [](uint32_t, uint32_t, uint32_t, uint32_t) {};
+        tbl.frontFace = [](uint32_t) {};
+        tbl.cullFace = [](uint32_t) {};
+        tbl.colorMask = [](uint8_t, uint8_t, uint8_t, uint8_t) {};
+        tbl.clearColor = [](float, float, float, float) {};
+        tbl.clear = [](uint32_t) {};
+        tbl.drawArrays = [](uint32_t, int, int) { ++sGl.drawCalls; };
+        tbl.drawElements = [](uint32_t, int, uint32_t, const void*) { ++sGl.drawCalls; };
+        tbl.getError = []() -> uint32_t { return 0u; };
+        tbl.enableExtension = [](const char*) -> bool { return true; };
+
+        webgl::WebGl2Device webglDev(tbl);
+        EXPECT_TRUE(webglDev.supportsHalfFloatColorBuffer());
+
+        LiveBeautyEngine webEngine(webglDev);
+        webEngine.setHardwareProfile("WebGL2 Apple GPU", 8, 8192);
+        const TextureId videoTex = webglDev.wrapExternalTexture(777u);
+        const TextureId r8Mask = webglDev.createTexture2D(128, 128, TextureFormat::kR8, nullptr);
+
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.lutUrl = "";
+        cfg.backgroundBlur = 0.45f;
+        webEngine.setConfig(cfg);
+
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        makeMediaPipeFace(720.0f / 1280.0f, mpXy);
+        webEngine.submitFaceLandmarks(1000, mpXy.data(), 478, 720, 1280, 1000);
+        const TextureId out = webEngine.processFrame(videoTex, 720, 1280, 1000, 1000, r8Mask);
+        EXPECT_TRUE(out != kInvalidTexture && webglDev.unwrapWebGlTexture(out) != 777u);
+        EXPECT_TRUE(sGl.rgba16fCount >= 7);
+        EXPECT_TRUE(sGl.r8Count >= 1);
+        EXPECT_TRUE(sGl.linkedPrograms >= 8);
+        EXPECT_TRUE(sGl.drawCalls >= 10);
+        webEngine.releaseGpuResources();
+        webglDev.releaseAll(true);
+    }
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -505,6 +733,8 @@ int main() {
     testHairWeightedGuidedDualFaceAndFrameDelayRing();
     testFourFrameDelayStage0DenoiseAndLutFilterSuppression();
     testP1ToP4PassesAndHardwareTierGating();
+    testV34HairDyeHalfFloatAndFaceParsingIntegration();
+    testV35EffectBundleTriggersAndWebGl2Backend();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

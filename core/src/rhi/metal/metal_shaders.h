@@ -516,7 +516,9 @@ fragment float4 fs_makeup_lip(MakeupOut in [[stage_in]],
     result = clamp(result + float3(lipDetail * mix(1.15f, 0.75f, isGlossy)), 0.0f, 1.0f);
     if (isGlossy > 0.5f) {
         float lumaDrive = smoothstep(0.22f, 0.56f, baseY);
-        float centerBelly = 1.0f - smoothstep(0.015f, 0.090f, abs(in.makeupUv.x - 0.5f));
+        float yawShift = clamp(uLipStyle.w * 0.18f, -0.14f, 0.14f);
+        float centerBelly = 1.0f - smoothstep(0.015f, 0.090f, abs(in.makeupUv.x - (0.5f + yawShift)));
+        float fresnelRim = clamp(abs(uLipStyle.w) * 0.22f, 0.0f, 0.14f) * smoothstep(0.03f, 0.14f, abs(in.makeupUv.x - 0.5f));
         float ridgeMask = clamp(0.88f + lipDetail * 5.2f, 0.20f, 1.45f);
         float dyLo = (in.makeupUv.y - 0.714f) * 145.0f;
         float dyHi = (in.makeupUv.y - 0.673f) * 165.0f;
@@ -524,7 +526,7 @@ fragment float4 fs_makeup_lip(MakeupOut in [[stage_in]],
         float upperBand = exp(-(dyHi * dyHi)) * 0.44f;
         float microGlint = smoothstep(0.014f, 0.048f, lipDetail) * centerBelly * 0.26f;
         float naturalHot = smoothstep(0.76f, 0.94f, baseY) * 0.26f;
-        float spec = clamp(((lowerBand + upperBand) * centerBelly * lumaDrive * 0.82f + microGlint + naturalHot) * ridgeMask * effFeather, 0.0f, 0.74f);
+        float spec = clamp(((lowerBand + upperBand) * (centerBelly + fresnelRim) * lumaDrive * 0.82f + microGlint + naturalHot) * ridgeMask * effFeather, 0.0f, 0.74f);
         float3 specCol = clamp(float3(1.0f, 0.99f, 0.97f) * mix(float3(1.0f), amb, 0.35f), 0.0f, 1.0f);
         result = clamp(result + (specCol - result) * (spec * 0.56f), 0.0f, 1.0f);
     } else {
@@ -559,8 +561,9 @@ fragment float4 fs_makeup_iris(MakeupOut in [[stage_in]],
     float3 outRgb = mix(base, lensRgb, lensA);
     float clA = 0.0f;
     if (uIrisStrength.y > 0.0f) {
-        float2 p0 = d - float2(-0.26f, 0.28f);
-        float2 p1 = d - float2(0.22f, -0.18f);
+        float2 parallax = float2(clamp(uIrisTile.w * 0.18f, -0.12f, 0.12f), 0.0f);
+        float2 p0 = d - (float2(-0.26f, 0.28f) + parallax);
+        float2 p1 = d - (float2(0.22f, -0.18f) + parallax * 0.65f);
         float spot = exp(-dot(p0, p0) * 32.0f) + 0.45f * exp(-dot(p1, p1) * 58.0f);
         clA = clamp(spot * uIrisStrength.y * blink, 0.0f, 0.92f);
         outRgb = mix(outRgb, float3(1.0f, 0.99f, 0.97f), clA);
@@ -1009,6 +1012,54 @@ fragment float4 fs_ar3d_mesh(Ar3dOut in [[stage_in]],
         if (a <= 0.002f) discard_fragment();
     }
     return float4(s.rgb, clamp(a, 0.0f, 1.0f));
+}
+
+fragment float4 fs_hair_dye(QuadOut in [[stage_in]],
+                            texture2d<float> tex0 [[texture(0)]],
+                            texture2d<float> tex1 [[texture(1)]],
+                            texture2d<float> tex2 [[texture(2)]],
+                            constant Uniforms& uni [[buffer(1)]]) {
+    float2 uv = in.uv;
+    float4 orig = tex0.sample(kLinearClamp, toMtlUv(uv));
+    float2 muv = float2(uni.u[0].x * uv.x + uni.u[0].y * uv.y + uni.u[0].z,
+                        uni.u[1].x * uv.x + uni.u[1].y * uv.y + uni.u[1].z);
+    float inBounds = step(0.0f, muv.x) * step(muv.x, 1.0f) * step(0.0f, muv.y) * step(muv.y, 1.0f);
+    float rawHair = tex1.sample(kLinearClamp, toMtlUv(muv)).r * inBounds;
+    float hairMask = smoothstep(0.28f, 0.72f, rawHair);
+    if (uni.u[2].w > 0.5f) {
+        float4 sem = tex2.sample(kLinearClamp, toMtlUv(uv));
+        float bareFace = clamp(sem.r * clamp(sem.a * 1.04f - 0.02f, 0.0f, 1.0f) * 0.85f + sem.g, 0.0f, 1.0f);
+        hairMask *= (1.0f - smoothstep(0.45f, 0.85f, bareFace));
+    }
+    if (hairMask <= 0.002f) {
+        return orig;
+    }
+    float3 color = orig.rgb;
+    if (uni.u[0].w > 0.001f) {
+        float y = luma709(color);
+        float strandLift = smoothstep(0.015f, 0.12f, y);
+        float dyeY = max(luma709(uni.u[2].rgb), 0.08f);
+        float liftedY = clamp(mix(y, clamp(y * (0.65f + dyeY * 1.35f) + dyeY * 0.36f * strandLift, 0.0f, 0.95f), 0.78f), 0.0f, 0.96f);
+        float3 tinted = fitGamut(clamp(uni.u[2].rgb * (liftedY / dyeY), 0.0f, 1.25f), liftedY);
+        color = mix(color, clamp(tinted, 0.0f, 1.0f), clamp(hairMask * uni.u[0].w * (0.35f + 0.65f * strandLift), 0.0f, 0.92f));
+    }
+    if (uni.u[1].w > 0.001f) {
+        float2 axisU = uni.u[4].xy;
+        float2 axisV = float2(-axisU.y, axisU.x);
+        float2 d = float2(uv.x - uni.u[3].x, (uv.y - uni.u[3].y) / max(uni.u[4].z, 0.001f));
+        float su = dot(d, axisU) / max(uni.u[3].z, 0.04f);
+        float sv = dot(d, axisV) / max(uni.u[3].w, 0.04f);
+        float arcDist = (sv + 0.18f * su * su) * 4.2f;
+        float ringBand = exp(-(arcDist * arcDist)) * (1.0f - smoothstep(0.65f, 1.35f, abs(su)));
+        float yawPeak = clamp(-uni.u[4].w * 0.45f, -0.35f, 0.35f);
+        float du = su - yawPeak;
+        float viewLobe = 0.65f + 0.35f * exp(-(du * du) * 2.5f);
+        float strandCatch = smoothstep(0.04f, 0.32f, luma709(color)) * (0.55f + 0.45f * smoothstep(0.10f, 0.45f, orig.r));
+        float sheen = clamp(ringBand * viewLobe * strandCatch * hairMask * uni.u[1].w * 0.52f, 0.0f, 0.45f);
+        float3 sheenCol = mix(float3(1.0f, 0.99f, 0.97f), clamp(uni.u[2].rgb * 1.35f + float3(0.25f), 0.0f, 1.0f), clamp(uni.u[0].w * 0.45f, 0.0f, 0.45f));
+        color = clamp(color + (sheenCol - color) * sheen, 0.0f, 1.0f);
+    }
+    return float4(color, orig.a);
 }
 )MSL";
 

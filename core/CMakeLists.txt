@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(livebeauty_core VERSION 3.0.0 LANGUAGES CXX)
+project(livebeauty_core VERSION 3.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,11 +8,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(LIVEBEAUTY_BUILD_TESTS "Build C++ unit tests" ON)
 option(LIVEBEAUTY_ENABLE_GLES "Build OpenGL ES 2.0/3.0 RHI backend" OFF)
 option(LIVEBEAUTY_ENABLE_METAL "Build Apple Metal RHI backend" OFF)
+option(LIVEBEAUTY_ENABLE_WEBGL "Build WebGL2 / Emscripten Wasm RHI backend" ${LIVEBEAUTY_BUILD_TESTS})
+if(EMSCRIPTEN)
+    set(LIVEBEAUTY_ENABLE_WEBGL ON CACHE BOOL "Build WebGL2 / Emscripten Wasm RHI backend" FORCE)
+endif()
 option(LIVEBEAUTY_BUILD_JNI "Build Android JNI bridge library" OFF)
 
-# 1. Pure C++17 math & state-machine core (zero graphics/OS dependencies)
+# 1. Pure C++17 math, declarative .lbfx bundle parser & state-machine core (zero graphics/OS dependencies)
 add_library(livebeauty_math STATIC
     src/config.cpp
+    src/bundle/effect_bundle.cpp
     src/math/face_mesh_topology.cpp
     src/math/face_geometry.cpp
     src/math/face_roi_selector.cpp
@@ -28,6 +33,8 @@ add_library(livebeauty_math STATIC
     src/math/face_relight.cpp
     src/math/device_tier.cpp
     src/math/ar_3d_accessory.cpp
+    src/math/face_aux_vision.cpp
+    src/math/face_parsing.cpp
 )
 target_include_directories(livebeauty_math PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -93,6 +100,18 @@ if(LIVEBEAUTY_ENABLE_METAL AND APPLE)
     target_compile_options(livebeauty_metal PRIVATE -fobjc-arc -Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# 6. Optional WebGL2 / Emscripten WebAssembly RHI backend
+if(LIVEBEAUTY_ENABLE_WEBGL)
+    add_library(livebeauty_webgl STATIC
+        src/rhi/gles/gles_shaders.cpp
+        src/rhi/webgl/webgl2_device.cpp
+    )
+    target_link_libraries(livebeauty_webgl PUBLIC livebeauty_engine)
+    target_compile_options(livebeauty_webgl PRIVATE
+        $<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-Wall -Wextra -Wno-unused-parameter>
+    )
+endif()
+
 if(LIVEBEAUTY_BUILD_TESTS)
     enable_testing()
     add_executable(livebeauty_math_tests tests/test_math_core.cpp)
@@ -100,7 +119,12 @@ if(LIVEBEAUTY_BUILD_TESTS)
     add_test(NAME livebeauty_math_tests COMMAND livebeauty_math_tests)
 
     add_executable(livebeauty_rhi_tests tests/test_rhi_pipeline.cpp)
-    target_link_libraries(livebeauty_rhi_tests PRIVATE livebeauty_engine)
+    if(LIVEBEAUTY_ENABLE_WEBGL)
+        target_link_libraries(livebeauty_rhi_tests PRIVATE livebeauty_webgl)
+        target_compile_definitions(livebeauty_rhi_tests PRIVATE LIVEBEAUTY_HAS_WEBGL_RHI=1)
+    else()
+        target_link_libraries(livebeauty_rhi_tests PRIVATE livebeauty_engine)
+    endif()
     add_test(NAME livebeauty_rhi_tests COMMAND livebeauty_rhi_tests)
 
     add_executable(livebeauty_bench tests/bench_math_core.cpp)

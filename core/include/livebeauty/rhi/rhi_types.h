@@ -18,6 +18,7 @@ constexpr BufferId kInvalidBuffer = 0;
 enum class TextureFormat : uint8_t {
     kRgba8 = 0,
     kR8 = 1,
+    kRgba16f = 2,
 };
 
 enum class VertexLayout : uint8_t {
@@ -61,6 +62,7 @@ enum class ShaderId : uint8_t {
     kAiResidualBlend,
     kHeadDepthShell,
     kAr3dMesh,
+    kHairDye,
     kCount,
 };
 

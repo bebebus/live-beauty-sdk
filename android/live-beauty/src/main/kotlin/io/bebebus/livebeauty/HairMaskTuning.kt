@@ -167,7 +167,8 @@ internal object HairMaskTuning {
     fun wants(hairHealthy: Boolean, healthy: Boolean, faceWanted: Boolean, value: VideoEffectsConfig): Boolean =
         hairHealthy && healthy && value.enabled && faceWanted &&
             (value.smoothing > 0f || value.whiten > 0f || value.rosy > 0f || value.brightness > 0f ||
-                value.radiance > 0f || value.sharpness > 0f || value.backgroundBlur > 0f)
+                value.radiance > 0f || value.sharpness > 0f || value.backgroundBlur > 0f ||
+                value.hairDye > 0f || value.hairShine > 0f)
 
     /** 模型标签必须恰为 [background, hair]（取置信图第 1 张的前提）。 */
     fun labelsValid(labels: List<String>?): Boolean =

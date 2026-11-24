@@ -27,6 +27,7 @@ struct FaceMakeupUv {
     static Vec3 eyeshadowMainRgb(EyeshadowColor color);
     static Vec3 eyeshadowDeepRgb(EyeshadowColor color);
     static Vec2 irisTile(ContactLensStyle style);
+    static Vec3 hairDyeRgb(HairDyeColor color);
 };
 
 /** 468-pt anatomical sub-mesh vertex weights & packing for dark circles, nasolabial folds, bright eyes & teeth. */

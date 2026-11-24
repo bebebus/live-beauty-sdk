@@ -148,6 +148,14 @@ object NativeBeautyBridge {
     ): Int
     /** 配置 P1/P4 专业选项：3D 打光风格与芯片分级档位。 */
     @JvmStatic external fun nativeSetProOptions(handle: Long, relightStyle: String, performanceTier: String)
+    /** v3.4: 配置实时沙龙染发、天使光圈发质高光与半精度中间管线开关。 */
+    @JvmStatic external fun nativeSetHairStyle(
+        handle: Long,
+        hairDye: Float,
+        hairDyeColor: String,
+        hairShine: Float,
+        preferHalfFloat: Boolean = true,
+    )
     /** 上报宿主机 GPU 渲染器名、CPU 核心数与总内存（MB），供 DeviceTierPolicy 自动分级。 */
     @JvmStatic external fun nativeSetHardwareProfile(handle: Long, gpuRenderer: String, cpuCores: Int, totalRamMb: Int)
     /** 上报当前环境光照 RGB 白平衡增益（0.65..1.35），供美妆自然融入环境色温。 */
@@ -185,6 +193,48 @@ object NativeBeautyBridge {
         headOcclusion: Boolean,
     )
     @JvmStatic external fun nativeClearAr3dAccessories(handle: Long)
+    /** v3.2: 提交 MediaPipe 52 维蒸馏表情系数（微笑/张嘴/挑眉/眨眼/鼓腮/吐舌），由 C++ 表情总线驱动挂件脉冲。 */
+    @JvmStatic external fun nativeSubmitFaceBlendshapes(
+        handle: Long,
+        smile: Float,
+        jawOpen: Float,
+        browUp: Float,
+        blink: Float,
+        cheekPuff: Float,
+        tongueOut: Float,
+    )
+    @JvmStatic external fun nativeSetExpressionReactive(handle: Long, enabled: Boolean)
+    /** v3.2: 提交 top-down RGBA DirectByteBuffer，在 C++17 + ARM NEON 内核完成前景异物遮挡与 ROI 皮肤残差计算并自动上屏。 */
+    @JvmStatic external fun nativeSubmitAuxRgbaSample(
+        handle: Long,
+        rgbaDirectBuffer: java.nio.ByteBuffer,
+        srcWidth: Int,
+        srcHeight: Int,
+        retouchStrength: Float,
+    ): Boolean
+    /** v3.3: 提交 19 类 CelebAMask-HQ / BiSeNetV2 / SegFormer 人脸语义分割类别图（0..19），自动驱动防眼镜/刘海/露齿遮挡与头发保护。 */
+    @JvmStatic external fun nativeSubmitFaceParsingClassMap(
+        handle: Long,
+        classIds: ByteArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        sampleTsMs: Long,
+    ): Boolean
+    /** v3.3: 提交外部 ONNX/TFLite 微型 UNet 皮肤精修残差浮点张量（3xHxW 或 4xHxW NCHW）。 */
+    @JvmStatic external fun nativeSubmitNeuralResidualTensor(
+        handle: Long,
+        tensorNchw: FloatArray,
+        channels: Int,
+        srcWidth: Int,
+        srcHeight: Int,
+        roiLeft: Float,
+        roiTop: Float,
+        roiWidth: Float,
+        roiHeight: Float,
+        strength: Float,
+    ): Boolean
+    /** v3.5: 解析并应用声明式 `.lbfx` 特效包 JSON 清单（美颜滤镜、染发、2D/3D 挂件及表情触发规则）。 */
+    @JvmStatic external fun nativeApplyEffectBundleJson(handle: Long, manifestJson: String): Boolean
     /** 读取 C++17 内核实时性能遥测：[lastMs, emaMs, fps, loadLevel, facePresence, hairShown, activePassesMask, frameCount, activeFaces, displayTs, resolvedTier]。 */
     @JvmStatic external fun nativeGetStats(handle: Long, outStats: FloatArray)
 

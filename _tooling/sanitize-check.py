@@ -9,7 +9,7 @@ FORBIDDEN = re.compile(
     r"(cartoon|video\.dh\.app|1Bit-Software|rtmp_publisher|rtmp_broadcaster|com\.pedro|/Users/fitz|/Users/chen)",
     re.IGNORECASE,
 )
-BINARY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".task", ".tflite", ".jar", ".keystore", ".so", ".a"}
+BINARY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".task", ".tflite", ".onnx", ".jar", ".keystore", ".so", ".a"}
 SKIP_DIRS = {".git", ".gradle", "build", ".dart_tool", "Pods", "DerivedData", ".cxx", ".externalNativeBuild"}
 
 violations = []

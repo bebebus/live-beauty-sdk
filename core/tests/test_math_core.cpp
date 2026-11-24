@@ -4,12 +4,15 @@
 #include <iostream>
 #include <vector>
 
+#include "livebeauty/bundle/effect_bundle.h"
 #include "livebeauty/config.h"
 #include "livebeauty/math/ar_3d_accessory.h"
 #include "livebeauty/math/beauty_tuning.h"
 #include "livebeauty/math/body_geometry.h"
 #include "livebeauty/math/device_tier.h"
+#include "livebeauty/math/face_aux_vision.h"
 #include "livebeauty/math/face_geometry.h"
+#include "livebeauty/math/face_parsing.h"
 #include "livebeauty/math/face_makeup_uv.h"
 #include "livebeauty/math/face_mesh_deformer.h"
 #include "livebeauty/math/face_mesh_filter.h"
@@ -532,6 +535,236 @@ void testAr3dSolverAndSpringPendulum() {
     EXPECT_TRUE(quad[4] < shell[1 * 5 + 4]);
 }
 
+void testFaceAuxVisionNeonAndExpressionBus() {
+    // 1. FaceExpressionBus
+    FaceExpressionBus bus;
+    BlendshapeInput neutral{};
+    auto r0 = bus.update(&neutral);
+    EXPECT_TRUE(r0.trigger == ExpressionTrigger::kNone);
+    EXPECT_NEAR(r0.scaleMultiplier, 1.0f, 1e-4f);
+
+    BlendshapeInput smile{};
+    smile.smile = 0.86f;
+    ExpressionReaction rs{};
+    for (int i = 0; i < 6; ++i) rs = bus.update(&smile);
+    EXPECT_TRUE(rs.trigger == ExpressionTrigger::kSmile);
+    EXPECT_TRUE(rs.scaleMultiplier > 1.05f);
+    EXPECT_TRUE(rs.offsetYBoost < -0.005f);
+
+    // 2. FaceOcclusionSolver (clean skin vs foreign occluder + eye dark pupil exemption)
+    const int w = 128, h = 128;
+    std::vector<uint8_t> rgba(w * h * 4, 255);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const int off = (y * w + x) * 4;
+            if (x >= 70 && x <= 92 && y >= 58 && y <= 88) {
+                rgba[off] = 22; rgba[off + 1] = 140; rgba[off + 2] = 180;
+            } else if (x >= 46 && x <= 52 && y >= 46 && y <= 50) {
+                rgba[off] = 40; rgba[off + 1] = 36; rgba[off + 2] = 34;
+            } else {
+                rgba[off] = 215; rgba[off + 1] = 175; rgba[off + 2] = 152;
+            }
+        }
+    }
+    FaceOcclusionSolver occ;
+    CropRect bounds{0.15f, 0.15f, 0.70f, 0.70f};
+    std::array<uint8_t, FaceOcclusionSolver::kMaskPixels> mask{};
+    occ.compute(rgba.data(), w, h, &bounds, mask.data());
+    EXPECT_TRUE(mask[34 * 64 + 22] >= 240);  // clean cheek stays visible
+    EXPECT_TRUE(mask[36 * 64 + 40] <= 80);   // cyan cup occluded
+    EXPECT_TRUE(mask[24 * 64 + 24] >= 220);  // dark pupil exempted
+
+    // 3. FaceRoiResidualSolver (heals red blemish & zeroes eyes)
+    std::fill(rgba.begin(), rgba.end(), 255);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const int off = (y * w + x) * 4;
+            if (x >= 44 && x <= 48 && y >= 66 && y <= 70) {
+                rgba[off] = 195; rgba[off + 1] = 125; rgba[off + 2] = 115;
+            } else {
+                rgba[off] = 215; rgba[off + 1] = 175; rgba[off + 2] = 152;
+            }
+        }
+    }
+    FaceRoiResidualSolver resSolver;
+    CropRect roi{0.10f, 0.10f, 0.80f, 0.80f};
+    std::array<uint8_t, FaceRoiResidualSolver::kRoiPixels * 4> resRgba{};
+    EXPECT_TRUE(resSolver.compute(rgba.data(), w, h, roi, 0.85f, resRgba.data()));
+    const int eyeOff = (22 * 64 + 22) * 4;
+    EXPECT_TRUE(resRgba[eyeOff + 3] == 0 && resRgba[eyeOff] == 128);
+    const int bx = static_cast<int>(((46.0f / 128.0f) - roi.left) / roi.width * 64.0f);
+    const int by = static_cast<int>(((68.0f / 128.0f) - roi.top) / roi.height * 64.0f);
+    const int bOff = (by * 64 + bx) * 4;
+    EXPECT_TRUE(resRgba[bOff + 3] > 100);
+    EXPECT_TRUE((static_cast<int>(resRgba[bOff + 1]) - 128) > (static_cast<int>(resRgba[bOff]) - 128));
+}
+
+void testFaceParsing19ClassAndNeuralResidualAdapter() {
+    // 1. 19-class FaceParsingMapper: skin(1)/lip(12) visible, eyeglasses(6)/teeth(11)/hair(17) occluded!
+    const int w = 64, h = 64;
+    std::vector<uint8_t> clsMap(w * h, static_cast<uint8_t>(FaceParsingClass::kSkin));
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (y < 14) clsMap[y * w + x] = static_cast<uint8_t>(FaceParsingClass::kHair);
+            else if (y >= 20 && y <= 28 && x >= 14 && x <= 50) clsMap[y * w + x] = static_cast<uint8_t>(FaceParsingClass::kEyeglasses);
+            else if (y >= 44 && y <= 50 && x >= 24 && x <= 40) clsMap[y * w + x] = static_cast<uint8_t>(FaceParsingClass::kInnerMouth);
+        }
+    }
+    FaceParsingMapper mapper;
+    std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+    EXPECT_TRUE(mapper.mapClassIds(clsMap.data(), w, h, occ.data(), hair.data(), person.data()));
+
+    // Clean cheek (y=72, x=64 in 128x128) -> occ=255, hair=0, person=255
+    EXPECT_TRUE(occ[72 * 128 + 64] >= 250);
+    EXPECT_TRUE(hair[72 * 128 + 64] <= 5);
+    EXPECT_TRUE(person[72 * 128 + 64] >= 250);
+    // Eyeglasses center (y=48, x=64 in 128x128) -> occ=0!
+    EXPECT_TRUE(occ[48 * 128 + 64] <= 10);
+    // Inner-mouth teeth center (y=94, x=64 in 128x128) -> occ=0!
+    EXPECT_TRUE(occ[94 * 128 + 64] <= 10);
+    // Hair crown (y=12, x=64 in 128x128) -> hair=255, occ=0!
+    EXPECT_TRUE(hair[12 * 128 + 64] >= 245);
+    EXPECT_TRUE(occ[12 * 128 + 64] <= 10);
+
+    // 2. NeuralSkinResidualAdapter external NCHW tensor + built-in structural shadow micro-kernel
+    std::vector<float> nchw(4 * 32 * 32, 0.0f);
+    for (int i = 0; i < 32 * 32; ++i) {
+        nchw[0 * 1024 + i] = 0.10f;   // +0.10 R delta -> ~179
+        nchw[3 * 1024 + i] = 0.80f;   // 0.80 confidence -> ~204
+    }
+    std::array<uint8_t, NeuralSkinResidualAdapter::kOutPixels * 4> packed{};
+    EXPECT_TRUE(NeuralSkinResidualAdapter::packExternalTensorNchw(nchw.data(), 4, 32, 32, packed.data()));
+    EXPECT_TRUE(packed[0] >= 175 && packed[0] <= 183);
+    EXPECT_TRUE(packed[1] == 128);
+    EXPECT_TRUE(packed[3] >= 200 && packed[3] <= 208);
+
+    // Built-in micro-kernel lifts localized tear-trough / nasolabial shadow dip
+    std::vector<uint8_t> faceImg(128 * 128 * 4, 255);
+    for (int y = 0; y < 128; ++y) {
+        for (int x = 0; x < 128; ++x) {
+            const int off = (y * 128 + x) * 4;
+            const bool hollowShadow = (y >= 72 && y <= 76 && x >= 40 && x <= 56);
+            faceImg[off]     = hollowShadow ? 182 : 212;
+            faceImg[off + 1] = hollowShadow ? 142 : 172;
+            faceImg[off + 2] = hollowShadow ? 122 : 150;
+        }
+    }
+    NeuralSkinResidualAdapter adapter;
+    std::array<uint8_t, NeuralSkinResidualAdapter::kOutPixels * 4> microOut{};
+    CropRect roi{0.10f, 0.10f, 0.80f, 0.80f};
+    EXPECT_TRUE(adapter.evaluateMicroKernel(faceImg.data(), 128, 128, roi, 0.90f, microOut.data()));
+    const int sx = static_cast<int>(((48.0f / 128.0f) - roi.left) / roi.width * 64.0f);
+    const int sy = static_cast<int>(((74.0f / 128.0f) - roi.top) / roi.height * 64.0f);
+    const int sOff = (sy * 64 + sx) * 4;
+    EXPECT_TRUE(microOut[sOff] > 132 && microOut[sOff + 1] > 132);
+}
+
+void testV35Curved3dMeshesAndEffectBundleParser() {
+    // 1. Declarative .lbfx Effect Bundle manifest JSON parser
+    const std::string lbfxJson = R"JSON({
+        "schemaVersion": 1,
+        "id": "rose_crown_glam",
+        "name": "Rose Crown Glam",
+        "author": "Studio",
+        "beauty": {
+            "preset": "korean_water_glow",
+            "cranialTop": 0.62,
+            "hairDye": 0.75,
+            "hairDyeColor": "rose_gold",
+            "hairShine": 0.58,
+            "lipstick": 0.65,
+            "lipstickFinish": "glossy"
+        },
+        "stickers": [
+            {
+                "slot": 0,
+                "anchor": "cheeks",
+                "assetPath": "stickers/sparkle_heart.png",
+                "scale": 1.15,
+                "opacity": 0.90,
+                "trigger": "smile"
+            }
+        ],
+        "ar3d": [
+            {
+                "slot": 0,
+                "anchor": "glasses_bridge",
+                "meshPreset": "curved_glasses",
+                "assetPath": "ar3d/cyber_glasses.png",
+                "scale": 1.05,
+                "headOcclusion": true,
+                "trigger": "always"
+            },
+            {
+                "slot": 1,
+                "anchor": "head_crown",
+                "meshPreset": "curved_tiara",
+                "assetPath": "ar3d/star_tiara.png",
+                "springStiffness": 22.0,
+                "trigger": "brow_up"
+            }
+        ]
+    })JSON";
+
+    bundle::EffectBundleManifest manifest{};
+    std::string err;
+    EXPECT_TRUE(bundle::EffectBundleParser::parseJson(lbfxJson, manifest, &err));
+    EXPECT_TRUE(err.empty());
+    EXPECT_TRUE(manifest.id == "rose_crown_glam");
+    EXPECT_TRUE(manifest.hasBeautySection);
+    EXPECT_TRUE(std::fabs(manifest.beauty.cranialTop - 0.62f) < 1e-5f);
+    EXPECT_TRUE(std::fabs(manifest.beauty.hairDye - 0.75f) < 1e-5f);
+    EXPECT_TRUE(manifest.beauty.hairDyeColor == HairDyeColor::kRoseGold);
+    EXPECT_TRUE(std::fabs(manifest.beauty.hairShine - 0.58f) < 1e-5f);
+    EXPECT_TRUE(manifest.stickers.size() == 1);
+    EXPECT_TRUE(manifest.stickers[0].trigger == bundle::BundleTriggerRule::kSmile);
+    EXPECT_TRUE(manifest.ar3d.size() == 2);
+    EXPECT_TRUE(manifest.ar3d[0].layer.meshPreset == Ar3dMeshPreset::kCurvedGlasses);
+    EXPECT_TRUE(manifest.ar3d[1].layer.meshPreset == Ar3dMeshPreset::kCurvedTiara);
+    EXPECT_TRUE(manifest.ar3d[1].trigger == bundle::BundleTriggerRule::kBrowUp);
+
+    // Invalid JSON cleanly rejected with diagnostic message
+    bundle::EffectBundleManifest bad{};
+    std::string badErr;
+    EXPECT_TRUE(!bundle::EffectBundleParser::parseJson("{ invalid json ", bad, &badErr));
+    EXPECT_TRUE(!badErr.empty());
+
+    // Trigger gain evaluation
+    ExpressionReaction neutralRx{};
+    EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(bundle::BundleTriggerRule::kAlways, neutralRx) == 1.0f);
+    EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(bundle::BundleTriggerRule::kSmile, neutralRx) == 0.0f);
+    ExpressionReaction smileRx{};
+    smileRx.smile = 0.75f;
+    EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(bundle::BundleTriggerRule::kSmile, smileRx) > 0.95f);
+
+    // 2. Curved 3D Glasses & Tiara indexed mesh projection with receding -Z temples
+    std::array<float, FaceMeshFrame::kCoordCount> glLm{};
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 9.0f / 16.0f;
+    const float scale = 0.40f / FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+        glLm[i * 2] = 0.5f + xyz[i * 3] * scale;
+        glLm[i * 2 + 1] = (0.5f / aspect + xyz[i * 3 + 1] * scale) * aspect;
+    }
+    const auto pose = FaceRelightSolver::estimateHeadPose(glLm.data(), aspect, 1.0f, 0.0f, 1.0f);
+    EXPECT_TRUE(pose.valid);
+
+    Ar3dAccessoryConfig glassesCfg = manifest.ar3d[0].layer;
+    glassesCfg.texture = 7;
+    std::array<float, Ar3dSolver::kMaxMeshFloats> meshVerts{};
+    int vertCount = 0, idxCount = 0;
+    const uint16_t* indices = nullptr;
+    float ax = 0.0f, ay = 0.0f;
+    EXPECT_TRUE(Ar3dSolver::buildAccessoryMesh(
+        glassesCfg, glLm.data(), pose, aspect, nullptr,
+        meshVerts.data(), Ar3dSolver::kMaxMeshVertices, vertCount, indices, idxCount, ax, ay));
+    EXPECT_TRUE(vertCount == 18 && idxCount == 36 && indices != nullptr);
+    // Front bridge vertex (idx 4) is significantly closer to camera (higher depth01) than rear temple tip (idx 12)
+    const float bridgeDepth = meshVerts[4 * 5 + 4];
+    const float templeRearDepth = meshVerts[12 * 5 + 4];
+    EXPECT_TRUE(bridgeDepth > templeRearDepth + 0.12f);
+}
+
 }  // namespace
 
 int main() {
@@ -546,6 +779,9 @@ int main() {
     testFaceRelight3dNormalsAndStyles();
     testDeviceTierPolicyClassificationAndDownshift();
     testAr3dSolverAndSpringPendulum();
+    testFaceAuxVisionNeonAndExpressionBus();
+    testFaceParsing19ClassAndNeuralResidualAdapter();
+    testV35Curved3dMeshesAndEffectBundleParser();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

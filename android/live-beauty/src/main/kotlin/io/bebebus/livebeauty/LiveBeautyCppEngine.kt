@@ -128,6 +128,7 @@ internal class LiveBeautyCppEngine(
     private var lastFrameTsMs = Long.MIN_VALUE
     private var lastFaceSampleMs = Long.MIN_VALUE
     private var lastBodySampleMs = Long.MIN_VALUE
+    private var lastAuxSampleMs = Long.MIN_VALUE
 
     @Volatile private var cachedStats = BeautyPerfStats()
 
@@ -146,6 +147,7 @@ internal class LiveBeautyCppEngine(
         lastFrameTsMs = Long.MIN_VALUE
         lastFaceSampleMs = Long.MIN_VALUE
         lastBodySampleMs = Long.MIN_VALUE
+        lastAuxSampleMs = Long.MIN_VALUE
         lastMaskStamp = Long.MIN_VALUE
         lastHairStamp = Long.MIN_VALUE
         hairTex.release()
@@ -184,6 +186,7 @@ internal class LiveBeautyCppEngine(
         val h = handle
         if (h == 0L) return
         NativeBeautyBridge.nativeSetProOptions(h, config.relightStyle, config.performanceTier)
+        NativeBeautyBridge.nativeSetHairStyle(h, config.hairDye, config.hairDyeColor, config.hairShine, true)
         NativeBeautyBridge.packConfigScalars(config, scalars)
         NativeBeautyBridge.nativeSetConfig(
             handle = h,
@@ -528,6 +531,9 @@ internal class LiveBeautyCppEngine(
                     h, res.sampleTsMs, pts, res.faceCount, res.pointsPerFace, res.width, res.height, res.receivedMs,
                 )
             }
+            res.blendshapes6?.let { bs ->
+                NativeBeautyBridge.nativeSubmitFaceBlendshapes(h, bs[0], bs[1], bs[2], bs[3], bs[4], bs[5])
+            }
         } else {
             NativeBeautyBridge.nativeSubmitFaceMiss(h, res.sampleTsMs)
         }
@@ -659,6 +665,20 @@ internal class LiveBeautyCppEngine(
                 lightHealthy = false
             }
         }
+        // v3.2+: C++17 ARM NEON foreground occlusion & structural skin residual solver on shared staging buffer
+        if (wantFace && occlusionMaskTex == 0 &&
+            (lastAuxSampleMs == Long.MIN_VALUE || frameTsMs - lastAuxSampleMs >= AUX_INTERVAL_MS)
+        ) {
+            lastAuxSampleMs = frameTsMs
+            try {
+                faceSampler.staging?.let { sample ->
+                    val retouchStrength = maxOf(currentConfig.darkCircles, currentConfig.nasolabial) * 0.65f
+                    NativeBeautyBridge.nativeSubmitAuxRgbaSample(
+                        h, sample.pixels, sample.width, sample.height, retouchStrength,
+                    )
+                }
+            } catch (_: Exception) {}
+        }
         if (doFace) {
             lastFaceSampleMs = frameTsMs
             try { faceWorker?.submit(faceSampler.lease(FaceTextureSampler.FACE), frameTsMs, width, height) }
@@ -788,7 +808,17 @@ internal class LiveBeautyCppEngine(
     }
 
     private class RawFaceWorker(context: Context, initialMaxFaces: Int, private val onFailure: () -> Unit) {
-        class Result(val epoch: Long, val sampleTsMs: Long, val receivedMs: Long, val width: Int, val height: Int, val mpXy: FloatArray?, val faceCount: Int, val pointsPerFace: Int)
+        class Result(
+            val epoch: Long,
+            val sampleTsMs: Long,
+            val receivedMs: Long,
+            val width: Int,
+            val height: Int,
+            val mpXy: FloatArray?,
+            val faceCount: Int,
+            val pointsPerFace: Int,
+            val blendshapes6: FloatArray? = null,
+        )
         private val appContext = context.applicationContext
         private val closed = AtomicBoolean(false)
         private val inFlight = AtomicBoolean(false)
@@ -818,13 +848,38 @@ internal class LiveBeautyCppEngine(
                 var outFlat: FloatArray? = null
                 var outFaces = 0
                 var outPtsPerFace = 0
+                var outBlend6: FloatArray? = null
                 try {
-                    val faces = try { task().detectForVideo(img, ts).faceLandmarks() } catch (e: Throwable) {
+                    val mpRes = try { task().detectForVideo(img, ts) } catch (e: Throwable) {
                         if (!gpu) throw e
                         gpu = false; policy.onGpuJavaFailure(); try { detector?.close() } catch (_: Throwable) {}; detector = null
                         return
                     }
+                    val faces = mpRes.faceLandmarks()
                     if (gpu && !gpuConfirmed) { gpuConfirmed = true; policy.onGpuSuccess() }
+                    val bsOpt = mpRes.faceBlendshapes()
+                    if (bsOpt.isPresent && bsOpt.get().isNotEmpty()) {
+                        val cats = bsOpt.get()[0]
+                        var smileL = 0f; var smileR = 0f; var jawOpen = 0f
+                        var browUp = 0f; var blinkL = 0f; var blinkR = 0f
+                        var cheekPuff = 0f; var tongueOut = 0f
+                        for (c in cats) {
+                            when (c.categoryName()) {
+                                "mouthSmileLeft" -> smileL = c.score()
+                                "mouthSmileRight" -> smileR = c.score()
+                                "jawOpen" -> jawOpen = c.score()
+                                "browInnerUp" -> browUp = maxOf(browUp, c.score())
+                                "browOuterUpLeft", "browOuterUpRight" -> browUp = maxOf(browUp, c.score() * 0.9f)
+                                "eyeBlinkLeft" -> blinkL = c.score()
+                                "eyeBlinkRight" -> blinkR = c.score()
+                                "cheekPuff" -> cheekPuff = c.score()
+                                "tongueOut" -> tongueOut = c.score()
+                            }
+                        }
+                        outBlend6 = floatArrayOf(
+                            0.5f * (smileL + smileR), jawOpen, browUp, maxOf(blinkL, blinkR), cheekPuff, tongueOut,
+                        )
+                    }
                     val crop = sample.crop
                     val takeFaces = minOf(faces.size, desiredNumFaces)
                     if (takeFaces > 0) {
@@ -852,7 +907,7 @@ internal class LiveBeautyCppEngine(
                     }
                 } finally { img.close() }
                 if (!closed.get() && ep == epoch.get()) {
-                    latest.set(Result(ep, ts, SystemClock.uptimeMillis(), w, h, outFlat, outFaces, outPtsPerFace))
+                    latest.set(Result(ep, ts, SystemClock.uptimeMillis(), w, h, outFlat, outFaces, outPtsPerFace, outBlend6))
                 }
             } catch (_: Throwable) { if (!closed.get()) onFailure() } finally { inFlight.set(false) }
         }
@@ -874,6 +929,7 @@ internal class LiveBeautyCppEngine(
             FaceLandmarker.FaceLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").setDelegate(d).build())
                 .setRunningMode(RunningMode.VIDEO).setNumFaces(numFaces)
+                .setOutputFaceBlendshapes(true)
                 .setMinFaceDetectionConfidence(0.6f).setMinFacePresenceConfidence(0.6f).setMinTrackingConfidence(0.5f).build())
         fun close() {
             if (!closed.compareAndSet(false, true)) return
@@ -972,6 +1028,7 @@ internal class LiveBeautyCppEngine(
         const val MAX_STICKERS = 4
         private const val FACE_GPU_INTERVAL_MS = 1L
         private const val FACE_CPU_INTERVAL_MS = 45L
+        private const val AUX_INTERVAL_MS = 66L
         private const val BODY_INTERVAL_MS = VideoEffectsFilter.BODY_INTERVAL_MS
         private const val SEG_INTERVAL_MS = VideoEffectsFilter.SEG_INTERVAL_MS
         private const val PREFS = "livebeauty_face_tracker"
@@ -1037,7 +1094,8 @@ internal class LiveBeautyCppEngine(
                 cfg.darkCircles > 0f || cfg.brightEyes > 0f || cfg.teethWhiten > 0f ||
                 cfg.nasolabial > 0f || cfg.rosy > 0f || cfg.radiance > 0f ||
                 cfg.relight > 0f || cfg.oilControl > 0f || cfg.neckTone > 0f ||
-                cfg.blemishRemove > 0f || (cfg.skinOnly && cfg.smoothing > 0f))
+                cfg.blemishRemove > 0f || cfg.hairDye > 0f || cfg.hairShine > 0f ||
+                (cfg.skinOnly && cfg.smoothing > 0f))
 
         fun needsBody(cfg: VideoEffectsConfig) = cfg.enabled && (
             cfg.waistSlim > 0f || cfg.bustEnhance > 0f || cfg.legLengthen > 0f ||

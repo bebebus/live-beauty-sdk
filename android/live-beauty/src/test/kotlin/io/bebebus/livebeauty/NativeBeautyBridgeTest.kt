@@ -48,6 +48,9 @@ class NativeBeautyBridgeTest {
                 "matteTemporal" to 0.75,
                 "blemishRemove" to 0.50,
                 "performanceTier" to "ultra",
+                "hairDye" to 0.72,
+                "hairDyeColor" to "rose_gold",
+                "hairShine" to 0.55,
             ),
         )
         assertEquals(0.65f, parsed.relight, 1e-6f)
@@ -58,6 +61,9 @@ class NativeBeautyBridgeTest {
         assertEquals(0.75f, parsed.matteTemporal, 1e-6f)
         assertEquals(0.50f, parsed.blemishRemove, 1e-6f)
         assertEquals("ultra", parsed.performanceTier)
+        assertEquals(0.72f, parsed.hairDye, 1e-6f)
+        assertEquals("rose_gold", parsed.hairDyeColor)
+        assertEquals(0.55f, parsed.hairShine, 1e-6f)
 
         val rawStats = floatArrayOf(4.2f, 4.5f, 30f, 0f, 1f, 0.8f, 123f, 42f, 2f, 1000f, 3f)
         val stats = BeautyPerfStats.fromRaw(rawStats)

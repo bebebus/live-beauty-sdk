@@ -107,6 +107,17 @@ void main() {
         () => custom.copyWith(lipstickColor: 'neon_green').validate(),
         throwsArgumentError,
       );
+      final LiveBeautyConfig dyed = custom.copyWith(
+        hairDye: 0.75,
+        hairDyeColor: 'rose_gold',
+        hairShine: 0.50,
+      );
+      expect(() => dyed.validate(), returnsNormally);
+      expect(LiveBeautyConfig.fromMap(dyed.toMap()), equals(dyed));
+      expect(
+        () => dyed.copyWith(hairDyeColor: 'unknown_dye').validate(),
+        throwsArgumentError,
+      );
     });
   });
 

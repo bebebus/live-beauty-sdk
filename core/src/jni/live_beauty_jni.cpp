@@ -23,6 +23,10 @@ struct JniEngineHandle {
     int frameDelayFramesOverride = 0;
     livebeauty::math::RelightStyle relightStyleOverride = livebeauty::math::RelightStyle::kNatural;
     livebeauty::math::PerformanceTier performanceTierOverride = livebeauty::math::PerformanceTier::kAuto;
+    float hairDyeOverride = 0.0f;
+    livebeauty::HairDyeColor hairDyeColorOverride = livebeauty::HairDyeColor::kMilkTeaBrown;
+    float hairShineOverride = 0.0f;
+    bool preferHalfFloatOverride = true;
 
     JniEngineHandle() : device(), engine(device) {}
 };
@@ -231,6 +235,10 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     cfg.frameDelayFrames = handle->frameDelayFramesOverride;
     cfg.relightStyle = handle->relightStyleOverride;
     cfg.performanceTier = handle->performanceTierOverride;
+    cfg.hairDye = (n >= 52) ? s[51] : handle->hairDyeOverride;
+    cfg.hairDyeColor = handle->hairDyeColorOverride;
+    cfg.hairShine = (n >= 53) ? s[52] : handle->hairShineOverride;
+    cfg.preferHalfFloat = handle->preferHalfFloatOverride;
 
     handle->engine.setConfig(cfg);
 }
@@ -394,6 +402,23 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetProOptions(
 }
 
 JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHairStyle(
+    JNIEnv* env, jclass, jlong ptr, jfloat hairDye, jstring hairDyeColorStr, jfloat hairShine, jboolean preferHalfFloat) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->hairDyeOverride = hairDye;
+    handle->hairDyeColorOverride = livebeauty::parseHairDyeColor(toStdString(env, hairDyeColorStr));
+    handle->hairShineOverride = hairShine;
+    handle->preferHalfFloatOverride = (preferHalfFloat == JNI_TRUE);
+    auto cfg = handle->engine.config();
+    cfg.hairDye = handle->hairDyeOverride;
+    cfg.hairDyeColor = handle->hairDyeColorOverride;
+    cfg.hairShine = handle->hairShineOverride;
+    cfg.preferHalfFloat = handle->preferHalfFloatOverride;
+    handle->engine.setConfig(cfg);
+}
+
+JNIEXPORT void JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHardwareProfile(
     JNIEnv* env, jclass, jlong ptr, jstring gpuRenderer, jint cpuCores, jint totalRamMb) {
     auto* handle = fromHandle(ptr);
@@ -469,6 +494,85 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeClearAr3dAccessories(
     JNIEnv*, jclass, jlong ptr) {
     auto* handle = fromHandle(ptr);
     if (handle) handle->engine.clearAr3dAccessories();
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitFaceBlendshapes(
+    JNIEnv*, jclass, jlong ptr,
+    jfloat smile, jfloat jawOpen, jfloat browUp, jfloat blink, jfloat cheekPuff, jfloat tongueOut) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    livebeauty::math::BlendshapeInput bs{smile, jawOpen, browUp, blink, cheekPuff, tongueOut};
+    handle->engine.submitFaceBlendshapes(bs);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetExpressionReactive(
+    JNIEnv*, jclass, jlong ptr, jboolean enabled) {
+    auto* handle = fromHandle(ptr);
+    if (handle) handle->engine.setExpressionReactive(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitAuxRgbaSample(
+    JNIEnv* env, jclass, jlong ptr, jobject rgbaDirectBuf, jint srcWidth, jint srcHeight, jfloat retouchStrength) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !rgbaDirectBuf || srcWidth <= 0 || srcHeight <= 0) return JNI_FALSE;
+    auto* ptrBytes = static_cast<const uint8_t*>(env->GetDirectBufferAddress(rgbaDirectBuf));
+    const jlong cap = env->GetDirectBufferCapacity(rgbaDirectBuf);
+    const jlong needed = static_cast<jlong>(srcWidth) * static_cast<jlong>(srcHeight) * 4;
+    if (!ptrBytes || cap < needed) return JNI_FALSE;
+    return handle->engine.submitAuxRgbaSample(ptrBytes, srcWidth, srcHeight, retouchStrength) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitFaceParsingClassMap(
+    JNIEnv* env, jclass, jlong ptr, jbyteArray classIdsArr, jint srcWidth, jint srcHeight, jlong sampleTsMs) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !classIdsArr || srcWidth <= 0 || srcHeight <= 0) return JNI_FALSE;
+    const jsize len = env->GetArrayLength(classIdsArr);
+    if (len < srcWidth * srcHeight) return JNI_FALSE;
+    jbyte* raw = env->GetByteArrayElements(classIdsArr, nullptr);
+    if (!raw) return JNI_FALSE;
+    const bool ok = handle->engine.submitFaceParsingClassMap(
+        reinterpret_cast<const uint8_t*>(raw), srcWidth, srcHeight, sampleTsMs);
+    env->ReleaseByteArrayElements(classIdsArr, raw, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitNeuralResidualTensor(
+    JNIEnv* env, jclass, jlong ptr, jfloatArray tensorNchwArr, jint channels, jint srcWidth, jint srcHeight,
+    jfloat roiLeft, jfloat roiTop, jfloat roiWidth, jfloat roiHeight, jfloat strength) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !tensorNchwArr || (channels != 3 && channels != 4) || srcWidth <= 0 || srcHeight <= 0) {
+        return JNI_FALSE;
+    }
+    const jsize len = env->GetArrayLength(tensorNchwArr);
+    if (len < channels * srcWidth * srcHeight) return JNI_FALSE;
+    jfloat* raw = env->GetFloatArrayElements(tensorNchwArr, nullptr);
+    if (!raw) return JNI_FALSE;
+    livebeauty::CropRect roi{roiLeft, roiTop, roiWidth, roiHeight};
+    const bool ok = handle->engine.submitNeuralResidualTensor(raw, channels, srcWidth, srcHeight, roi, strength);
+    env->ReleaseFloatArrayElements(tensorNchwArr, raw, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeApplyEffectBundleJson(
+    JNIEnv* env, jclass, jlong ptr, jstring manifestJsonStr) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !manifestJsonStr) return JNI_FALSE;
+    const std::string json = toStdString(env, manifestJsonStr);
+    const bool ok = handle->engine.applyEffectBundleJson(json, nullptr, nullptr);
+    if (ok) {
+        const auto& cfg = handle->engine.config();
+        handle->hairDyeOverride = cfg.hairDye;
+        handle->hairDyeColorOverride = cfg.hairDyeColor;
+        handle->hairShineOverride = cfg.hairShine;
+        handle->relightStyleOverride = cfg.relightStyle;
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL

@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.5.0] - 2026-11-24
+
+### Added
+- **Unified C++17 + ARM NEON Face Aux Vision & 52-Channel Expression Bus (`v3.2`, `FaceOcclusionSolver`, `FaceRoiResidualSolver`, `FaceExpressionBus`)**:
+  - Ported YCbCr foreground object occlusion detection (`64x64` R8, shielding hands, microphones, cups, and dark frames while preserving dark irises/mouths) and bilateral high-frequency-preserving Face-ROI skin residual (`64x64` RGBA8) into cross-platform C++17 with ARM NEON SIMD acceleration (`submitAuxRgbaSample`).
+  - Added thread-safe 52-channel distilled Face Blendshapes expression bus (`submitFaceBlendshapes`) driving reactive 2D/3D AR scale, vertical bounce, and visibility triggers identically across Android, iOS, and Web.
+- **Native iOS/macOS Apple Vision Neural Engine (ANE) Tracker (`v3.2`, `FLTVisionTracker`, `FLTLiveBeautyMetalEngine`)**:
+  - Added asynchronous `VNGeneratePersonSegmentationRequest` (zero-copy `OneComponent8` `CVPixelBuffer` → `MTLPixelFormatR8Unorm` via `CVMetalTextureCache`) + `VNDetectHumanBodyPoseRequest` (mapped to 33-point top-down body pose) + `128x128` RGBA downsample into C++17 NEON aux (`submitVisionPixelBuffer:frameTimestampMs:`).
+- **19-Class Semantic Face-Parsing Mapper & Neural Skin Residual Adapter (`v3.3`, `FaceParsingMapper`, `NeuralSkinResidualAdapter`)**:
+  - Added CelebAMask-HQ / BiSeNetV2 / SegFormer 19-class semantic mapper (`submitFaceParsingClassMap` / `submitFaceParsingLogits`) producing temporally smoothed `128x128` R8 occlusion, hair, and person masks.
+  - Added NCHW (`3xHxW` / `4xHxW`) external neural skin residual tensor packer (`submitNeuralResidualTensor`) alongside a built-in 2-scale depthwise-separable structural tear-trough/nasolabial shadow-lift micro-kernel.
+- **View-Dependent 6-DoF PBR Lip/Iris Glaze, Salon Hair Dyeing & `RGBA16F` Pipeline (`v3.4`, `ShaderId::kHairDye`, `TextureFormat::kRgba16f`)**:
+  - Upgraded `kMakeupLip` and `kMakeupIris` with 6-DoF signed-yaw specular belly glide, grazing Fresnel rim sheen, and corneal catchlight 3D dome parallax while keeping frontal (`yaw = 0`) output bit-identical.
+  - Added real-time strand-preserving salon hair dyeing (`hairDye`, 6 shades: `milk_tea_brown`, `haze_blue`, `ash_purple`, `rose_gold`, `cool_black`, `caramel_copper`) and anisotropic Kajiya-Kay-inspired crown Angel-Ring sheen (`hairShine`), strictly gated against bare facial skin (`0/255` skin bleed).
+  - Promoted intermediate multi-pass accumulation & dual-band guided filter FBOs to `TextureFormat::kRgba16f` (`MTLPixelFormatRGBA16Float` / `GL_RGBA16F` with automatic FBO-completeness fallback) on non-`Lite` tiers while preserving `RGBA8` final output ABI.
+- **True 3D Indexed Mesh AR, Declarative `.lbfx` Effect Bundles & WebGL2/Emscripten RHI Backend (`v3.5`, `Ar3dSolver::buildAccessoryMesh`, `EffectBundleParser`, `WebGl2Device`)**:
+  - Extended `Ar3dSolver` and `RenderPipeline` to render full 3D indexed meshes (`kCurvedGlasses` with receding `-Z` ear temples, `kCurvedTiara` cylindrical cranium wrap, and custom glTF-baked `Ar3dMeshVertex` buffers).
+  - Added zero-dependency C++17 `.lbfx` Effect Bundle JSON manifest loader (`EffectBundleParser`, `applyEffectBundleJson`) supporting preset/beauty overrides, hair dye, 2D stickers, 3D meshes, and expression-gated triggers (`smile`, `mouth_open`, `brow_up`, `blink`, `cheek_puff`, `tongue_out`).
+  - Added `WebGl2Device` (`core/include/livebeauty/rhi/webgl/webgl2_device.h`) implementing `IRhiDevice` over WebGL 2.0 / Emscripten (`GL_R8`, `EXT_color_buffer_float` `GL_RGBA16F`, and all 31 shared GLSL passes) for WebRTC / WebCodecs browser pipelines.
+
 ## [3.0.0] - 2026-11-23
 
 ### Added
