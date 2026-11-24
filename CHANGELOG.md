@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.5.2] - 2026-11-24
+
+### Fixed
+- **Continuous 3D AR Expression Modulation & Roll-Compensated Skin Residual (`LiveBeautyEngine`, `FaceRoiResidualSolver`, `NeuralSkinResidualAdapter`, `FLTLiveBeautyMetalEngine`, `FLTVisionTracker`)**:
+  - Removed discrete `exprReaction.trigger != kNone` step gate on `scaleMultiplier` and `offsetYBoost` in `LiveBeautyEngine::processFrame`, ensuring `C¹`-continuous `smoothstep` AR scale and vertical bounce across trigger thresholds.
+  - Propagated `headRollRad` into `FaceRoiResidualSolver::compute` and `NeuralSkinResidualAdapter::evaluateMicroKernel` so eye and mouth exemption windows stay aligned under `>45°` head roll.
+  - Enforced strict `kCVPixelBufferPoolAllocationThresholdKey` backpressure and explicit `32BGRA`/`32RGBA` format validation in `FLTLiveBeautyMetalEngine::copyProcessedPixelBuffer:`, triggered immediate `doAux` alongside initial segmentation in `FLTVisionTracker`, and refreshed cross-platform KDoc comments in `VideoEffectsConfig.kt`.
+
 ## [3.5.1] - 2026-11-24
 
 ### Fixed

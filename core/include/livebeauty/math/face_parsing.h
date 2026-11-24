@@ -112,7 +112,8 @@ public:
         int srcHeight,
         const CropRect& faceBounds,
         float strength,
-        uint8_t* outRgba64x64);
+        uint8_t* outRgba64x64,
+        float headRollRad = 0.0f);
 
 private:
     std::array<float, kOutPixels> lumaFine_{};

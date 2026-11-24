@@ -15,14 +15,14 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val eyeEnlarge: Float = 0f,
     val whiten: Float = 0f,
     val rosy: Float = 0f,
-    /** 美体（仅 Android，需识别到身体）：细腰、丰胸、长腿，0–1。 */
+    /** 美体（Android GLES + iOS Metal，需识别到身体）：细腰、丰胸、长腿，0–1。 */
     val waistSlim: Float = 0f,
     val bustEnhance: Float = 0f,
     val legLengthen: Float = 0f,
-    /** 美体补充（仅 Android）：瘦肩、天鹅颈，0–1。 */
+    /** 美体补充（Android GLES + iOS Metal）：瘦肩、天鹅颈，0–1。 */
     val shoulderSlim: Float = 0f,
     val neckLengthen: Float = 0f,
-    /** 更多脸型与 478 点网格微整（仅 Android，需人脸）：下巴/额头/眼距/眼角/长鼻/嘴型为双向 -1..1，其余 0..1。 */
+    /** 更多脸型与 478 点网格微整（Android GLES + iOS Metal，需人脸）：下巴/额头/眼距/眼角/长鼻/嘴型为双向 -1..1，其余 0..1。 */
     val chinShape: Float = 0f,
     val foreheadShape: Float = 0f,
     val noseSlim: Float = 0f,
@@ -35,21 +35,21 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val noseLength: Float = 0f,
     val mouthSize: Float = 0f,
     val mouthSmile: Float = 0f,
-    /** 局部修饰（仅 Android，需人脸）：去黑眼圈、亮眼、白牙，0–1。 */
+    /** 局部修饰（Android GLES + iOS Metal，需人脸）：去黑眼圈、亮眼、白牙，0–1。 */
     val darkCircles: Float = 0f,
     val brightEyes: Float = 0f,
     val teethWhiten: Float = 0f,
-    /** 淡化法令纹（仅 Android，需人脸）：0–1。 */
+    /** 淡化法令纹（Android GLES + iOS Metal，需人脸）：0–1。 */
     val nasolabial: Float = 0f,
-    /** 背景虚化（仅 Android，人像分割）：0–1。 */
+    /** 背景虚化（Android GLES + iOS Metal，人像分割）：0–1。 */
     val backgroundBlur: Float = 0f,
-    /** LUT 调色（仅 Android）：512×512 PNG 的 https 地址或内置 asset://luts/<id>.png，空串表示不用；强度 0–1。 */
+    /** LUT 调色（Android GLES + iOS Metal）：512×512 PNG 的 https 地址或内置 asset://luts/<id>.png，空串表示不用；强度 0–1。 */
     val lutUrl: String = "",
     val lutIntensity: Float = 1f,
-    /** 质感磨皮微纹理保留（仅 Android，0–1）与柔光立体打光（仅 Android，0–1），0 为中性。 */
+    /** 质感磨皮微纹理保留与柔光立体打光（Android GLES + iOS Metal，0–1），0 为中性。 */
     val skinTexture: Float = 0f,
     val radiance: Float = 0f,
-    /** 实时美妆（仅 Android，需 478 点人脸网格）：全部强度 0–1，0 为不绘制。 */
+    /** 实时美妆（Android GLES + iOS Metal，需 478 点人脸网格）：全部强度 0–1，0 为不绘制。 */
     val lipstick: Float = 0f,
     val lipstickColor: String = "rose_bean",
     val lipstickFinish: String = "velvet",
@@ -68,7 +68,7 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val contactLens: Float = 0f,
     val contactLensStyle: String = "hazel",
     val catchlight: Float = 0f,
-    /** 高颅顶 / 蓬松头包脸（仅 Android，0..1，置于末尾保持位置构造兼容）：外蓬颅顶与上颞发冠且不拉长裸额头。 */
+    /** 高颅顶 / 蓬松头包脸（Android GLES + iOS Metal，0..1，置于末尾保持位置构造兼容）：外蓬颅顶与上颞发冠且不拉长裸额头。 */
     val cranialTop: Float = 0f,
     /** P1: 3D 真实法线演播室重打光强度（0..1）与风格（natural/studio_softbox/butterfly/rembrandt）。 */
     val relight: Float = 0f,

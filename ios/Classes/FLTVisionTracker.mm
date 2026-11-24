@@ -85,7 +85,8 @@
     const int64_t prevAux = _lastAuxMs.load(std::memory_order_relaxed);
     const BOOL doSeg = wantSeg && (prevSeg == INT64_MIN || sampleTsMs - prevSeg >= 45);
     const BOOL doPose = wantPose && (prevPose == INT64_MIN || sampleTsMs - prevPose >= 66);
-    const BOOL doAux = wantAux && auxBlock != nil && (prevAux == INT64_MIN || sampleTsMs - prevAux >= 95);
+    const BOOL doAux = wantAux && auxBlock != nil &&
+                       (prevAux == INT64_MIN || (doSeg && prevSeg == INT64_MIN) || sampleTsMs - prevAux >= 95);
     if (!doSeg && !doPose && !doAux) return;
 
     bool expected = false;

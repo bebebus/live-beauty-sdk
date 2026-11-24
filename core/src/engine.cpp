@@ -237,8 +237,8 @@ bool LiveBeautyEngine::submitAuxRgbaSample(
     std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> biRes{};
     std::array<uint8_t, math::NeuralSkinResidualAdapter::kOutPixels * 4> microRes{};
     if (clampedStrength > 0.02f &&
-        residualSolver_.compute(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, biRes.data()) &&
-        neuralResidualAdapter_.evaluateMicroKernel(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, microRes.data())) {
+        residualSolver_.compute(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, biRes.data(), rollRad) &&
+        neuralResidualAdapter_.evaluateMicroKernel(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, microRes.data(), rollRad)) {
         // Combine bilateral chroma de-speckling + multi-scale depthwise-separable structural shadow lift
         for (size_t i = 0; i < stagedResidualRgba_.size(); i += 4) {
             for (size_t c = 0; c < 3; ++c) {
@@ -650,7 +650,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
                 continue;
             }
         }
-        if (expressionReactive_ && exprReaction.trigger != math::ExpressionTrigger::kNone) {
+        if (expressionReactive_) {
             modulatedAr3d[i].scale *= exprReaction.scaleMultiplier;
             modulatedAr3d[i].offsetY += exprReaction.offsetYBoost;
             modulatedAr3d[i].opacity = detail::clampf(modulatedAr3d[i].opacity * exprReaction.opacityBoost, 0.0f, 1.0f);

@@ -115,7 +115,8 @@ public:
         int srcHeight,
         const CropRect& faceBounds,
         float retouchStrength,
-        uint8_t* outRgba64x64);
+        uint8_t* outRgba64x64,
+        float headRollRad = 0.0f);
 
 private:
     std::array<float, kRoiPixels> patchR_{};

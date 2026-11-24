@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(livebeauty_core VERSION 3.5.0 LANGUAGES CXX)
+project(livebeauty_core VERSION 3.5.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -833,13 +833,39 @@ void testCodeReviewRegressionGuards() {
     bundle::EffectBundleManifest hexBad{};
     EXPECT_TRUE(!bundle::EffectBundleParser::parseJson(R"({"beauty":{"smoothing":0x1.0p0}})", hexBad, nullptr));
 
-    // 6. FaceExpressionBus: blink does not dim permanent kAlways opacityBoost, and kTongueOut activates cleanly
+    // 6. FaceExpressionBus: blink does not dim permanent kAlways opacityBoost, kTongueOut activates cleanly,
+    //    and sub-threshold smile ramps scaleMultiplier smoothly from 1.0f without step jump at trigger boundary
     FaceExpressionBus bus;
+    const BlendshapeInput subSmile{0.62f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    ExpressionReaction rxSub{};
+    for (int i = 0; i < 2; ++i) rxSub = bus.update(&subSmile);
+    EXPECT_TRUE(rxSub.trigger == ExpressionTrigger::kNone);
+    EXPECT_TRUE(rxSub.scaleMultiplier > 1.0f && rxSub.scaleMultiplier < 1.042f);
+
+    bus.reset();
     const BlendshapeInput bsSample{0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.90f};
     bus.update(&bsSample);
     const auto rxBlink = bus.update(&bsSample);
     EXPECT_TRUE(rxBlink.opacityBoost == 1.0f);
     EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(bundle::BundleTriggerRule::kTongueOut, rxBlink) > 0.8f);
+
+    // 7. Head-roll-compensated eye exemption in FaceRoiResidualSolver & NeuralSkinResidualAdapter (+45 deg roll)
+    const float roll45 = 0.78539816f;
+    // Canonical left eye center (relX=0.30, relY=0.35) rotated by +45 deg around (0.5, 0.5):
+    // dx = -0.20, dy = -0.15 -> rotX = 0.5 + (-0.20*0.7071 - (-0.15)*0.7071) = 0.4646, rotY = 0.5 + (-0.35*0.7071) = 0.2525
+    const int rotEyeX = static_cast<int>(0.4646f * 64.0f);
+    const int rotEyeY = static_cast<int>(0.2525f * 64.0f);
+    std::vector<uint8_t> rollFace(64 * 64 * 4, 200);
+    CropRect fullRoi{0.0f, 0.0f, 1.0f, 1.0f};
+    FaceRoiResidualSolver rollResSolver;
+    std::array<uint8_t, FaceRoiResidualSolver::kRoiPixels * 4> rollBi{};
+    EXPECT_TRUE(rollResSolver.compute(rollFace.data(), 64, 64, fullRoi, 0.85f, rollBi.data(), roll45));
+    EXPECT_TRUE(rollBi[(rotEyeY * 64 + rotEyeX) * 4 + 3] == 0);
+
+    NeuralSkinResidualAdapter rollAdapter;
+    std::array<uint8_t, NeuralSkinResidualAdapter::kOutPixels * 4> rollMicro{};
+    EXPECT_TRUE(rollAdapter.evaluateMicroKernel(rollFace.data(), 64, 64, fullRoi, 0.85f, rollMicro.data(), roll45));
+    EXPECT_TRUE(rollMicro[(rotEyeY * 64 + rotEyeX) * 4 + 3] == 0);
 }
 
 }  // namespace

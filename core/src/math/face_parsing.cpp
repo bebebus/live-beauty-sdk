@@ -199,7 +199,8 @@ bool NeuralSkinResidualAdapter::evaluateMicroKernel(
     int srcHeight,
     const CropRect& faceBounds,
     float strength,
-    uint8_t* outRgba64x64) {
+    uint8_t* outRgba64x64,
+    float headRollRad) {
     if (!rgbaTopDown || !outRgba64x64 || srcWidth <= 0 || srcHeight <= 0) return false;
     if (strength <= 0.01f || faceBounds.width < 0.04f || faceBounds.height < 0.04f) return false;
 
@@ -252,10 +253,16 @@ bool NeuralSkinResidualAdapter::evaluateMicroKernel(
     // 3. Pointwise 1x1 residual synthesis: lift tear-trough / nasolabial / acne-pit structural dips (coarse > mid)
     //    while 100% preserving micro-pore detail (lumaFine - lumaMid untouched!)
     const float str = detail::clampf(strength, 0.0f, 1.0f);
+    const float cosR = std::cos(-headRollRad);
+    const float sinR = std::sin(-headRollRad);
     for (int y = 0; y < kOutSize; ++y) {
-        const float relY = (static_cast<float>(y) + 0.5f) / kOutSize;
+        const float rawRelY = (static_cast<float>(y) + 0.5f) / kOutSize;
         for (int x = 0; x < kOutSize; ++x) {
-            const float relX = (static_cast<float>(x) + 0.5f) / kOutSize;
+            const float rawRelX = (static_cast<float>(x) + 0.5f) / kOutSize;
+            const float cx = rawRelX - 0.5f;
+            const float cy = rawRelY - 0.5f;
+            const float relX = 0.5f + cx * cosR - cy * sinR;
+            const float relY = 0.5f + cx * sinR + cy * cosR;
             const int idx = y * kOutSize + x;
             uint8_t* dst = outRgba64x64 + idx * 4;
 

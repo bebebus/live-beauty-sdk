@@ -790,10 +790,10 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
         _poolFormat = fmt;
     }
     CVPixelBufferRef outPb = nullptr;
-    NSDictionary* aux = @{(NSString*)kCVPixelBufferPoolAllocationThresholdKey : @8};
+    NSDictionary* aux = @{(NSString*)kCVPixelBufferPoolAllocationThresholdKey : @6};
     if (CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
-            kCFAllocatorDefault, _outputPool, (__bridge CFDictionaryRef)aux, &outPb) != kCVReturnSuccess || !outPb) {
-        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _outputPool, &outPb);
+            kCFAllocatorDefault, _outputPool, (__bridge CFDictionaryRef)aux, &outPb) != kCVReturnSuccess) {
+        return nullptr;
     }
     return outPb;
 }
@@ -807,9 +807,10 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     if (w == 0 || h == 0) return nullptr;
 
     const OSType inFmt = CVPixelBufferGetPixelFormatType(pixelBuffer);
-    const OSType ioFmt = (inFmt == kCVPixelFormatType_32RGBA)
-        ? kCVPixelFormatType_32RGBA
-        : kCVPixelFormatType_32BGRA;
+    if (inFmt != kCVPixelFormatType_32BGRA && inFmt != kCVPixelFormatType_32RGBA) {
+        return nullptr;
+    }
+    const OSType ioFmt = inFmt;
     const MTLPixelFormat mtlFmt = (ioFmt == kCVPixelFormatType_32RGBA)
         ? MTLPixelFormatRGBA8Unorm
         : MTLPixelFormatBGRA8Unorm;

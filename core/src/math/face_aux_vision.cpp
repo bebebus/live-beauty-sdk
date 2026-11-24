@@ -387,7 +387,8 @@ bool FaceRoiResidualSolver::compute(
     int srcHeight,
     const CropRect& faceBounds,
     float retouchStrength,
-    uint8_t* outRgba64x64) {
+    uint8_t* outRgba64x64,
+    float headRollRad) {
     if (!rgbaTopDown || !outRgba64x64 || srcWidth <= 0 || srcHeight <= 0) return false;
     if (retouchStrength <= 0.01f || faceBounds.width < 0.04f || faceBounds.height < 0.04f) return false;
 
@@ -395,6 +396,8 @@ bool FaceRoiResidualSolver::compute(
     const float roiT = detail::clampf(faceBounds.top, 0.0f, 0.96f);
     const float roiW = detail::clampf(faceBounds.width, 0.04f, 1.0f - roiL);
     const float roiH = detail::clampf(faceBounds.height, 0.04f, 1.0f - roiT);
+    const float cosR = std::cos(-headRollRad);
+    const float sinR = std::sin(-headRollRad);
 
     // 1. Bilinear sample face ROI into 64x64 planar RGB [0..1]
     for (int y = 0; y < kRoiSize; ++y) {
@@ -434,10 +437,14 @@ bool FaceRoiResidualSolver::compute(
     const float inv2Sigma2 = 0.5f / (0.095f * 0.095f);
 
     for (int y = 0; y < kRoiSize; ++y) {
-        const float relY = (static_cast<float>(y) + 0.5f) / static_cast<float>(kRoiSize);
+        const float rawRelY = (static_cast<float>(y) + 0.5f) / static_cast<float>(kRoiSize);
         const int rowOff = y * kRoiSize;
         for (int x = 0; x < kRoiSize; ++x) {
-            const float relX = (static_cast<float>(x) + 0.5f) / static_cast<float>(kRoiSize);
+            const float rawRelX = (static_cast<float>(x) + 0.5f) / static_cast<float>(kRoiSize);
+            const float cx = rawRelX - 0.5f;
+            const float cy = rawRelY - 0.5f;
+            const float relX = 0.5f + cx * cosR - cy * sinR;
+            const float relY = 0.5f + cx * sinR + cy * cosR;
             const int idx = rowOff + x;
             const float cR = patchR_[idx];
             const float cG = patchG_[idx];
