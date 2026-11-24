@@ -1108,6 +1108,63 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
         const Rgba laggedHair = evalComp({28, 26, 27, 255}, 255, 0, 0.70f, 0.20f);
         EXPECT_TRUE(std::abs(int(laggedHair.r) - 28) <= 1 && std::abs(int(laggedHair.b) - 27) <= 1);
     }
+
+    // 3. v3.6.3 Virtual Background Anti-Occlusion Shield:
+    //    Even when personMask == 0 (complete segmentation hole!) across tracked primary/secondary face & neck,
+    //    fs_bg_virtual_mix MUST keep the person solid while still cleanly replacing adjacent background!
+    {
+        constexpr int kW = 64, kH = 64;
+        // Camera: warm person foreground (215, 165, 140), Virtual BG: vivid cyan-blue (20, 110, 240)
+        const TextureId camTex = makeSolidTex(dev, kW, kH, 215, 165, 140, 255);
+        const TextureId vbgTex = makeSolidTex(dev, kW, kH, 20, 110, 240, 255);
+        // Zero personMask everywhere EXCEPT bottom-left shoulder patch with moderate confidence 150 (~0.59)
+        std::vector<uint8_t> maskPx(kW * kH, 0);
+        for (int y = 44; y < 60; ++y) {
+            for (int x = 4; x < 20; ++x) {
+                maskPx[y * kW + x] = 150;
+            }
+        }
+        const TextureId maskTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, maskPx.data());
+        const RenderTargetId outRt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, camTex);
+        tb.bind(1, vbgTex);
+        tb.bind(2, maskTex);
+        UniformBlock ub{};
+        // Primary face centered at (0.50, 0.62) in bottom-up UV (top-down row ~24), rx=0.14, ry=0.16
+        ub.push(1.0f, 0.14f, 0.56f, 1.0f);  // strength=1, lo=0.14, hi=0.56, primaryPresence=1
+        ub.push(1.0f, 1.0f, 0.0f, 0.0f);
+        ub.push(0.50f, 0.62f, 0.14f, 0.16f);
+        ub.push(1.0f, 0.0f, 1.0f, 0.0f);    // axis=(1,0), aspect=1, secPresence=0
+        ub.push(0.5f, 0.5f, 0.1f, 0.1f);
+        ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+        dev.beginPass(outRt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kBgVirtualMix, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(outRt), out.data(), kW, kH));
+        // Face center (x=32, top-down y=24 -> gl y = 1 - 24/64 = 0.625): protected even with mask=0!
+        const int facePx = (24 * kW + 32) * 4;
+        // Anatomical neck directly below chin (x=32, top-down y=37 -> gl y = 0.42, down ~ 1.25*ry): protected!
+        const int neckPx = (37 * kW + 32) * 4;
+        // Moderate-confidence clothing patch (x=10, y=50, mask=150/255=0.588 > 0.56): 100% solid foreground!
+        const int clothPx = (50 * kW + 10) * 4;
+        // Background next to ear/neck (x=56, y=24, mask=0): 100% replaced by cyan-blue virtual background!
+        const int wallPx = (24 * kW + 56) * 4;
+
+        EXPECT_TRUE(out[facePx + 0] >= 210 && out[facePx + 2] <= 145);
+        EXPECT_TRUE(out[neckPx + 0] >= 200 && out[neckPx + 2] <= 155);
+        EXPECT_TRUE(std::abs(int(out[clothPx + 0]) - 215) <= 2 && std::abs(int(out[clothPx + 2]) - 140) <= 2);
+        EXPECT_TRUE(out[wallPx + 2] >= 235 && out[wallPx + 0] <= 25);
+
+        dev.destroyRenderTarget(outRt);
+        dev.destroyTexture(maskTex);
+        dev.destroyTexture(vbgTex);
+        dev.destroyTexture(camTex);
+    }
 }
 
 }  // namespace

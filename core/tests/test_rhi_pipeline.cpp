@@ -880,6 +880,8 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     EXPECT_TRUE((engine.stats().activePassesMask & kPassDenoise) == 0);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) == 0);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
+    // v3.6.3: Fallback autoParsePersonTex_ MUST remain bound during camera shake so virtual background never flashes off!
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);
     engine.setCameraShaking(false);
 
     // Shift face by +0.25 X (> kAffineMaxShift = 0.10) while multiclass mask stays at t=1200ms (x=0.50):
@@ -888,6 +890,50 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     engine.submitFaceLandmarks(1350, mpXy.data(), 478, 720, 1280, 1350);
     engine.processFrame(inputTex, 720, 1280, 1350, 1350);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
+
+    // 4. v3.6.3 Virtual Background Load-Governor Privacy Invariant:
+    //    Even when loadFadeBody == 0.0f (EffectsLoadGovernor level >= 1), kVirtualBlur / kVirtualImage
+    //    MUST stay 100% active at full strength while skipping optional 4-pass background bokeh blur!
+    {
+        MockRhiDevice pipeDev;
+        RenderPipeline pipe(pipeDev);
+        PipelineAssets pAssets{};
+        pAssets.virtualBgTex = pipeDev.createTexture2D(540, 960, TextureFormat::kRgba8, nullptr);
+        pAssets.virtualBgAspect = 9.0f / 16.0f;
+        pipe.setAssets(pAssets);
+
+        BeautyConfig pCfg{};
+        pCfg.enabled = true;
+        pCfg.backgroundMode = BackgroundMode::kVirtualBlur;
+        pCfg.virtualBgStrength = 1.0f;
+        pCfg.matteTemporal = 0.0f;
+
+        FrameInputs pIn{};
+        pIn.inputTexture = pipeDev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        pIn.personMaskTex = pipeDev.createTexture2D(160, 288, TextureFormat::kR8, nullptr);
+        pIn.width = 720;
+        pIn.height = 1280;
+        pIn.loadFadeBody = 0.0f;  // Simulates governor level >= 1!
+
+        pipeDev.calls.clear();
+        const TextureId outTex = pipe.render(pCfg, pIn);
+        EXPECT_TRUE(outTex != pIn.inputTexture);
+        EXPECT_TRUE((pipe.lastActivePassesMask() & kPassBg) != 0);
+        bool sawVbgMix = false;
+        bool sawBgBlur = false;
+        float appliedStrength = 0.0f;
+        for (const auto& call : pipeDev.calls) {
+            if (call.shader == ShaderId::kBgVirtualMix) {
+                sawVbgMix = true;
+                appliedStrength = call.uniforms.v[0].x;
+            }
+            if (call.shader == ShaderId::kBgBlur) sawBgBlur = true;
+        }
+        EXPECT_TRUE(sawVbgMix);
+        EXPECT_TRUE(!sawBgBlur);
+        EXPECT_TRUE(std::fabs(appliedStrength - 1.0f) < 1e-4f);
+        pipe.releaseGpuResources();
+    }
 }
 
 }  // namespace

@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.3] - 2026-11-24
+
+### Fixed
+- **Virtual Background Anti-Occlusion Foreground Shield & Load-Governor Stability (`RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`, `LiveBeautyEngine`)**:
+  - Decoupled virtual background replacement (`BackgroundMode::kVirtualImage`, `kVirtualBlur`, `kChromaKey`) from `EffectsLoadGovernor` `loadFadeBody` so thermal/CPU load step-ups (`level >= 1`) never fade out the virtual background or expose the broadcaster's real room; under load, only optional 4-pass background-image bokeh blur is bypassed.
+  - Tightened foreground opacity saturation threshold (`0.88 -> 0.56`) and added dual-face (`primary` + `secondaryFace`) anatomical face-oval + neck/collarbone + shoulder/torso foreground shields (`personAnchorShield`) in `kBgVirtualMix` / `fs_bg_virtual_mix` and face-core protection in `kBgMix` / `kChromaKey` (plus green/blue chroma dominance gating), preventing segmentation dropouts from ever occluding people's faces, necks, or clothes.
+  - Upgraded `kMatteRefine` / `fs_matte_refine` to asymmetric foreground-first temporal matting (1-frame snap on foreground expansion, stationary RGB flicker absorption on minor shrink, clean release on motion/exit) and preserved internal `autoParsePersonTex_` binding across camera-shake resets.
+
+## [3.6.2] - 2026-11-24
+
+### Fixed
+- **Camera Shake Anti-Ghosting & IMU Gyroscope Linkage (`LiveBeautyEngine::setCameraShaking`, `FaceMeshFilter`, `FaceTimeline`, `FaceParsingMapper`, `RenderPipeline`)**:
+  - Added lock-free `setCameraShaking(bool)` (`nativeSetCameraShaking`) to flush temporal denoise/matte history and suppress stale async ROI/hair/occlusion masks on hardware gyroscope shake.
+  - Enforced `HairMaskTuning::affine` displacement bounds (`kAffineMaxShift`) and post-jump pose validity, added 1-frame One-Euro lag snap, non-skin `warmPoly` whitening bleed guard, and 5-tap spatio-temporal `kTemporalDenoise` neighborhood diff.
+
+## [3.6.1] - 2026-11-24
+
+### Fixed
+- **Cold-Porcelain De-Yellowing Whitening & Calibrated Non-Darkening Lip Rendering (`kCompositePro`, `kMakeupLip`, `FaceMakeupUv`, `FaceParsingMapper`)**:
+  - Upgraded skin whitening with excessive-yellow green-channel suppression, ivory cool-porcelain balance, automatic neck-tone continuity, natural bare-lip complexion lift, true-sRGB lipstick palette calibration, and conservative multiclass skin-vs-occluder margin.
+
 ## [3.6.0] - 2026-11-24
 
 ### Added

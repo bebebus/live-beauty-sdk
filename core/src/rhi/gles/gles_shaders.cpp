@@ -826,9 +826,11 @@ void main() {
     float person = texture2D(uTex2, vec2(vTextureCoord.x, 1.0 - vTextureCoord.y)).r;
     vec4 blurSample = texture2D(uTex1, vTextureCoord);
     vec3 blurred = blurSample.a > 0.02 ? clamp(blurSample.rgb / blurSample.a, 0.0, 1.0) : color.rgb;
-    float head = 1.0 - smoothstep(2.0, 2.8, sqrt(ellipseE(vTextureCoord, uU1, uU2.xy, max(uU2.z, 0.0001))));
+    float rFace = sqrt(ellipseE(vTextureCoord, uU1, uU2.xy, max(uU2.z, 0.0001)));
+    float head = 1.0 - smoothstep(2.0, 2.8, rFace);
+    float faceCore = (1.0 - smoothstep(0.84, 1.08, rFace)) * clamp(uU2.w, 0.0, 1.0) * 0.98;
     float fg = smoothstep(0.15, 0.30, abs(luma(color.rgb - blurred))) * smoothstep(0.02, 0.10, person) * head;
-    float keep = max(smoothstep(uU0.y, uU0.z, person), uU0.w * fg);
+    float keep = max(max(smoothstep(uU0.y, uU0.z, person), uU0.w * fg), faceCore);
     gl_FragColor = vec4(mix(color.rgb, mix(blurred, color.rgb, keep), uU0.x), color.a);
 }
 )";
@@ -901,7 +903,8 @@ void main() {
 }
 )";
 
-// uU0=(strength, lo, hi, detailKeep), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY), uU2=oval, uU3=(ax,ay,aspect,0)
+// uU0=(strength, lo, hi, primaryFacePresence), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY),
+// uU2=oval, uU3=(ax, ay, aspect, secFacePresence), uU4=secOval, uU5=(secAx, secAy, 0, 0)
 constexpr const char* kBgVirtualMixFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
@@ -911,22 +914,36 @@ uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
 uniform vec4 uU3;
-float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
-    vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
-    float u = clamp(dot(d, a) / max(o.z, 0.0001), -4.0, 4.0);
-    float v = clamp(dot(d, vec2(-a.y, a.x)) / max(o.w, 0.0001), -4.0, 4.0);
-    return u * u + v * v;
+uniform vec4 uU4;
+uniform vec4 uU5;
+float personAnchorShield(vec2 uv, vec4 o, vec2 u, float aspect, float presence, float person) {
+    if (presence <= 0.001) return 0.0;
+    vec2 d = vec2(uv.x - o.x, (uv.y - o.y) / aspect);
+    float a = clamp(dot(d, u) / max(o.z, 0.0001), -6.0, 6.0);
+    float b = clamp(dot(d, vec2(-u.y, u.x)) / max(o.w, 0.0001), -6.0, 6.0);
+    float rFace = sqrt(a * a + b * b);
+    float faceCore = (1.0 - smoothstep(0.84, 1.08, rFace)) * 0.99;
+    float down = -b;
+    float neckT = clamp((down - 0.68) / 1.25, 0.0, 1.0);
+    float neckHalfW = mix(0.54, 1.06, neckT);
+    float neckBand = smoothstep(0.58, 0.88, down) * (1.0 - smoothstep(1.55, 2.08, down));
+    float neckCore = neckBand * (1.0 - smoothstep(0.70, 1.02, abs(a) / neckHalfW)) * 0.94;
+    float headHalo = 1.0 - smoothstep(1.65, 2.55, rFace);
+    float torsoHalo = smoothstep(0.75, 1.20, down) * (1.0 - smoothstep(3.20, 4.30, down)) *
+                      (1.0 - smoothstep(1.65, 2.45, abs(a)));
+    float weakPerson = smoothstep(0.06, 0.32, person) * max(headHalo, torsoHalo) * 0.90;
+    return clamp(max(max(faceCore, neckCore), weakPerson) * presence, 0.0, 1.0);
 }
 void main() {
     vec4 color = texture2D(uTex0, vTextureCoord);
     vec2 bgUv = clamp(vec2(vTextureCoord.x * uU1.x + uU1.z, (1.0 - vTextureCoord.y) * uU1.y + uU1.w), 0.0, 1.0);
     vec3 vbg = texture2D(uTex1, bgUv).rgb;
     float person = texture2D(uTex2, vec2(vTextureCoord.x, 1.0 - vTextureCoord.y)).r;
-    float head = 1.0 - smoothstep(2.0, 2.8, sqrt(ellipseE(vTextureCoord, uU2, uU3.xy, max(uU3.z, 0.0001))));
-    float fg = smoothstep(0.06, 0.16, person) * head;
-    float keep = clamp(max(smoothstep(uU0.y, uU0.z, person), uU0.w * 0.45 * fg), 0.0, 1.0);
-    // Light Wrap / Edge Color Spill along translucent hair & shoulder boundary
+    float asp = max(uU3.z, 0.0001);
+    float shield0 = personAnchorShield(vTextureCoord, uU2, uU3.xy, asp, clamp(uU0.w, 0.0, 1.0), person);
+    float shield1 = personAnchorShield(vTextureCoord, uU4, uU5.xy, asp, clamp(uU3.w, 0.0, 1.0), person);
+    float keep = clamp(max(smoothstep(uU0.y, uU0.z, person), max(shield0, shield1)), 0.0, 1.0);
+    // Subtle Light Wrap strictly on outer translucent boundary (keep in 0.06..0.90; 0% tint on solid foreground)
     vec2 wrapD = vec2(0.024, 0.024);
     vec3 vbgAmb = 0.20 * (
         vbg +
@@ -935,9 +952,9 @@ void main() {
         texture2D(uTex1, clamp(bgUv + vec2(0.0,  wrapD.y), 0.0, 1.0)).rgb +
         texture2D(uTex1, clamp(bgUv + vec2(0.0, -wrapD.y), 0.0, 1.0)).rgb
     );
-    float edgeBand = smoothstep(0.04, 0.42, keep) * (1.0 - smoothstep(0.52, 0.94, keep));
-    vec3 rimGlow = max(color.rgb, vbgAmb * 0.92);
-    vec3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.22), edgeBand * 0.28);
+    float edgeBand = smoothstep(0.06, 0.42, keep) * (1.0 - smoothstep(0.54, 0.90, keep));
+    vec3 rimGlow = max(color.rgb, vbgAmb * 0.90);
+    vec3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.16), edgeBand * 0.20);
     gl_FragColor = vec4(mix(color.rgb, mix(vbg, fgWrapped, keep), uU0.x), color.a);
 }
 )";
@@ -1002,7 +1019,9 @@ void main() {
         vec3 pRgb = texture2D(uTex3, ruv).rgb;
         vec3 dRgb = abs(cRgb - pRgb);
         float rgbDiff = max(max(dRgb.r, dRgb.g), dRgb.b);
-        float motion = max(rgbDiff, abs(guidedMask - pMask) * 0.85);
+        float expand = max(guidedMask - pMask, 0.0);
+        float shrink = max(pMask - guidedMask, 0.0);
+        float motion = max(rgbDiff, max(expand * 0.90, shrink * 0.14));
         float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion));
         outMask = mix(guidedMask, pMask, keep);
     }
@@ -1208,7 +1227,8 @@ void main() {
 
 // v3.6: Studio YCbCr Chroma Key (green/blue screen) + edge despill + 5-tap virtual background Light Wrap
 // uTex0=currentRgb, uTex1=virtualBgRgba(top-down)
-// uU0=(strength, similarity, smoothness, despill), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY), uU2=(keyR, keyG, keyB, isBlueKey)
+// uU0=(strength, similarity, smoothness, despill), uU1=(uvScaleX, uvScaleY, uvOffX, uvOffY),
+// uU2=(keyR, keyG, keyB, isBlueKey), uU3=oval, uU4=(ax, ay, aspect, facePresence)
 constexpr const char* kChromaKeyFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
@@ -1216,6 +1236,8 @@ uniform sampler2D uTex1;
 uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
+uniform vec4 uU3;
+uniform vec4 uU4;
 float lumaCk(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec2 toCbCr(vec3 c) {
     return vec2(0.5 + dot(c, vec3(-0.168736, -0.331264, 0.5)),
@@ -1230,7 +1252,19 @@ void main() {
     float dist = length(cc - kc);
     float sim = clamp(uU0.y, 0.05, 0.95) * 0.55;
     float sm = max(uU0.z * 0.45, 0.008);
-    float keep = smoothstep(sim, sim + sm, dist);
+    float rawKeyed = 1.0 - smoothstep(sim, sim + sm, dist);
+    float dom = (uU2.w < 0.5)
+        ? (color.g - max(color.r, color.b))
+        : (color.b - max(color.r, color.g));
+    float domGate = smoothstep(0.015, 0.075, dom);
+    float faceShield = 0.0;
+    if (uU4.w > 0.001) {
+        vec2 df = vec2(vTextureCoord.x - uU3.x, (vTextureCoord.y - uU3.y) / max(uU4.z, 0.0001));
+        float af = clamp(dot(df, uU4.xy) / max(uU3.z, 0.0001), -4.0, 4.0);
+        float bf = clamp(dot(df, vec2(-uU4.y, uU4.x)) / max(uU3.w, 0.0001), -4.0, 4.0);
+        faceShield = (1.0 - smoothstep(0.86, 1.12, sqrt(af * af + bf * bf))) * clamp(uU4.w, 0.0, 1.0);
+    }
+    float keep = clamp(max(1.0 - rawKeyed * domGate, faceShield), 0.0, 1.0);
 
     float baseY = lumaCk(color.rgb);
     vec3 fg = color.rgb;
@@ -1254,7 +1288,7 @@ void main() {
         texture2D(uTex1, clamp(bgUv + vec2(0.0, -wrapD.y), 0.0, 1.0)).rgb
     );
     float edgeBand = smoothstep(0.04, 0.45, keep) * (1.0 - smoothstep(0.55, 0.96, keep));
-    vec3 fgWrapped = mix(fg, mix(max(fg, vbgAmb * 0.92), vbgAmb, 0.24), edgeBand * 0.30);
+    vec3 fgWrapped = mix(fg, mix(max(fg, vbgAmb * 0.92), vbgAmb, 0.20), edgeBand * 0.24);
     gl_FragColor = vec4(mix(color.rgb, mix(vbg, fgWrapped, keep), clamp(uU0.x, 0.0, 1.0)), color.a);
 }
 )";

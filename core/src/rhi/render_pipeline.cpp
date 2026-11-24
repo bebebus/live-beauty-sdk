@@ -1069,16 +1069,36 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     }
 
     // 1. Optional Background Bokeh / Virtual Background / Studio Chroma Key Replacement
+    // Privacy invariant: virtual background replacement (kVirtualImage / kVirtualBlur / kChromaKey) must NEVER
+    // fade out or expose the user's real room when EffectsLoadGovernor steps up loadLevel >= 1 (loadFadeBody -> 0).
+    // Under load, only optional 4-pass background-image bokeh blur is bypassed while keeping full VBG opacity.
     const float bgBlur = config.backgroundBlur * in.loadFadeBody;
+    const float vbgStrength = detail::clampf(config.virtualBgStrength, 0.0f, 1.0f);
     const bool wantChromaKey = (config.backgroundMode == BackgroundMode::kChromaKey) &&
                                assets_.virtualBgTex != kInvalidTexture &&
-                               config.virtualBgStrength * in.loadFadeBody > 1e-4f;
+                               vbgStrength > 1e-4f;
     const bool wantVirtualImage = !wantChromaKey &&
                                   (config.backgroundMode == BackgroundMode::kVirtualImage ||
                                    config.backgroundMode == BackgroundMode::kVirtualBlur) &&
                                   assets_.virtualBgTex != kInvalidTexture &&
-                                  config.virtualBgStrength * in.loadFadeBody > 1e-4f;
+                                  vbgStrength > 1e-4f;
     const bool wantBgBlur = !wantChromaKey && !wantVirtualImage && bgBlur > 1e-4f;
+    const float bgFacePresence = in.hasFaceState ? detail::clampf(in.facePresence, 0.0f, 1.0f) : 0.0f;
+    const float ovalCx = in.hasFaceState ? in.faceState41[22] : 0.5f;
+    const float ovalCy = in.hasFaceState ? in.faceState41[23] : 0.5f;
+    const float ovalRx = in.hasFaceState ? in.faceState41[24] : 0.25f;
+    const float ovalRy = in.hasFaceState ? in.faceState41[25] : 0.30f;
+    const float ax = in.hasFaceState ? in.faceState41[26] : 1.0f;
+    const float ay = in.hasFaceState ? in.faceState41[27] : 0.0f;
+    const bool hasSecOval = in.secondaryFace.hasState && in.secondaryFace.state41 != nullptr &&
+                            in.secondaryFace.presence > 1e-4f;
+    const float secOvalCx = hasSecOval ? in.secondaryFace.state41[22] : 0.5f;
+    const float secOvalCy = hasSecOval ? in.secondaryFace.state41[23] : 0.5f;
+    const float secOvalRx = hasSecOval ? in.secondaryFace.state41[24] : 0.25f;
+    const float secOvalRy = hasSecOval ? in.secondaryFace.state41[25] : 0.30f;
+    const float secAx = hasSecOval ? in.secondaryFace.state41[26] : 1.0f;
+    const float secAy = hasSecOval ? in.secondaryFace.state41[27] : 0.0f;
+    const float bgSecPresence = hasSecOval ? detail::clampf(in.secondaryFace.presence, 0.0f, 1.0f) : 0.0f;
     if (wantChromaKey) {
         matteHistoryValid_ = false;
         const float bgAspect = (assets_.virtualBgAspect > 0.05f) ? assets_.virtualBgAspect : aspect;
@@ -1098,12 +1118,14 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         UniformBlock ub{};
         tb.bind(0, currentTex);
         tb.bind(1, assets_.virtualBgTex);
-        ub.push(detail::clampf(config.virtualBgStrength * in.loadFadeBody, 0.0f, 1.0f),
+        ub.push(vbgStrength,
                 detail::clampf(config.chromaKeySimilarity, 0.05f, 0.95f),
                 detail::clampf(config.chromaKeySmoothness, 0.01f, 0.80f),
                 detail::clampf(config.chromaKeyDespill, 0.0f, 1.0f));
         ub.push(uvScaleX, uvScaleY, uvOffX, uvOffY);
         ub.push(keyRgb.x, keyRgb.y, keyRgb.z, isBlue ? 1.0f : 0.0f);
+        ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
+        ub.push(ax, ay, aspect, bgFacePresence);
         device_.beginPass(rtBgOut_, in.width, in.height, false);
         device_.drawFullScreenQuad(ShaderId::kChromaKey, st, tb, ub);
         device_.endPass();
@@ -1111,12 +1133,6 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         lastActivePassesMask_ |= (kPassBg | kPassChromaKey);
     } else if ((wantVirtualImage || wantBgBlur) && in.personMaskTex != kInvalidTexture) {
         lastActivePassesMask_ |= kPassBg;
-        const float ovalCx = in.hasFaceState ? in.faceState41[22] : 0.5f;
-        const float ovalCy = in.hasFaceState ? in.faceState41[23] : 0.5f;
-        const float ovalRx = in.hasFaceState ? in.faceState41[24] : 0.25f;
-        const float ovalRy = in.hasFaceState ? in.faceState41[25] : 0.30f;
-        const float ax = in.hasFaceState ? in.faceState41[26] : 1.0f;
-        const float ay = in.hasFaceState ? in.faceState41[27] : 0.0f;
 
         // 1a. Optional Hair-Person Mask Merge (protects fine flyaway hair strands during bokeh/virtual replacement)
         TextureId effectiveMaskTex = in.personMaskTex;
@@ -1147,7 +1163,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
 
         if (wantVirtualImage) {
             TextureId bgSource = assets_.virtualBgTex;
-            if (config.backgroundMode == BackgroundMode::kVirtualBlur) {
+            if (config.backgroundMode == BackgroundMode::kVirtualBlur && in.loadFadeBody > 0.5f) {
                 RenderState st{};
                 TextureBindings tb{};
                 UniformBlock ub{};
@@ -1190,11 +1206,14 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(0, currentTex);
             tb.bind(1, bgSource);
             tb.bind(2, effectiveMaskTex);
-            ub.push(detail::clampf(config.virtualBgStrength * in.loadFadeBody, 0.0f, 1.0f),
-                    0.08f, 0.88f, in.hasFaceState ? 0.65f : 0.0f);
+            // Solid foreground threshold 0.56 ensures interior clothes/shoulders/arms never turn semi-transparent,
+            // while anatomical primary + secondary face/neck shields prevent virtual bg from ever occluding people.
+            ub.push(vbgStrength, 0.14f, 0.56f, bgFacePresence);
             ub.push(uvScaleX, uvScaleY, uvOffX, uvOffY);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
-            ub.push(ax, ay, aspect, 0.0f);
+            ub.push(ax, ay, aspect, bgSecPresence);
+            ub.push(secOvalCx, secOvalCy, secOvalRx, secOvalRy);
+            ub.push(secAx, secAy, 0.0f, 0.0f);
             device_.beginPass(rtBgOut_, in.width, in.height, false);
             device_.drawFullScreenQuad(ShaderId::kBgVirtualMix, st, tb, ub);
             device_.endPass();
@@ -1205,9 +1224,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             UniformBlock ub{};
             tb.bind(0, currentTex);
             tb.bind(1, effectiveMaskTex);
-            // Wide soft-alpha window (0.08..0.88) preserves RVM/matting fine translucent hair strands
-            // instead of hard-clipping them at 0.35..0.70.
-            ub.push(bgBlur, 0.08f, 0.88f, 0.0f);
+            ub.push(bgBlur, 0.14f, 0.62f, 0.0f);
             device_.beginPass(rtBg_[0], bgW_, bgH_, false);
             device_.drawFullScreenQuad(ShaderId::kBgPremask, st, tb, ub);
             device_.endPass();
@@ -1234,9 +1251,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(0, currentTex);
             tb.bind(1, device_.textureOf(rtBg_[0]));
             tb.bind(2, effectiveMaskTex);
-            ub.push(bgBlur, 0.08f, 0.88f, in.hasFaceState ? 0.65f : 0.0f);
+            ub.push(bgBlur, 0.14f, 0.62f, in.hasFaceState ? 0.65f : 0.0f);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
-            ub.push(ax, ay, aspect, 0.0f);
+            ub.push(ax, ay, aspect, bgFacePresence);
             device_.beginPass(rtBgOut_, in.width, in.height, false);
             device_.drawFullScreenQuad(ShaderId::kBgMix, st, tb, ub);
             device_.endPass();

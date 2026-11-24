@@ -704,9 +704,15 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.bodyState7 = bodyState;
     in.bodyPresence = bodySmoother_.presence() * (0.25f + 0.75f * shakeGate);
     in.handShieldCoords = handShield;
+    const bool bgMaskNeeded = config_.enabled && !config_.compareOriginal &&
+        ((config_.backgroundMode == BackgroundMode::kVirtualImage ||
+          config_.backgroundMode == BackgroundMode::kVirtualBlur) ||
+         config_.backgroundBlur > 1e-4f);
     in.personMaskTex = (personMaskTex != rhi::kInvalidTexture)
         ? personMaskTex
-        : ((autoParsePersonValid_ && asyncMaskKeep > 1e-4f) ? autoParsePersonTex_ : rhi::kInvalidTexture);
+        : ((autoParsePersonValid_ && (bgMaskNeeded || asyncMaskKeep > 1e-4f))
+            ? autoParsePersonTex_
+            : rhi::kInvalidTexture);
     in.hairMaskTex = (effHairShown > 1e-4f || effHairBgShown > 1e-4f) ? resolvedHairTex : rhi::kInvalidTexture;
     bool semanticOccAlive = false;
     {
