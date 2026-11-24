@@ -192,6 +192,27 @@ object NativeBeautyBridge {
         springDamping: Float,
         headOcclusion: Boolean,
     )
+    @JvmStatic external fun nativeSetAr3dAccessoryEx(
+        handle: Long,
+        slot: Int,
+        enabled: Boolean,
+        anchor: Int,
+        meshPreset: Int,
+        triggerRule: Int,
+        texGlId: Int,
+        scale: Float,
+        offsetX: Float,
+        offsetY: Float,
+        offsetZ: Float,
+        yawRad: Float,
+        pitchRad: Float,
+        rollRad: Float,
+        opacity: Float,
+        textureAspect: Float,
+        springStiffness: Float,
+        springDamping: Float,
+        headOcclusion: Boolean,
+    )
     @JvmStatic external fun nativeClearAr3dAccessories(handle: Long)
     /** v3.2: 提交 MediaPipe 52 维蒸馏表情系数（微笑/张嘴/挑眉/眨眼/鼓腮/吐舌），由 C++ 表情总线驱动挂件脉冲。 */
     @JvmStatic external fun nativeSubmitFaceBlendshapes(
@@ -235,6 +256,13 @@ object NativeBeautyBridge {
     ): Boolean
     /** v3.5: 解析并应用声明式 `.lbfx` 特效包 JSON 清单（美颜滤镜、染发、2D/3D 挂件及表情触发规则）。 */
     @JvmStatic external fun nativeApplyEffectBundleJson(handle: Long, manifestJson: String): Boolean
+    /** v3.5.1: 解析并应用带 GL 纹理资产映射表的 `.lbfx` 特效包 JSON 清单。 */
+    @JvmStatic external fun nativeApplyEffectBundleJsonWithAssets(
+        handle: Long,
+        manifestJson: String,
+        assetPaths: Array<String>,
+        texGlIds: IntArray,
+    ): Boolean
     /** 读取 C++17 内核实时性能遥测：[lastMs, emaMs, fps, loadLevel, facePresence, hairShown, activePassesMask, frameCount, activeFaces, displayTs, resolvedTier]。 */
     @JvmStatic external fun nativeGetStats(handle: Long, outStats: FloatArray)
 

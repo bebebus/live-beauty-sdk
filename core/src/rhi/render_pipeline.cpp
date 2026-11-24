@@ -145,6 +145,7 @@ void RenderPipeline::releaseGpuResources() {
         killBuf(ibAr3dCustom_[i]);
         ibAr3dCustomPtr_[i] = nullptr;
         ibAr3dCustomCount_[i] = 0;
+        ibAr3dCustomGen_[i] = 0;
     }
     killBuf(ibFullMesh_);
     killBuf(ibNeckApron_);
@@ -443,7 +444,8 @@ void RenderPipeline::renderSkinMask(
         const auto pose3d = math::FaceRelightSolver::estimateHeadPose(
             landmarks478x2, aspect, axisX, axisY, yawWeight);
         if (pose3d.valid) {
-            relightSolver_.computeVertexRelight(pose3d, relightStyle, relightStrength, relightBuf_.data());
+            relightSolver_.computeVertexRelight(
+                pose3d, relightStyle, relightStrength, relightBuf_.data(), frontFaceCw);
             computed3dRelight = true;
             lastActivePassesMask_ |= kPassRelight3d;
         }
@@ -839,7 +841,7 @@ void RenderPipeline::renderAr3dAccessories(
         }
     }
     if (needHeadDepth) {
-        math::Ar3dSolver::buildHeadDepthShell(landmarks478x2, pose, ar3dHeadVerts_.data());
+        math::Ar3dSolver::buildHeadDepthShell(landmarks478x2, pose, ar3dHeadVerts_.data(), frontFaceCw);
         device_.updateVertexBuffer(vbAr3dHead_, ar3dHeadVerts_.data(), sizeof(float) * ar3dHeadVerts_.size());
         RenderState depthSt{};
         depthSt.cullBack = true;
@@ -875,7 +877,7 @@ void RenderPipeline::renderAr3dAccessories(
         if (!math::Ar3dSolver::buildAccessoryMesh(
                 layer, landmarks478x2, pose, aspect, nullptr,
                 ar3dMeshVerts_.data(), math::Ar3dSolver::kMaxMeshVertices,
-                vertCount, meshIdx, idxCount, anchorX, anchorY)) {
+                vertCount, meshIdx, idxCount, anchorX, anchorY, frontFaceCw)) {
             continue;
         }
         if (layer.springStiffness > 1e-3f) {
@@ -884,18 +886,21 @@ void RenderPipeline::renderAr3dAccessories(
             math::Ar3dSolver::buildAccessoryMesh(
                 layer, landmarks478x2, pose, aspect, &ar3dSprings_[i],
                 ar3dMeshVerts_.data(), math::Ar3dSolver::kMaxMeshVertices,
-                vertCount, meshIdx, idxCount, anchorX, anchorY);
+                vertCount, meshIdx, idxCount, anchorX, anchorY, frontFaceCw);
         }
         BufferId activeIb = ibSticker_;
-        if (layer.customVertices != nullptr && layer.customIndices != nullptr &&
-            layer.customVertexCount >= 3 && layer.customIndexCount >= 3) {
+        if (math::Ar3dSolver::validateCustomMesh(
+                layer.customVertices, layer.customVertexCount,
+                layer.customIndices, layer.customIndexCount)) {
             if (ibAr3dCustom_[i] == kInvalidBuffer ||
                 ibAr3dCustomPtr_[i] != meshIdx ||
-                ibAr3dCustomCount_[i] != idxCount) {
+                ibAr3dCustomCount_[i] != idxCount ||
+                ibAr3dCustomGen_[i] != layer.customMeshGeneration) {
                 if (ibAr3dCustom_[i] != kInvalidBuffer) device_.destroyBuffer(ibAr3dCustom_[i]);
                 ibAr3dCustom_[i] = device_.createStaticIndexBuffer(meshIdx, static_cast<size_t>(idxCount));
                 ibAr3dCustomPtr_[i] = meshIdx;
                 ibAr3dCustomCount_[i] = idxCount;
+                ibAr3dCustomGen_[i] = layer.customMeshGeneration;
             }
             activeIb = ibAr3dCustom_[i];
         } else if (layer.meshPreset == math::Ar3dMeshPreset::kCurvedGlasses) {

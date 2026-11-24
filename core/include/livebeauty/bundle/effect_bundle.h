@@ -50,6 +50,8 @@ struct EffectBundleManifest {
     std::string author;
     BeautyConfig beauty{};
     bool hasBeautySection = false;
+    bool overridesPipelineOptions = false;
+    bool overridesBackground = false;
     std::vector<BundleStickerSpec> stickers;
     std::vector<BundleAr3dSpec> ar3d;
 };

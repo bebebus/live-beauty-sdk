@@ -85,29 +85,53 @@ private:
                     case 'r': out.push_back('\r'); break;
                     case 't': out.push_back('\t'); break;
                     case 'u': {
-                        if (pos_ + 4 > s_.size()) {
+                        auto readHex4 = [&](unsigned int& dst) -> bool {
+                            if (pos_ + 4 > s_.size()) return false;
+                            dst = 0;
+                            for (int k = 0; k < 4; ++k) {
+                                const char hc = s_[pos_++];
+                                dst <<= 4;
+                                if (hc >= '0' && hc <= '9') dst |= static_cast<unsigned int>(hc - '0');
+                                else if (hc >= 'a' && hc <= 'f') dst |= static_cast<unsigned int>(10 + hc - 'a');
+                                else if (hc >= 'A' && hc <= 'F') dst |= static_cast<unsigned int>(10 + hc - 'A');
+                                else return false;
+                            }
+                            return true;
+                        };
+                        unsigned int code = 0;
+                        if (!readHex4(code)) {
                             err = "invalid unicode escape";
                             return false;
                         }
-                        unsigned int code = 0;
-                        for (int k = 0; k < 4; ++k) {
-                            const char hc = s_[pos_++];
-                            code <<= 4;
-                            if (hc >= '0' && hc <= '9') code |= static_cast<unsigned int>(hc - '0');
-                            else if (hc >= 'a' && hc <= 'f') code |= static_cast<unsigned int>(10 + hc - 'a');
-                            else if (hc >= 'A' && hc <= 'F') code |= static_cast<unsigned int>(10 + hc - 'A');
-                            else {
-                                err = "invalid hex digit in unicode escape";
-                                return false;
+                        if (code >= 0xD800u && code <= 0xDBFFu) {
+                            if (pos_ + 6 <= s_.size() && s_[pos_] == '\\' && s_[pos_ + 1] == 'u') {
+                                const size_t saved = pos_;
+                                pos_ += 2;
+                                unsigned int low = 0;
+                                if (readHex4(low) && low >= 0xDC00u && low <= 0xDFFFu) {
+                                    code = 0x10000u + (((code - 0xD800u) << 10) | (low - 0xDC00u));
+                                } else {
+                                    pos_ = saved;
+                                    code = 0xFFFDu;
+                                }
+                            } else {
+                                code = 0xFFFDu;
                             }
+                        } else if (code >= 0xDC00u && code <= 0xDFFFu) {
+                            code = 0xFFFDu;
                         }
                         if (code <= 0x7Fu) {
                             out.push_back(static_cast<char>(code));
                         } else if (code <= 0x7FFu) {
                             out.push_back(static_cast<char>(0xC0u | (code >> 6)));
                             out.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
-                        } else {
+                        } else if (code <= 0xFFFFu) {
                             out.push_back(static_cast<char>(0xE0u | (code >> 12)));
+                            out.push_back(static_cast<char>(0x80u | ((code >> 6) & 0x3Fu)));
+                            out.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+                        } else {
+                            out.push_back(static_cast<char>(0xF0u | (code >> 18)));
+                            out.push_back(static_cast<char>(0x80u | ((code >> 12) & 0x3Fu)));
                             out.push_back(static_cast<char>(0x80u | ((code >> 6) & 0x3Fu)));
                             out.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
                         }
@@ -125,15 +149,70 @@ private:
         return false;
     }
 
+    // Locale-independent strict RFC 8259 decimal number parser (never affected by LC_NUMERIC ',')
     bool parseNumber(double& out, std::string& err) {
-        const char* start = s_.c_str() + pos_;
-        char* endPtr = nullptr;
-        out = std::strtod(start, &endPtr);
-        if (endPtr == start || !std::isfinite(out)) {
+        size_t i = pos_;
+        bool neg = false;
+        if (i < s_.size() && s_[i] == '-') {
+            neg = true;
+            ++i;
+        }
+        if (i >= s_.size() || !std::isdigit(static_cast<unsigned char>(s_[i]))) {
             err = "invalid number";
             return false;
         }
-        pos_ = static_cast<size_t>(endPtr - s_.c_str());
+        double mantissa = 0.0;
+        if (s_[i] == '0') {
+            ++i;
+            // Reject hex (0x...) or leading zeros (01)
+            if (i < s_.size() && (std::isdigit(static_cast<unsigned char>(s_[i])) || s_[i] == 'x' || s_[i] == 'X')) {
+                err = "invalid leading zero or hex number";
+                return false;
+            }
+        } else {
+            while (i < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i]))) {
+                mantissa = mantissa * 10.0 + static_cast<double>(s_[i] - '0');
+                ++i;
+            }
+        }
+        if (i < s_.size() && s_[i] == '.') {
+            ++i;
+            if (i >= s_.size() || !std::isdigit(static_cast<unsigned char>(s_[i]))) {
+                err = "invalid fractional number";
+                return false;
+            }
+            double place = 0.1;
+            while (i < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i]))) {
+                mantissa += static_cast<double>(s_[i] - '0') * place;
+                place *= 0.1;
+                ++i;
+            }
+        }
+        int expSign = 1;
+        int expVal = 0;
+        if (i < s_.size() && (s_[i] == 'e' || s_[i] == 'E')) {
+            ++i;
+            if (i < s_.size() && (s_[i] == '+' || s_[i] == '-')) {
+                expSign = (s_[i] == '-') ? -1 : 1;
+                ++i;
+            }
+            if (i >= s_.size() || !std::isdigit(static_cast<unsigned char>(s_[i]))) {
+                err = "invalid exponent in number";
+                return false;
+            }
+            while (i < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i]))) {
+                if (expVal < 1000) expVal = expVal * 10 + (s_[i] - '0');
+                ++i;
+            }
+        }
+        double val = mantissa * std::pow(10.0, static_cast<double>(expSign * expVal));
+        if (neg) val = -val;
+        if (!std::isfinite(val)) {
+            err = "number out of finite range";
+            return false;
+        }
+        out = val;
+        pos_ = i;
         return true;
     }
 
@@ -420,9 +499,51 @@ bool EffectBundleParser::parseJson(
         if (b->find("hairDyeColor")) c.hairDyeColor = parseHairDyeColor(optStr(*b, "hairDyeColor"));
         c.hairShine = optFloat(*b, "hairShine", c.hairShine, 0.0f, 1.0f);
 
+        c.waistSlim = optFloat(*b, "waistSlim", c.waistSlim, 0.0f, 1.0f);
+        c.bustEnhance = optFloat(*b, "bustEnhance", c.bustEnhance, 0.0f, 1.0f);
+        c.legLengthen = optFloat(*b, "legLengthen", c.legLengthen, 0.0f, 1.0f);
+        c.shoulderSlim = optFloat(*b, "shoulderSlim", c.shoulderSlim, 0.0f, 1.0f);
+        c.neckLengthen = optFloat(*b, "neckLengthen", c.neckLengthen, 0.0f, 1.0f);
+        c.ambientMakeupBlend = optFloat(*b, "ambientMakeupBlend", c.ambientMakeupBlend, 0.0f, 1.0f);
+        c.matteTemporal = optFloat(*b, "matteTemporal", c.matteTemporal, 0.0f, 1.0f);
+
+        if (b->find("backgroundBlur") || b->find("backgroundMode") || b->find("virtualBgStrength")) {
+            out.overridesBackground = true;
+            c.backgroundBlur = optFloat(*b, "backgroundBlur", c.backgroundBlur, 0.0f, 1.0f);
+            if (b->find("backgroundMode")) c.backgroundMode = parseBackgroundMode(optStr(*b, "backgroundMode"));
+            c.virtualBgStrength = optFloat(*b, "virtualBgStrength", c.virtualBgStrength, 0.0f, 1.0f);
+        }
+        if (b->find("performanceTier") || b->find("preferHalfFloat") ||
+            b->find("maxFaces") || b->find("frameDelayFrames")) {
+            out.overridesPipelineOptions = true;
+            if (b->find("performanceTier")) c.performanceTier = parsePerformanceTier(optStr(*b, "performanceTier"));
+            c.preferHalfFloat = optBool(*b, "preferHalfFloat", c.preferHalfFloat);
+            c.maxFaces = static_cast<int>(optFloat(*b, "maxFaces", static_cast<float>(c.maxFaces), 1.0f, 2.0f));
+            c.frameDelayFrames = static_cast<int>(optFloat(*b, "frameDelayFrames", static_cast<float>(c.frameDelayFrames), 0.0f, 4.0f));
+        }
+
         if (b->find("lutUrl")) c.lutUrl = optStr(*b, "lutUrl");
         c.lutIntensity = optFloat(*b, "lutIntensity", c.lutIntensity, 0.0f, 1.0f);
         out.beauty = c;
+    }
+
+    if (const auto* bg = root.find("background")) {
+        if (bg->kind == JsonValue::Kind::kObject) {
+            out.overridesBackground = true;
+            out.beauty.backgroundBlur = optFloat(*bg, "blur", optFloat(*bg, "backgroundBlur", out.beauty.backgroundBlur, 0.0f, 1.0f), 0.0f, 1.0f);
+            if (bg->find("mode")) out.beauty.backgroundMode = parseBackgroundMode(optStr(*bg, "mode"));
+            else if (bg->find("backgroundMode")) out.beauty.backgroundMode = parseBackgroundMode(optStr(*bg, "backgroundMode"));
+            out.beauty.virtualBgStrength = optFloat(*bg, "strength", optFloat(*bg, "virtualBgStrength", out.beauty.virtualBgStrength, 0.0f, 1.0f), 0.0f, 1.0f);
+        }
+    }
+    if (const auto* po = root.find("pipelineOptions")) {
+        if (po->kind == JsonValue::Kind::kObject) {
+            out.overridesPipelineOptions = true;
+            if (po->find("performanceTier")) out.beauty.performanceTier = parsePerformanceTier(optStr(*po, "performanceTier"));
+            out.beauty.preferHalfFloat = optBool(*po, "preferHalfFloat", out.beauty.preferHalfFloat);
+            out.beauty.maxFaces = static_cast<int>(optFloat(*po, "maxFaces", static_cast<float>(out.beauty.maxFaces), 1.0f, 2.0f));
+            out.beauty.frameDelayFrames = static_cast<int>(optFloat(*po, "frameDelayFrames", static_cast<float>(out.beauty.frameDelayFrames), 0.0f, 4.0f));
+        }
     }
 
     if (const auto* stArr = root.find("stickers")) {
@@ -431,12 +552,15 @@ bool EffectBundleParser::parseJson(
             return false;
         }
         int nextSlot = 0;
+        int parsedCount = 0;
         for (const auto& item : stArr->arrVal) {
-            if (item.kind != JsonValue::Kind::kObject || nextSlot >= math::kMaxStickerLayers) continue;
+            if (item.kind != JsonValue::Kind::kObject || parsedCount >= math::kMaxStickerLayers) continue;
             BundleStickerSpec spec{};
+            const bool explicitSlot = (item.find("slot") != nullptr);
             spec.slot = std::clamp(static_cast<int>(optFloat(item, "slot", static_cast<float>(nextSlot), 0.0f, 3.0f)),
                                    0, math::kMaxStickerLayers - 1);
-            nextSlot = spec.slot + 1;
+            if (!explicitSlot && nextSlot < math::kMaxStickerLayers - 1) ++nextSlot;
+            ++parsedCount;
             spec.assetPath = optStr(item, "assetPath");
             spec.trigger = parseTriggerRule(optStr(item, "trigger", "always"));
             spec.layer.enabled = optBool(item, "enabled", true);
@@ -458,12 +582,15 @@ bool EffectBundleParser::parseJson(
             return false;
         }
         int nextSlot = 0;
+        int parsedCount = 0;
         for (const auto& item : arArr->arrVal) {
-            if (item.kind != JsonValue::Kind::kObject || nextSlot >= math::kMaxAr3dLayers) continue;
+            if (item.kind != JsonValue::Kind::kObject || parsedCount >= math::kMaxAr3dLayers) continue;
             BundleAr3dSpec spec{};
+            const bool explicitSlot = (item.find("slot") != nullptr);
             spec.slot = std::clamp(static_cast<int>(optFloat(item, "slot", static_cast<float>(nextSlot), 0.0f, 3.0f)),
                                    0, math::kMaxAr3dLayers - 1);
-            nextSlot = spec.slot + 1;
+            if (!explicitSlot && nextSlot < math::kMaxAr3dLayers - 1) ++nextSlot;
+            ++parsedCount;
             spec.assetPath = optStr(item, "assetPath");
             spec.trigger = parseTriggerRule(optStr(item, "trigger", "always"));
             spec.layer.enabled = optBool(item, "enabled", true);

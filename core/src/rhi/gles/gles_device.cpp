@@ -3,12 +3,28 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <cstdio>
+#include <cstring>
 
 #include "gles_shaders.h"
 
 namespace livebeauty::rhi::gles {
 
 namespace {
+
+bool hasGlExtension(const char* ext) {
+    if (!ext || ext[0] == '\0') return false;
+    const char* exts = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+    if (!exts) return false;
+    const size_t len = std::strlen(ext);
+    const char* p = exts;
+    while ((p = std::strstr(p, ext)) != nullptr) {
+        const bool startOk = (p == exts || p[-1] == ' ');
+        const bool endOk = (p[len] == '\0' || p[len] == ' ');
+        if (startOk && endOk) return true;
+        p += len;
+    }
+    return false;
+}
 
 GLuint compileShader(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
@@ -82,6 +98,7 @@ void GlesDevice::releaseAll(bool contextAlive) {
     oesAttrPos_ = oesAttrUv_ = oesUniTex_ = oesUniMat_ = -1;
     oesRt_ = kInvalidRenderTarget;
     oesW_ = oesH_ = 0;
+    halfFloatMode_ = 0;
     for (auto& pc : programs_) {
         pc = ProgramCache{};
         pc.uniLoc.fill(-1);
@@ -175,8 +192,8 @@ void main() {
 }
 
 RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureFormat format) {
+    if (width <= 0 || height <= 0) return kInvalidRenderTarget;
     if (format == TextureFormat::kRgba16f) {
-        // Clear any prior GL error before probing half-float color-renderable FBO support.
         while (glGetError() != GL_NO_ERROR) {}
         GLuint glTex = 0;
         glGenTextures(1, &glTex);
@@ -190,29 +207,40 @@ RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureForm
         glGenFramebuffers(1, &fbo);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 
-        // 1. Try GLES 3.0 sized GL_RGBA16F (0x881A) + GL_HALF_FLOAT (0x140B)
         constexpr GLint kGlRgba16f = 0x881A;
         constexpr GLenum kGlHalfFloat = 0x140B;
-        glTexImage2D(GL_TEXTURE_2D, 0, kGlRgba16f, width, height, 0, GL_RGBA, kGlHalfFloat, nullptr);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
-        bool ok = (glGetError() == GL_NO_ERROR) &&
-                  (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        constexpr GLenum kGlHalfFloatOes = 0x8D61;
 
-        // 2. Try GLES 2.0 OES_texture_half_float_linear + EXT_color_buffer_half_float (0x8D61)
-        if (!ok) {
-            while (glGetError() != GL_NO_ERROR) {}
-            constexpr GLenum kGlHalfFloatOes = 0x8D61;
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, kGlHalfFloatOes, nullptr);
+        bool ok = false;
+        if (halfFloatMode_ == 0 || halfFloatMode_ == 1) {
+            // 1. Try GLES 3.0 sized GL_RGBA16F (0x881A) + GL_HALF_FLOAT (0x140B)
+            glTexImage2D(GL_TEXTURE_2D, 0, kGlRgba16f, width, height, 0, GL_RGBA, kGlHalfFloat, nullptr);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
             ok = (glGetError() == GL_NO_ERROR) &&
                  (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+            if (ok) halfFloatMode_ = 1;
         }
 
-        // 3. Graceful fallback to RGBA8 if driver lacks renderable FP16 FBO support
+        if (!ok && (halfFloatMode_ == 0 || halfFloatMode_ == 2)) {
+            // 2. Try GLES 2.0 OES_texture_half_float_linear + EXT_color_buffer_half_float (0x8D61).
+            // Require GL_OES_texture_half_float_linear explicitly: without it, GL_LINEAR makes OES FP16
+            // textures incomplete (black sampling) even when glCheckFramebufferStatus succeeds.
+            if (halfFloatMode_ == 2 || hasGlExtension("GL_OES_texture_half_float_linear")) {
+                while (glGetError() != GL_NO_ERROR) {}
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, kGlHalfFloatOes, nullptr);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
+                ok = (glGetError() == GL_NO_ERROR) &&
+                     (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+                if (ok) halfFloatMode_ = 2;
+            }
+        }
+
+        // 3. Graceful fallback to RGBA8 if driver lacks renderable + linearly filterable FP16 FBO support
         if (!ok) {
             while (glGetError() != GL_NO_ERROR) {}
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, glTex, 0);
+            halfFloatMode_ = 3;
         }
 
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -225,6 +253,7 @@ RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureForm
     }
 
     const TextureId texId = createTexture2D(width, height, format, nullptr);
+    if (texId == kInvalidTexture) return kInvalidRenderTarget;
     GLuint fbo = 0;
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -249,6 +278,7 @@ TextureId GlesDevice::textureOf(RenderTargetId rt) const {
 }
 
 TextureId GlesDevice::createTexture2D(int width, int height, TextureFormat format, const uint8_t* pixels) {
+    if (width <= 0 || height <= 0) return kInvalidTexture;
     GLuint glTex = 0;
     glGenTextures(1, &glTex);
     glBindTexture(GL_TEXTURE_2D, glTex);
@@ -256,9 +286,15 @@ TextureId GlesDevice::createTexture2D(int width, int height, TextureFormat forma
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    const GLenum glFmt = (format == TextureFormat::kR8) ? GL_LUMINANCE : GL_RGBA;
     glPixelStorei(GL_UNPACK_ALIGNMENT, (format == TextureFormat::kR8) ? 1 : 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(glFmt), width, height, 0, glFmt, GL_UNSIGNED_BYTE, pixels);
+    if (format == TextureFormat::kRgba16f) {
+        constexpr GLint kGlRgba16f = 0x881A;
+        constexpr GLenum kGlHalfFloat = 0x140B;
+        glTexImage2D(GL_TEXTURE_2D, 0, kGlRgba16f, width, height, 0, GL_RGBA, kGlHalfFloat, pixels);
+    } else {
+        const GLenum glFmt = (format == TextureFormat::kR8) ? GL_LUMINANCE : GL_RGBA;
+        glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(glFmt), width, height, 0, glFmt, GL_UNSIGNED_BYTE, pixels);
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
     const TextureId id = nextId_++;
     textures_[id] = TexRecord{glTex, false};
@@ -267,11 +303,16 @@ TextureId GlesDevice::createTexture2D(int width, int height, TextureFormat forma
 
 void GlesDevice::updateTexture2D(TextureId tex, int width, int height, TextureFormat format, const uint8_t* pixels) {
     const uint32_t glTex = unwrapGlTexture(tex);
-    if (!glTex || !pixels) return;
+    if (!glTex || !pixels || width <= 0 || height <= 0) return;
     glBindTexture(GL_TEXTURE_2D, glTex);
-    const GLenum glFmt = (format == TextureFormat::kR8) ? GL_LUMINANCE : GL_RGBA;
     glPixelStorei(GL_UNPACK_ALIGNMENT, (format == TextureFormat::kR8) ? 1 : 4);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, glFmt, GL_UNSIGNED_BYTE, pixels);
+    if (format == TextureFormat::kRgba16f) {
+        constexpr GLenum kGlHalfFloat = 0x140B;
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, kGlHalfFloat, pixels);
+    } else {
+        const GLenum glFmt = (format == TextureFormat::kR8) ? GL_LUMINANCE : GL_RGBA;
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, glFmt, GL_UNSIGNED_BYTE, pixels);
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 

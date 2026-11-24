@@ -8,6 +8,10 @@ namespace livebeauty {
 LiveBeautyEngine::LiveBeautyEngine(rhi::IRhiDevice& device)
     : device_(device), pipeline_(device) {}
 
+LiveBeautyEngine::~LiveBeautyEngine() {
+    releaseGpuResources();
+}
+
 void LiveBeautyEngine::setConfig(const BeautyConfig& config) {
     config_ = config;
 }
@@ -27,6 +31,8 @@ void LiveBeautyEngine::resetTracking() {
         faceParsingMapper_.reset();
         expressionBus_.reset();
         hasLatestFaceBounds_ = false;
+        latestFaceRollRad_ = 0.0f;
+        semanticOccActive_ = false;
         stagedOccDirty_ = false;
         stagedParseHairDirty_ = false;
         stagedParseHairTsMs_ = kTimeInvalid;
@@ -34,6 +40,7 @@ void LiveBeautyEngine::resetTracking() {
         stagedResidualActive_ = false;
     }
     autoResidualStrength_ = 0.0f;
+    autoParseHairValid_ = false;
     autoParseHairTsMs_ = kTimeInvalid;
 }
 
@@ -46,8 +53,9 @@ void LiveBeautyEngine::releaseGpuResources() {
     if (autoParseHairTex_ != rhi::kInvalidTexture) {
         device_.destroyTexture(autoParseHairTex_);
         autoParseHairTex_ = rhi::kInvalidTexture;
-        autoParseHairTsMs_ = kTimeInvalid;
     }
+    autoParseHairValid_ = false;
+    autoParseHairTsMs_ = kTimeInvalid;
     if (autoResidualTex_ != rhi::kInvalidTexture) {
         device_.destroyTexture(autoResidualTex_);
         autoResidualTex_ = rhi::kInvalidTexture;
@@ -79,8 +87,37 @@ void LiveBeautyEngine::clearStickers() {
 void LiveBeautyEngine::setAr3dAccessory(
     int slot, const math::Ar3dAccessoryConfig& layer, bundle::BundleTriggerRule trigger) {
     if (slot < 0 || slot >= math::kMaxAr3dLayers) return;
-    ar3dAccessories_[slot] = layer;
-    ar3dTriggers_[slot] = trigger;
+    math::Ar3dAccessoryConfig stored = layer;
+    const auto* candVerts = !layer.ownedVertices.empty() ? layer.ownedVertices.data() : layer.customVertices;
+    const int candVertCount = !layer.ownedVertices.empty() ? static_cast<int>(layer.ownedVertices.size()) : layer.customVertexCount;
+    const auto* candIdx = !layer.ownedIndices.empty() ? layer.ownedIndices.data() : layer.customIndices;
+    const int candIdxCount = !layer.ownedIndices.empty() ? static_cast<int>(layer.ownedIndices.size()) : layer.customIndexCount;
+    if (candVerts != nullptr || candIdx != nullptr || candVertCount > 0 || candIdxCount > 0) {
+        if (!math::Ar3dSolver::validateCustomMesh(candVerts, candVertCount, candIdx, candIdxCount)) {
+            ar3dAccessories_[slot] = math::Ar3dAccessoryConfig{};
+            ar3dTriggers_[slot] = bundle::BundleTriggerRule::kAlways;
+        } else {
+            stored.ownedVertices.assign(candVerts, candVerts + candVertCount);
+            stored.ownedIndices.assign(candIdx, candIdx + candIdxCount);
+            stored.customVertices = stored.ownedVertices.data();
+            stored.customVertexCount = candVertCount;
+            stored.customIndices = stored.ownedIndices.data();
+            stored.customIndexCount = candIdxCount;
+            stored.customMeshGeneration = ++nextAr3dMeshGen_;
+            ar3dAccessories_[slot] = std::move(stored);
+            ar3dTriggers_[slot] = trigger;
+        }
+    } else {
+        stored.ownedVertices.clear();
+        stored.ownedIndices.clear();
+        stored.customVertices = nullptr;
+        stored.customVertexCount = 0;
+        stored.customIndices = nullptr;
+        stored.customIndexCount = 0;
+        stored.customMeshGeneration = 0;
+        ar3dAccessories_[slot] = std::move(stored);
+        ar3dTriggers_[slot] = trigger;
+    }
     int maxActive = 0;
     for (int i = 0; i < math::kMaxAr3dLayers; ++i) {
         if (ar3dAccessories_[i].enabled && ar3dAccessories_[i].texture != rhi::kInvalidTexture) {
@@ -100,7 +137,19 @@ bool LiveBeautyEngine::applyEffectBundle(
     const bundle::EffectBundleManifest& manifest,
     const bundle::BundleTextureResolver& textureResolver) {
     if (manifest.hasBeautySection) {
-        setConfig(manifest.beauty);
+        BeautyConfig merged = manifest.beauty;
+        if (!manifest.overridesBackground) {
+            merged.backgroundBlur = config_.backgroundBlur;
+            merged.backgroundMode = config_.backgroundMode;
+            merged.virtualBgStrength = config_.virtualBgStrength;
+        }
+        if (!manifest.overridesPipelineOptions) {
+            merged.performanceTier = config_.performanceTier;
+            merged.preferHalfFloat = config_.preferHalfFloat;
+            merged.maxFaces = config_.maxFaces;
+            merged.frameDelayFrames = config_.frameDelayFrames;
+        }
+        setConfig(merged);
     }
     clearStickers();
     for (const auto& s : manifest.stickers) {
@@ -177,9 +226,13 @@ bool LiveBeautyEngine::submitAuxRgbaSample(
         return false;
     }
     const CropRect bounds = latestFaceBounds_;
-    occlusionSolver_.compute(rgbaTopDown, srcWidth, srcHeight, &bounds, stagedOccMask_.data());
-    stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
-    stagedOccDirty_ = true;
+    const float rollRad = latestFaceRollRad_;
+    // Do not overwrite 128x128 19-class semantic parsing mask when active
+    if (!semanticOccActive_) {
+        occlusionSolver_.compute(rgbaTopDown, srcWidth, srcHeight, &bounds, stagedOccMask_.data(), rollRad);
+        stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
+        stagedOccDirty_ = true;
+    }
     const float clampedStrength = detail::clampf(retouchStrength, 0.0f, 1.0f);
     std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> biRes{};
     std::array<uint8_t, math::NeuralSkinResidualAdapter::kOutPixels * 4> microRes{};
@@ -214,6 +267,7 @@ bool LiveBeautyEngine::submitFaceParsingClassMap(
             classIds, srcWidth, srcHeight, stagedOccMask_.data(), stagedParseHair_.data(), nullptr)) {
         return false;
     }
+    semanticOccActive_ = true;
     stagedOccSize_ = math::FaceParsingMapper::kOutSize;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
@@ -229,6 +283,7 @@ bool LiveBeautyEngine::submitFaceParsingLogits(
             logitsNchw, numClasses, srcWidth, srcHeight, stagedOccMask_.data(), stagedParseHair_.data(), nullptr)) {
         return false;
     }
+    semanticOccActive_ = true;
     stagedOccSize_ = math::FaceParsingMapper::kOutSize;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
@@ -284,16 +339,38 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
     float cx = 0.0f, cy = 0.0f, fw = 0.0f;
     const int valid = faces_.submitFaces(
         sampleTsMs, faces, cappedCount, frameWidth, frameHeight, receivedMs, &cx, &cy, &fw);
-    if (valid > 0 && faces && faceCount > 0 && faces[0].mpXy != nullptr) {
-        CropRect fb{};
-        if (math::FaceOcclusionSolver::boundsFromLandmarks(faces[0].mpXy, faces[0].pointCount, fb)) {
-            std::lock_guard<std::mutex> lock(auxMutex_);
-            latestFaceBounds_ = fb;
-            hasLatestFaceBounds_ = true;
+    if (valid > 0 && fw > 0.0f && faces && faceCount > 0) {
+        // Select the raw input closest to primary slot(0)'s top-down center (cx, 1 - cy)
+        const float targetTopDownCy = 1.0f - cy;
+        int bestIdx = -1;
+        float bestDist2 = 1e9f;
+        for (int i = 0; i < cappedCount; ++i) {
+            if (!faces[i].mpXy || faces[i].pointCount < 468) continue;
+            CropRect cand{};
+            if (!math::FaceOcclusionSolver::boundsFromLandmarks(faces[i].mpXy, faces[i].pointCount, cand)) continue;
+            const float candCx = cand.left + 0.5f * cand.width;
+            const float candCy = cand.top + 0.5f * cand.height;
+            const float d2 = (candCx - cx) * (candCx - cx) + (candCy - targetTopDownCy) * (candCy - targetTopDownCy);
+            if (d2 < bestDist2) {
+                bestDist2 = d2;
+                bestIdx = i;
+            }
+        }
+        if (bestIdx >= 0) {
+            CropRect fb{};
+            float roll = 0.0f;
+            if (math::FaceOcclusionSolver::boundsFromLandmarks(
+                    faces[bestIdx].mpXy, faces[bestIdx].pointCount, fb, &roll)) {
+                std::lock_guard<std::mutex> lock(auxMutex_);
+                latestFaceBounds_ = fb;
+                latestFaceRollRad_ = roll;
+                hasLatestFaceBounds_ = true;
+            }
         }
     } else if (valid == 0) {
         std::lock_guard<std::mutex> lock(auxMutex_);
         hasLatestFaceBounds_ = false;
+        latestFaceRollRad_ = 0.0f;
         expressionBus_.update(nullptr);
     }
     if (valid > 0 && fw > 0.0f && cappedCount == 1) {
@@ -396,6 +473,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             } else {
                 device_.updateTexture2D(autoParseHairTex_, kHairS, kHairS, rhi::TextureFormat::kR8, stagedParseHair_.data());
             }
+            autoParseHairValid_ = (autoParseHairTex_ != rhi::kInvalidTexture);
             autoParseHairTsMs_ = stagedParseHairTsMs_;
         }
         if (stagedResidualDirty_) {
@@ -450,7 +528,9 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
 
     // Hair semantic temporal gate & rigid head-motion compensation affine (using aligned displayTsMs)
-    const rhi::TextureId resolvedHairTex = (hairMaskTex != rhi::kInvalidTexture) ? hairMaskTex : autoParseHairTex_;
+    const rhi::TextureId resolvedHairTex = (hairMaskTex != rhi::kInvalidTexture)
+        ? hairMaskTex
+        : (autoParseHairValid_ ? autoParseHairTex_ : rhi::kInvalidTexture);
     const int64_t resolvedHairStampArg = (hairMaskTex != rhi::kInvalidTexture) ? hairMaskStampMs : autoParseHairTsMs_;
     const bool hasHairTex = (resolvedHairTex != rhi::kInvalidTexture);
     const int64_t effHairStamp = (resolvedHairStampArg != kTimeInvalid) ? resolvedHairStampArg : displayTsMs;
@@ -524,9 +604,14 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.bodyPresence = bodySmoother_.presence();
     in.personMaskTex = personMaskTex;
     in.hairMaskTex = resolvedHairTex;
+    bool semanticOccAlive = false;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        semanticOccAlive = semanticOccActive_;
+    }
     in.occlusionMaskTex = (occlusionMaskTex_ != rhi::kInvalidTexture)
         ? occlusionMaskTex_
-        : ((faceBoundsAlive || autoOccTexSize_ == math::FaceParsingMapper::kOutSize) && hasMesh
+        : ((faceBoundsAlive || semanticOccAlive) && hasMesh
                ? autoOccTex_
                : rhi::kInvalidTexture);
     in.hairShown = hairShown;

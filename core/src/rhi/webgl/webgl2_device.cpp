@@ -153,6 +153,21 @@ WebGl2Device::~WebGl2Device() {
     releaseAll(false);
 }
 
+bool WebGl2Device::isReady() const {
+    return gl_.genTextures && gl_.bindTexture && gl_.texParameteri && gl_.pixelStorei &&
+           gl_.texImage2D && gl_.texSubImage2D && gl_.genFramebuffers && gl_.bindFramebuffer &&
+           gl_.framebufferTexture2D && gl_.checkFramebufferStatus && gl_.genBuffers &&
+           gl_.bindBuffer && gl_.bufferData && gl_.createShader && gl_.deleteShader &&
+           gl_.shaderSource && gl_.compileShader && gl_.getShaderiv && gl_.createProgram &&
+           gl_.deleteProgram && gl_.attachShader && gl_.linkProgram && gl_.getProgramiv &&
+           gl_.useProgram && gl_.getAttribLocation && gl_.getUniformLocation &&
+           gl_.enableVertexAttribArray && gl_.disableVertexAttribArray && gl_.vertexAttribPointer &&
+           gl_.uniform1i && gl_.uniform4f && gl_.viewport && gl_.enable && gl_.disable &&
+           gl_.blendFuncSeparate && gl_.frontFace && gl_.cullFace && gl_.colorMask &&
+           gl_.clearColor && gl_.clear && gl_.drawArrays && gl_.drawElements &&
+           gl_.activeTexture;
+}
+
 void WebGl2Device::releaseAll(bool contextAlive) {
     if (contextAlive) {
         for (auto& [id, rt] : rts_) {
@@ -233,6 +248,7 @@ uint32_t WebGl2Device::linkProgram(const char* vSrc, const char* fSrc) {
 }
 
 RenderTargetId WebGl2Device::createRenderTarget(int width, int height, TextureFormat format) {
+    if (!isReady() || width <= 0 || height <= 0) return kInvalidRenderTarget;
     if (format == TextureFormat::kRgba16f && colorBufferFloatExt_) {
         while (gl_.getError && gl_.getError() != kGlNoError) {}
         uint32_t glTex = 0;
@@ -252,6 +268,7 @@ RenderTargetId WebGl2Device::createRenderTarget(int width, int height, TextureFo
         const bool ok = (!gl_.getError || gl_.getError() == kGlNoError) &&
                         gl_.checkFramebufferStatus(kGlFramebuffer) == kGlFramebufferComplete;
         if (!ok) {
+            while (gl_.getError && gl_.getError() != kGlNoError) {}
             gl_.texImage2D(kGlTexture2D, 0, static_cast<int>(kGlRgba8), width, height, 0,
                            kGlRgba, kGlUnsignedByte, nullptr);
             gl_.framebufferTexture2D(kGlFramebuffer, kGlColorAttachment0, kGlTexture2D, glTex, 0);
@@ -267,6 +284,7 @@ RenderTargetId WebGl2Device::createRenderTarget(int width, int height, TextureFo
 
     const TextureFormat fallbackFmt = (format == TextureFormat::kRgba16f) ? TextureFormat::kRgba8 : format;
     const TextureId texId = createTexture2D(width, height, fallbackFmt, nullptr);
+    if (texId == kInvalidTexture) return kInvalidRenderTarget;
     uint32_t fbo = 0;
     gl_.genFramebuffers(1, &fbo);
     gl_.bindFramebuffer(kGlFramebuffer, fbo);
@@ -291,6 +309,7 @@ TextureId WebGl2Device::textureOf(RenderTargetId rt) const {
 }
 
 TextureId WebGl2Device::createTexture2D(int width, int height, TextureFormat format, const uint8_t* pixels) {
+    if (!isReady() || width <= 0 || height <= 0) return kInvalidTexture;
     uint32_t glTex = 0;
     gl_.genTextures(1, &glTex);
     gl_.bindTexture(kGlTexture2D, glTex);
@@ -299,10 +318,13 @@ TextureId WebGl2Device::createTexture2D(int width, int height, TextureFormat for
     gl_.texParameteri(kGlTexture2D, kGlTextureWrapS, static_cast<int>(kGlClampToEdge));
     gl_.texParameteri(kGlTexture2D, kGlTextureWrapT, static_cast<int>(kGlClampToEdge));
     // WebGL2 uses sized GL_R8 + GL_RED for single-channel masks (avoids deprecated GL_LUMINANCE).
-    const int internalFmt = (format == TextureFormat::kR8) ? static_cast<int>(kGlR8) : static_cast<int>(kGlRgba8);
+    const int internalFmt = (format == TextureFormat::kR8)
+        ? static_cast<int>(kGlR8)
+        : (format == TextureFormat::kRgba16f ? static_cast<int>(kGlRgba16f) : static_cast<int>(kGlRgba8));
     const uint32_t baseFmt = (format == TextureFormat::kR8) ? kGlRed : kGlRgba;
+    const uint32_t dataType = (format == TextureFormat::kRgba16f) ? kGlHalfFloat : kGlUnsignedByte;
     gl_.pixelStorei(kGlUnpackAlignment, (format == TextureFormat::kR8) ? 1 : 4);
-    gl_.texImage2D(kGlTexture2D, 0, internalFmt, width, height, 0, baseFmt, kGlUnsignedByte, pixels);
+    gl_.texImage2D(kGlTexture2D, 0, internalFmt, width, height, 0, baseFmt, dataType, pixels);
     gl_.bindTexture(kGlTexture2D, 0);
     const TextureId id = nextId_++;
     textures_[id] = TexRecord{glTex, false};
@@ -310,12 +332,14 @@ TextureId WebGl2Device::createTexture2D(int width, int height, TextureFormat for
 }
 
 void WebGl2Device::updateTexture2D(TextureId tex, int width, int height, TextureFormat format, const uint8_t* pixels) {
+    if (!isReady() || width <= 0 || height <= 0) return;
     const uint32_t glTex = unwrapWebGlTexture(tex);
     if (!glTex || !pixels) return;
     gl_.bindTexture(kGlTexture2D, glTex);
     const uint32_t baseFmt = (format == TextureFormat::kR8) ? kGlRed : kGlRgba;
+    const uint32_t dataType = (format == TextureFormat::kRgba16f) ? kGlHalfFloat : kGlUnsignedByte;
     gl_.pixelStorei(kGlUnpackAlignment, (format == TextureFormat::kR8) ? 1 : 4);
-    gl_.texSubImage2D(kGlTexture2D, 0, 0, 0, width, height, baseFmt, kGlUnsignedByte, pixels);
+    gl_.texSubImage2D(kGlTexture2D, 0, 0, 0, width, height, baseFmt, dataType, pixels);
     gl_.bindTexture(kGlTexture2D, 0);
 }
 
@@ -329,6 +353,7 @@ void WebGl2Device::destroyTexture(TextureId tex) {
 }
 
 BufferId WebGl2Device::createDynamicVertexBuffer(size_t byteSize) {
+    if (!isReady() || byteSize == 0) return kInvalidBuffer;
     uint32_t vbo = 0;
     gl_.genBuffers(1, &vbo);
     gl_.bindBuffer(kGlArrayBuffer, vbo);
@@ -340,14 +365,16 @@ BufferId WebGl2Device::createDynamicVertexBuffer(size_t byteSize) {
 }
 
 void WebGl2Device::updateVertexBuffer(BufferId buf, const void* data, size_t byteSize) {
+    if (!isReady() || !data || byteSize == 0) return;
     auto it = buffers_.find(buf);
-    if (it == buffers_.end() || !data) return;
+    if (it == buffers_.end()) return;
     gl_.bindBuffer(kGlArrayBuffer, it->second.glBuf);
     gl_.bufferData(kGlArrayBuffer, static_cast<ptrdiff_t>(byteSize), data, kGlDynamicDraw);
     gl_.bindBuffer(kGlArrayBuffer, 0);
 }
 
 BufferId WebGl2Device::createStaticIndexBuffer(const uint16_t* indices, size_t count) {
+    if (!isReady() || !indices || count == 0) return kInvalidBuffer;
     uint32_t ibo = 0;
     gl_.genBuffers(1, &ibo);
     gl_.bindBuffer(kGlElementArrayBuffer, ibo);
@@ -413,6 +440,7 @@ const WebGl2Device::ProgramCache& WebGl2Device::ensureProgram(ShaderId id) {
 }
 
 void WebGl2Device::beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor) {
+    if (!isReady()) return;
     auto it = rts_.find(rt);
     gl_.bindFramebuffer(kGlFramebuffer, (it != rts_.end()) ? it->second.fbo : 0);
     gl_.viewport(0, 0, viewportW, viewportH);
@@ -476,6 +504,7 @@ void WebGl2Device::restoreSharedState() {
 void WebGl2Device::drawFullScreenQuad(
     ShaderId shader, const RenderState& state,
     const TextureBindings& textures, const UniformBlock& uniforms) {
+    if (!isReady()) return;
     const auto& pc = ensureProgram(shader);
     if (!pc.program) return;
     ensureQuadVbo();
@@ -504,6 +533,7 @@ void WebGl2Device::drawIndexed(
     BufferId vertexBuffer, BufferId indexBuffer,
     int indexOffset, int indexCount, VertexLayout layout,
     const TextureBindings& textures, const UniformBlock& uniforms) {
+    if (!isReady() || indexCount <= 0 || indexOffset < 0) return;
     const auto& pc = ensureProgram(shader);
     auto vbIt = buffers_.find(vertexBuffer);
     auto ibIt = buffers_.find(indexBuffer);
@@ -560,6 +590,7 @@ void WebGl2Device::drawIndexed(
 }
 
 void WebGl2Device::endPass() {
+    if (!isReady()) return;
     gl_.bindFramebuffer(kGlFramebuffer, 0);
 }
 

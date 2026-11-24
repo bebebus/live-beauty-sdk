@@ -18,12 +18,18 @@ public:
     ~MetalDevice() override;
 
     bool isReady() const;
+    size_t trackedTextureCount() const;
 
 #ifdef __OBJC__
     id<MTLDevice> nativeDevice() const;
     id<MTLCommandQueue> nativeQueue() const;
+    /** Wrap a persistent external MTLTexture (caller owns lifetime and calls destroyTexture when replaced). */
     TextureId wrapMetalTexture(id<MTLTexture> tex);
+    /** Wrap a per-frame transient MTLTexture (automatically evicted from RHI table at the end of flush()). */
+    TextureId wrapTransientMetalTexture(id<MTLTexture> tex);
     id<MTLTexture> unwrapMetalTexture(TextureId tex) const;
+    /** Zero-copy GPU pass-through blit (supports RGBA8 -> BGRA8 IOSurface conversion in active command buffer). */
+    bool renderToExternalTexture(TextureId srcTex, id<MTLTexture> dstTex);
     bool readbackTextureRgba8(TextureId tex, uint8_t* outRgba, int width, int height);
 #endif
 

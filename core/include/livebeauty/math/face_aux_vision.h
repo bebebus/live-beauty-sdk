@@ -26,6 +26,7 @@ enum class ExpressionTrigger : uint8_t {
     kBrowRaise = 3,
     kBlink = 4,
     kCheekPuff = 5,
+    kTongueOut = 6,
 };
 
 struct ExpressionReaction {
@@ -77,8 +78,8 @@ public:
     FaceOcclusionSolver();
     void reset();
 
-    /** Extract padded normalized [0..1] face bounding box from 468/478-pt interleaved landmarks. */
-    static bool boundsFromLandmarks(const float* mpXy, int pointCount, CropRect& outBounds);
+    /** Extract padded normalized [0..1] face bounding box (and optional in-plane roll angle) from 468/478-pt landmarks. */
+    static bool boundsFromLandmarks(const float* mpXy, int pointCount, CropRect& outBounds, float* outRollRad = nullptr);
 
     /** Compute top-down 64x64 R8 visibility mask (`255` = visible, `0` = occluded). */
     void compute(
@@ -86,7 +87,8 @@ public:
         int srcWidth,
         int srcHeight,
         const CropRect* faceBounds,
-        uint8_t* outMaskR8);
+        uint8_t* outMaskR8,
+        float headRollRad = 0.0f);
 
 private:
     void fillNeutral(uint8_t* outMaskR8);

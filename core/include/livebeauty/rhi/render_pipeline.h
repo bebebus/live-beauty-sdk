@@ -257,6 +257,7 @@ private:
     };
     std::array<const uint16_t*, math::kMaxAr3dLayers> ibAr3dCustomPtr_{};
     std::array<int, math::kMaxAr3dLayers> ibAr3dCustomCount_{};
+    std::array<uint64_t, math::kMaxAr3dLayers> ibAr3dCustomGen_{};
     BufferId ibFullMesh_ = kInvalidBuffer;
     BufferId ibNeckApron_ = kInvalidBuffer;
     BufferId ibSkinRetouch_ = kInvalidBuffer;

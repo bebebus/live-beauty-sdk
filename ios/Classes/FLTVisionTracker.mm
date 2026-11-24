@@ -23,9 +23,9 @@
     int64_t _latestPoseTsMs;
     bool _poseDirty;
 
-    int64_t _lastSegMs;
-    int64_t _lastPoseMs;
-    int64_t _lastAuxMs;
+    std::atomic<int64_t> _lastSegMs;
+    std::atomic<int64_t> _lastPoseMs;
+    std::atomic<int64_t> _lastAuxMs;
     std::vector<uint8_t> _auxRgba;
 }
 
@@ -38,9 +38,9 @@
         _latestMaskTsMs = -1;
         _latestPoseTsMs = -1;
         _poseDirty = false;
-        _lastSegMs = INT64_MIN;
-        _lastPoseMs = INT64_MIN;
-        _lastAuxMs = INT64_MIN;
+        _lastSegMs.store(INT64_MIN, std::memory_order_relaxed);
+        _lastPoseMs.store(INT64_MIN, std::memory_order_relaxed);
+        _lastAuxMs.store(INT64_MIN, std::memory_order_relaxed);
         std::memset(_latestPoseXyv, 0, sizeof(_latestPoseXyv));
 
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
@@ -67,9 +67,9 @@
     _latestMaskTsMs = -1;
     _latestPoseTsMs = -1;
     _poseDirty = false;
-    _lastSegMs = INT64_MIN;
-    _lastPoseMs = INT64_MIN;
-    _lastAuxMs = INT64_MIN;
+    _lastSegMs.store(INT64_MIN, std::memory_order_relaxed);
+    _lastPoseMs.store(INT64_MIN, std::memory_order_relaxed);
+    _lastAuxMs.store(INT64_MIN, std::memory_order_relaxed);
 }
 
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer
@@ -80,17 +80,20 @@
           onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock {
     if (!pixelBuffer || (!wantSeg && !wantPose && !wantAux)) return;
 
-    const BOOL doSeg = wantSeg && (_lastSegMs == INT64_MIN || sampleTsMs - _lastSegMs >= 45);
-    const BOOL doPose = wantPose && (_lastPoseMs == INT64_MIN || sampleTsMs - _lastPoseMs >= 66);
-    const BOOL doAux = wantAux && auxBlock != nil && (_lastAuxMs == INT64_MIN || sampleTsMs - _lastAuxMs >= 95);
+    const int64_t prevSeg = _lastSegMs.load(std::memory_order_relaxed);
+    const int64_t prevPose = _lastPoseMs.load(std::memory_order_relaxed);
+    const int64_t prevAux = _lastAuxMs.load(std::memory_order_relaxed);
+    const BOOL doSeg = wantSeg && (prevSeg == INT64_MIN || sampleTsMs - prevSeg >= 45);
+    const BOOL doPose = wantPose && (prevPose == INT64_MIN || sampleTsMs - prevPose >= 66);
+    const BOOL doAux = wantAux && auxBlock != nil && (prevAux == INT64_MIN || sampleTsMs - prevAux >= 95);
     if (!doSeg && !doPose && !doAux) return;
 
     bool expected = false;
     if (!_inFlight.compare_exchange_strong(expected, true)) return;
 
-    if (doSeg) _lastSegMs = sampleTsMs;
-    if (doPose) _lastPoseMs = sampleTsMs;
-    if (doAux) _lastAuxMs = sampleTsMs;
+    if (doSeg) _lastSegMs.store(sampleTsMs, std::memory_order_relaxed);
+    if (doPose) _lastPoseMs.store(sampleTsMs, std::memory_order_relaxed);
+    if (doAux) _lastAuxMs.store(sampleTsMs, std::memory_order_relaxed);
 
     CVPixelBufferRetain(pixelBuffer);
     const int reqQuality = self.qualityLevel;

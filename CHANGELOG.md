@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.5.1] - 2026-11-24
+
+### Fixed
+- **Apple Metal RHI Intra-Frame VBO Slab Arena & Zero-Copy `IOSurface` Lifecycle (`MetalDevice`, `FLTLiveBeautyMetalEngine`, `LiveBeautySDK.podspec`)**:
+  - Replaced single-buffer offset-0 `updateVertexBuffer` overwrites with a reusable 256-byte-aligned per-frame dynamic VBO slab arena (`dynamicSlabs`), preventing vertex corruption across multi-slot 2D stickers, multi-slot 3D AR meshes, and dual-face passes within an uncommitted `MTLCommandBuffer`.
+  - Added `wrapTransientMetalTexture` (auto-evicted on `flush()`) and `renderToExternalTexture` (`MTLPixelFormat`-keyed PSO cache) with a pooled `CVPixelBufferPool` in `FLTLiveBeautyMetalEngine`, eliminating per-frame `IOSurface` handle leaks and CPU `getBytes:` readback copies.
+  - Replaced `kCGImageAlphaPremultipliedLast` asset decoding with raw straight-RGBA extraction (`decodeStraightRgba`) and disabled Xcode `pngcrush` premultiplication (`COMPRESS_PNG_FILES = NO`), preserving `A = 0` packed channel masks in `eye_makeup.png` and straight-alpha RGB in `iris_atlas.png`.
+- **C++17 Math, `.lbfx` Bundle Parser & Engine State Hardening (`LiveBeautyEngine`, `RenderPipeline`, `Ar3dSolver`, `EffectBundleParser`)**:
+  - Guarded `detail::clampf`/`clampd` against `NaN`, guarded `FaceParsingMapper` & `NeuralSkinResidualAdapter` with 64-bit `size_t` stride arithmetic (`<= 8192`) and neutral handling for `ignore_index = 255`, and corrected mirrored front-camera (`frontFaceCw`) X-axis sign in `FaceRelightSolver` and `Ar3dSolver`.
+  - Deep-copied and bounds-validated custom `Ar3dMeshVertex` / index buffers (`validateCustomMesh` + generation-keyed IBO cache), fixed back-to-front painter's triangle order on `kCurvedGlasses` / `kCurvedTiara`, cleared `autoParseHairValid_` on `resetTracking()`, and prioritized 19-class semantic parsing over `64x64` YCbCr aux masks.
+  - Upgraded `EffectBundleParser` with locale-independent RFC 8259 decimal parsing, UTF-16 surrogate pair decoding, non-sequential slot support, body/background/pipeline overrides, and `ExpressionTrigger::kTongueOut` without blink-induced `kAlways` opacity dimming.
+- **Android JNI, GLES & WebGL2 Hardening (`live_beauty_jni.cpp`, `GlesDevice`, `WebGl2Device`, `LiveBeautyCppEngine`)**:
+  - Added 64-bit overflow & array bounds checks, `ExceptionCheck()` UTF-8 guards, safe `nativeReleaseGpu` ordering, `nativeSetAr3dAccessoryEx`, `nativeApplyEffectBundleJsonWithAssets`, and background `RawAuxWorker` offloading on Android.
+  - Checked `GL_OES_texture_half_float_linear` before enabling GLES2 OES half-float render targets and drained GL errors before `WebGl2Device` `RGBA8` fallback.
+
 ## [3.5.0] - 2026-11-24
 
 ### Added

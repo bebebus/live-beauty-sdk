@@ -57,6 +57,9 @@ struct Ar3dAccessoryConfig {
     int customVertexCount = 0;
     const uint16_t* customIndices = nullptr;
     int customIndexCount = 0;
+    std::vector<Ar3dMeshVertex> ownedVertices;
+    std::vector<uint16_t> ownedIndices;
+    uint64_t customMeshGeneration = 0;
 };
 
 constexpr int kMaxAr3dLayers = 4;
@@ -116,11 +119,18 @@ public:
     static void getCurvedTiaraMesh(const Ar3dMeshVertex*& outVerts, int& outVertCount,
                                    const uint16_t*& outIndices, int& outIndexCount);
 
+    /** Validate custom vertex/index counts, triangle divisibility, and strict index bounds (< vertCount). */
+    static bool validateCustomMesh(
+        const Ar3dMeshVertex* verts, int vertCount,
+        const uint16_t* indices, int indexCount,
+        int maxVertices = kMaxMeshVertices);
+
     /** Build 468-vertex 3D head-occluder shell (depth normalized to [0..1], higher = closer to camera). */
     static void buildHeadDepthShell(
         const float* landmarks478x2,
         const HeadPose3D& pose,
-        float* outShell468x5);
+        float* outShell468x5,
+        bool mirrored = false);
 
     /**
      * Project a 3D AR accessory quad into NDC + UV + normalized depth, incorporating 3D head rotation
@@ -134,7 +144,8 @@ public:
         const SpringPendulum* spring,
         float* outQuad20,
         float& outAnchorX,
-        float& outAnchorY);
+        float& outAnchorY,
+        bool mirrored = false);
 
     /**
      * v3.5: Project an arbitrary indexed 3D mesh (custom or preset) into `kAr3dPos2Uv2Z1` vertex stream.
@@ -152,7 +163,8 @@ public:
         const uint16_t*& outIndices,
         int& outIndexCount,
         float& outAnchorX,
-        float& outAnchorY);
+        float& outAnchorY,
+        bool mirrored = false);
 };
 
 }  // namespace livebeauty::math

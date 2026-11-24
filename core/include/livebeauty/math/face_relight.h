@@ -64,7 +64,8 @@ public:
         const HeadPose3D& pose,
         RelightStyle style,
         float relightStrength,
-        float* out468) const;
+        float* out468,
+        bool mirrored = false) const;
 
     /** Rotate a canonical 3D vector by `pose.rot`. */
     static Vec3 rotateVec(const HeadPose3D& pose, const Vec3& v);

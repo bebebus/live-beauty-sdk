@@ -36,9 +36,12 @@ inline JniEngineHandle* fromHandle(jlong ptr) {
 }
 
 std::string toStdString(JNIEnv* env, jstring js) {
-    if (!js) return {};
+    if (!js || env->ExceptionCheck()) return {};
     const char* chars = env->GetStringUTFChars(js, nullptr);
-    if (!chars) return {};
+    if (!chars) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return {};
+    }
     std::string out(chars);
     env->ReleaseStringUTFChars(js, chars);
     return out;
@@ -50,8 +53,12 @@ extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeCreate(JNIEnv*, jclass) {
-    auto* handle = new JniEngineHandle();
-    return reinterpret_cast<jlong>(handle);
+    try {
+        auto* handle = new JniEngineHandle();
+        return reinterpret_cast<jlong>(handle);
+    } catch (...) {
+        return 0;
+    }
 }
 
 JNIEXPORT void JNICALL
@@ -59,6 +66,7 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeDestroy(JNIEnv*, jclass, jlo
     auto* handle = fromHandle(ptr);
     if (!handle) return;
     handle->device.releaseAll(contextAlive == JNI_TRUE);
+    handle->engine.releaseGpuResources();
     delete handle;
 }
 
@@ -72,10 +80,9 @@ JNIEXPORT void JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeReleaseGpu(JNIEnv*, jclass, jlong ptr, jboolean contextAlive) {
     auto* handle = fromHandle(ptr);
     if (!handle) return;
-    if (contextAlive == JNI_TRUE) {
-        handle->engine.releaseGpuResources();
-    }
+    // Clear GlesDevice tables first (with glDelete* only if contextAlive), then reset Engine/RenderPipeline handles unconditionally
     handle->device.releaseAll(contextAlive == JNI_TRUE);
+    handle->engine.releaseGpuResources();
 }
 
 JNIEXPORT void JNICALL
@@ -248,7 +255,8 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitFaceLandmarks(
     JNIEnv* env, jclass, jlong ptr, jlong sampleTsMs, jfloatArray mpXyArr,
     jint pointCount, jint width, jint height, jlong receivedMs) {
     auto* handle = fromHandle(ptr);
-    if (!handle || !mpXyArr || pointCount < 468) return JNI_FALSE;
+    if (!handle || !mpXyArr || pointCount < 468 || pointCount > 1024) return JNI_FALSE;
+    if (env->GetArrayLength(mpXyArr) < pointCount * 2) return JNI_FALSE;
     jfloat* data = env->GetFloatArrayElements(mpXyArr, nullptr);
     if (!data) return JNI_FALSE;
     const bool ok = handle->engine.submitFaceLandmarks(sampleTsMs, data, pointCount, width, height, receivedMs);
@@ -269,6 +277,7 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitBodyPose(
     jint pointCount, jint width, jint height) {
     auto* handle = fromHandle(ptr);
     if (!handle || !poseXyzvArr || pointCount < 33) return JNI_FALSE;
+    if (env->GetArrayLength(poseXyzvArr) < 33 * 3) return JNI_FALSE;
     jfloat* raw = env->GetFloatArrayElements(poseXyzvArr, nullptr);
     if (!raw) return JNI_FALSE;
     livebeauty::math::PoseLandmark pts[33];
@@ -490,6 +499,39 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAr3dAccessory(
 }
 
 JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetAr3dAccessoryEx(
+    JNIEnv*, jclass, jlong ptr,
+    jint slot, jboolean enabled, jint anchor, jint meshPreset, jint triggerRule, jint texGlId,
+    jfloat scale, jfloat offsetX, jfloat offsetY, jfloat offsetZ,
+    jfloat yawRad, jfloat pitchRad, jfloat rollRad,
+    jfloat opacity, jfloat textureAspect,
+    jfloat springStiffness, jfloat springDamping, jboolean headOcclusion) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    livebeauty::math::Ar3dAccessoryConfig cfg{};
+    cfg.enabled = (enabled == JNI_TRUE);
+    cfg.anchor = static_cast<livebeauty::math::Ar3dAnchor>(std::clamp(static_cast<int>(anchor), 0, 5));
+    cfg.meshPreset = static_cast<livebeauty::math::Ar3dMeshPreset>(std::clamp(static_cast<int>(meshPreset), 0, 2));
+    cfg.texture = (texGlId != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(texGlId))
+        : livebeauty::rhi::kInvalidTexture;
+    cfg.scale = scale;
+    cfg.offsetX = offsetX;
+    cfg.offsetY = offsetY;
+    cfg.offsetZ = offsetZ;
+    cfg.yawOffsetRad = yawRad;
+    cfg.pitchOffsetRad = pitchRad;
+    cfg.rollOffsetRad = rollRad;
+    cfg.opacity = opacity;
+    cfg.textureAspect = textureAspect;
+    cfg.springStiffness = springStiffness;
+    cfg.springDamping = springDamping;
+    cfg.headOcclusion = (headOcclusion == JNI_TRUE);
+    const auto trig = static_cast<livebeauty::bundle::BundleTriggerRule>(std::clamp(static_cast<int>(triggerRule), 0, 6));
+    handle->engine.setAr3dAccessory(slot, cfg, trig);
+}
+
+JNIEXPORT void JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeClearAr3dAccessories(
     JNIEnv*, jclass, jlong ptr) {
     auto* handle = fromHandle(ptr);
@@ -517,7 +559,7 @@ JNIEXPORT jboolean JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitAuxRgbaSample(
     JNIEnv* env, jclass, jlong ptr, jobject rgbaDirectBuf, jint srcWidth, jint srcHeight, jfloat retouchStrength) {
     auto* handle = fromHandle(ptr);
-    if (!handle || !rgbaDirectBuf || srcWidth <= 0 || srcHeight <= 0) return JNI_FALSE;
+    if (!handle || !rgbaDirectBuf || srcWidth <= 0 || srcHeight <= 0 || srcWidth > 8192 || srcHeight > 8192) return JNI_FALSE;
     auto* ptrBytes = static_cast<const uint8_t*>(env->GetDirectBufferAddress(rgbaDirectBuf));
     const jlong cap = env->GetDirectBufferCapacity(rgbaDirectBuf);
     const jlong needed = static_cast<jlong>(srcWidth) * static_cast<jlong>(srcHeight) * 4;
@@ -529,9 +571,10 @@ JNIEXPORT jboolean JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitFaceParsingClassMap(
     JNIEnv* env, jclass, jlong ptr, jbyteArray classIdsArr, jint srcWidth, jint srcHeight, jlong sampleTsMs) {
     auto* handle = fromHandle(ptr);
-    if (!handle || !classIdsArr || srcWidth <= 0 || srcHeight <= 0) return JNI_FALSE;
-    const jsize len = env->GetArrayLength(classIdsArr);
-    if (len < srcWidth * srcHeight) return JNI_FALSE;
+    if (!handle || !classIdsArr || srcWidth <= 0 || srcHeight <= 0 || srcWidth > 8192 || srcHeight > 8192) return JNI_FALSE;
+    const jlong len = static_cast<jlong>(env->GetArrayLength(classIdsArr));
+    const jlong needed = static_cast<jlong>(srcWidth) * static_cast<jlong>(srcHeight);
+    if (len < needed) return JNI_FALSE;
     jbyte* raw = env->GetByteArrayElements(classIdsArr, nullptr);
     if (!raw) return JNI_FALSE;
     const bool ok = handle->engine.submitFaceParsingClassMap(
@@ -545,11 +588,13 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitNeuralResidualTensor(
     JNIEnv* env, jclass, jlong ptr, jfloatArray tensorNchwArr, jint channels, jint srcWidth, jint srcHeight,
     jfloat roiLeft, jfloat roiTop, jfloat roiWidth, jfloat roiHeight, jfloat strength) {
     auto* handle = fromHandle(ptr);
-    if (!handle || !tensorNchwArr || (channels != 3 && channels != 4) || srcWidth <= 0 || srcHeight <= 0) {
+    if (!handle || !tensorNchwArr || (channels != 3 && channels != 4) ||
+        srcWidth <= 0 || srcHeight <= 0 || srcWidth > 8192 || srcHeight > 8192) {
         return JNI_FALSE;
     }
-    const jsize len = env->GetArrayLength(tensorNchwArr);
-    if (len < channels * srcWidth * srcHeight) return JNI_FALSE;
+    const jlong len = static_cast<jlong>(env->GetArrayLength(tensorNchwArr));
+    const jlong needed = static_cast<jlong>(channels) * static_cast<jlong>(srcWidth) * static_cast<jlong>(srcHeight);
+    if (len < needed) return JNI_FALSE;
     jfloat* raw = env->GetFloatArrayElements(tensorNchwArr, nullptr);
     if (!raw) return JNI_FALSE;
     livebeauty::CropRect roi{roiLeft, roiTop, roiWidth, roiHeight};
@@ -558,21 +603,74 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitNeuralResidualTensor(
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
+static jboolean applyBundleInternal(
+    JNIEnv* env, JniEngineHandle* handle, jstring manifestJsonStr,
+    jobjectArray assetPathsArr, jintArray texGlIdsArr) {
+    try {
+        const std::string json = toStdString(env, manifestJsonStr);
+        std::vector<std::pair<std::string, uint32_t>> texTable;
+        if (assetPathsArr && texGlIdsArr) {
+            const jsize nPaths = env->GetArrayLength(assetPathsArr);
+            const jsize nIds = env->GetArrayLength(texGlIdsArr);
+            const jsize n = std::min(nPaths, nIds);
+            if (n > 0) {
+                jint* ids = env->GetIntArrayElements(texGlIdsArr, nullptr);
+                if (ids) {
+                    texTable.reserve(static_cast<size_t>(n));
+                    for (jsize i = 0; i < n; ++i) {
+                        auto jPath = static_cast<jstring>(env->GetObjectArrayElement(assetPathsArr, i));
+                        if (jPath) {
+                            texTable.emplace_back(toStdString(env, jPath), static_cast<uint32_t>(ids[i]));
+                            env->DeleteLocalRef(jPath);
+                        }
+                    }
+                    env->ReleaseIntArrayElements(texGlIdsArr, ids, JNI_ABORT);
+                }
+            }
+        }
+        livebeauty::bundle::BundleTextureResolver resolver = [&](const std::string& path) -> livebeauty::rhi::TextureId {
+            for (const auto& kv : texTable) {
+                if (kv.first == path && kv.second != 0) {
+                    return handle->device.wrapExternalTexture(kv.second);
+                }
+            }
+            return livebeauty::rhi::kInvalidTexture;
+        };
+        const bool ok = handle->engine.applyEffectBundleJson(json, resolver, nullptr);
+        if (ok) {
+            const auto& cfg = handle->engine.config();
+            handle->hairDyeOverride = cfg.hairDye;
+            handle->hairDyeColorOverride = cfg.hairDyeColor;
+            handle->hairShineOverride = cfg.hairShine;
+            handle->relightStyleOverride = cfg.relightStyle;
+            handle->bgModeOverride = cfg.backgroundMode;
+            handle->virtualBgStrengthOverride = cfg.virtualBgStrength;
+            handle->performanceTierOverride = cfg.performanceTier;
+            handle->preferHalfFloatOverride = cfg.preferHalfFloat;
+            handle->maxFacesOverride = cfg.maxFaces;
+            handle->frameDelayFramesOverride = cfg.frameDelayFrames;
+        }
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeApplyEffectBundleJson(
     JNIEnv* env, jclass, jlong ptr, jstring manifestJsonStr) {
     auto* handle = fromHandle(ptr);
     if (!handle || !manifestJsonStr) return JNI_FALSE;
-    const std::string json = toStdString(env, manifestJsonStr);
-    const bool ok = handle->engine.applyEffectBundleJson(json, nullptr, nullptr);
-    if (ok) {
-        const auto& cfg = handle->engine.config();
-        handle->hairDyeOverride = cfg.hairDye;
-        handle->hairDyeColorOverride = cfg.hairDyeColor;
-        handle->hairShineOverride = cfg.hairShine;
-        handle->relightStyleOverride = cfg.relightStyle;
-    }
-    return ok ? JNI_TRUE : JNI_FALSE;
+    return applyBundleInternal(env, handle, manifestJsonStr, nullptr, nullptr);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeApplyEffectBundleJsonWithAssets(
+    JNIEnv* env, jclass, jlong ptr, jstring manifestJsonStr,
+    jobjectArray assetPathsArr, jintArray texGlIdsArr) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !manifestJsonStr) return JNI_FALSE;
+    return applyBundleInternal(env, handle, manifestJsonStr, assetPathsArr, texGlIdsArr);
 }
 
 JNIEXPORT void JNICALL

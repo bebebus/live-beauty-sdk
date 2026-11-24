@@ -181,7 +181,8 @@ void FaceRelightSolver::computeVertexRelight(
     const HeadPose3D& pose,
     RelightStyle style,
     float relightStrength,
-    float* out468) const {
+    float* out468,
+    bool mirrored) const {
     if (!out468) return;
 
     // Key light, soft bounce fill, and shadow-neutralization direction in camera view space (+Z toward camera, +Y up)
@@ -223,9 +224,10 @@ void FaceRelightSolver::computeVertexRelight(
     // to full physically-rotated 3D studio normal shading (when relight>0).
     const float threeDMix = 0.55f + 0.45f * rl;
 
+    const float mirrorSign = mirrored ? -1.0f : 1.0f;
     for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
         const Vec3 nLocal{
-            canonicalNormals_[i * 3 + 0],
+            canonicalNormals_[i * 3 + 0] * mirrorSign,
             canonicalNormals_[i * 3 + 1],
             canonicalNormals_[i * 3 + 2],
         };

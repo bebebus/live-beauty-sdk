@@ -76,20 +76,23 @@ ExpressionReaction FaceExpressionBus::update(const BlendshapeInput* sample) {
     smPuff_   += (detail::clampf(in.cheekPuff, 0.0f, 1.0f) - smPuff_) * kExprAlpha;
     smTongue_ += (detail::clampf(in.tongueOut, 0.0f, 1.0f) - smTongue_) * kExprAlpha;
 
-    const float smileAct = detail::clampf((smSmile_ - 0.35f) / 0.45f, 0.0f, 1.0f);
-    const float jawAct   = detail::clampf((smJaw_ - 0.30f) / 0.45f, 0.0f, 1.0f);
-    const float browAct  = detail::clampf((smBrow_ - 0.30f) / 0.45f, 0.0f, 1.0f);
-    const float puffAct  = detail::clampf((smPuff_ - 0.32f) / 0.45f, 0.0f, 1.0f);
+    const float smileAct  = detail::smoothstep(0.32f, 0.78f, smSmile_);
+    const float jawAct    = detail::smoothstep(0.28f, 0.75f, smJaw_);
+    const float browAct   = detail::smoothstep(0.28f, 0.75f, smBrow_);
+    const float puffAct   = detail::smoothstep(0.30f, 0.75f, smPuff_);
+    const float tongueAct = detail::smoothstep(0.30f, 0.75f, smTongue_);
 
-    const float energy = std::max({smileAct, jawAct * 0.85f, browAct * 0.90f, puffAct * 0.80f});
+    const float energy = std::max({smileAct, jawAct * 0.85f, browAct * 0.90f, puffAct * 0.80f, tongueAct * 0.85f});
     ExpressionTrigger trig = ExpressionTrigger::kNone;
-    if (jawAct >= 0.45f) {
+    if (jawAct >= 0.35f) {
         trig = ExpressionTrigger::kMouthOpen;
-    } else if (browAct >= 0.45f) {
+    } else if (tongueAct >= 0.35f) {
+        trig = ExpressionTrigger::kTongueOut;
+    } else if (browAct >= 0.35f) {
         trig = ExpressionTrigger::kBrowRaise;
-    } else if (puffAct >= 0.45f) {
+    } else if (puffAct >= 0.35f) {
         trig = ExpressionTrigger::kCheekPuff;
-    } else if (smileAct >= 0.40f) {
+    } else if (smileAct >= 0.30f) {
         trig = ExpressionTrigger::kSmile;
     } else if (smBlink_ >= 0.65f) {
         trig = ExpressionTrigger::kBlink;
@@ -104,7 +107,7 @@ ExpressionReaction FaceExpressionBus::update(const BlendshapeInput* sample) {
     ExpressionReaction out{};
     out.scaleMultiplier = 1.0f + energy * 0.14f;
     out.offsetYBoost = -browAct * 0.035f - smileAct * 0.020f;
-    out.opacityBoost = detail::clampf(0.92f + energy * 0.08f, 0.85f, 1.0f);
+    out.opacityBoost = 1.0f;
     out.trigger = trig;
     out.spriteFrameOffset = animTick_;
     out.smile = smSmile_;
@@ -130,7 +133,8 @@ void FaceOcclusionSolver::reset() {
     emaMask_.fill(255.0f);
 }
 
-bool FaceOcclusionSolver::boundsFromLandmarks(const float* mpXy, int pointCount, CropRect& outBounds) {
+bool FaceOcclusionSolver::boundsFromLandmarks(
+    const float* mpXy, int pointCount, CropRect& outBounds, float* outRollRad) {
     if (!mpXy || pointCount < 468) return false;
     float minX = 1.0f, minY = 1.0f;
     float maxX = 0.0f, maxY = 0.0f;
@@ -151,6 +155,12 @@ bool FaceOcclusionSolver::boundsFromLandmarks(const float* mpXy, int pointCount,
     const float r = detail::clampf(maxX + padX, l + 0.04f, 1.0f);
     const float b = detail::clampf(maxY + padY, t + 0.04f, 1.0f);
     outBounds = {l, t, r - l, b - t};
+    if (outRollRad) {
+        // Vertical face axis from forehead(10) to chin(152) in top-down UV: upright is dx=0, dy>0
+        const float dx = mpXy[152 * 2] - mpXy[10 * 2];
+        const float dy = mpXy[152 * 2 + 1] - mpXy[10 * 2 + 1];
+        *outRollRad = (std::hypot(dx, dy) > 1e-4f) ? std::atan2(-dx, dy) : 0.0f;
+    }
     return true;
 }
 
@@ -188,7 +198,8 @@ void FaceOcclusionSolver::compute(
     int srcWidth,
     int srcHeight,
     const CropRect* faceBounds,
-    uint8_t* outMaskR8) {
+    uint8_t* outMaskR8,
+    float headRollRad) {
     if (!outMaskR8) return;
     if (!rgbaTopDown || srcWidth <= 0 || srcHeight <= 0 || !faceBounds ||
         faceBounds->width < 0.04f || faceBounds->height < 0.04f) {
@@ -207,12 +218,19 @@ void FaceOcclusionSolver::compute(
         return;
     }
 
-    // 1. Sample adaptive skin YCbCr baseline from forehead & cheeks
+    const float cosR = std::cos(-headRollRad);
+    const float sinR = std::sin(-headRollRad);
+
+    // 1. Sample adaptive skin YCbCr baseline from forehead & cheeks (roll-compensated)
     float sumY = 0.0f, sumCb = 0.0f, sumCr = 0.0f;
     int skinSamples = 0;
     for (int i = 0; i < 16; i += 2) {
-        const float u = detail::clampf(fL + fW * kSkinProbeUvs[i], 0.0f, 0.999f);
-        const float v = detail::clampf(fT + fH * kSkinProbeUvs[i + 1], 0.0f, 0.999f);
+        const float dx = kSkinProbeUvs[i] - 0.5f;
+        const float dy = kSkinProbeUvs[i + 1] - 0.5f;
+        const float rx = 0.5f + (dx * std::cos(headRollRad) - dy * std::sin(headRollRad));
+        const float ry = 0.5f + (dx * std::sin(headRollRad) + dy * std::cos(headRollRad));
+        const float u = detail::clampf(fL + fW * rx, 0.0f, 0.999f);
+        const float v = detail::clampf(fT + fH * ry, 0.0f, 0.999f);
         const int sx = std::clamp(static_cast<int>(u * srcWidth), 0, srcWidth - 1);
         const int sy = std::clamp(static_cast<int>(v * srcHeight), 0, srcHeight - 1);
         const uint8_t* p = rgbaTopDown + (sy * srcWidth + sx) * 4;
@@ -235,7 +253,7 @@ void FaceOcclusionSolver::compute(
     const float refCb = sumCb / static_cast<float>(skinSamples);
     const float refCr = sumCr / static_cast<float>(skinSamples);
 
-    // 2. Evaluate per-cell foreign occluder score inside face ellipse
+    // 2. Evaluate per-cell foreign occluder score inside roll-compensated face ellipse
     rawOcc_.fill(0);
     const int x0 = std::clamp(static_cast<int>(fL * kMaskSize), 0, kMaskSize - 1);
     const int x1 = std::clamp(static_cast<int>(fR * kMaskSize), x0, kMaskSize - 1);
@@ -244,12 +262,16 @@ void FaceOcclusionSolver::compute(
 
     for (int my = y0; my <= y1; ++my) {
         const float v = (static_cast<float>(my) + 0.5f) / static_cast<float>(kMaskSize);
-        const float relY = (v - fT) / fH;
+        const float rawRelY = (v - fT) / fH;
         const int sy = std::clamp(static_cast<int>(v * srcHeight), 0, srcHeight - 1);
         const int rowOff = my * kMaskSize;
         for (int mx = x0; mx <= x1; ++mx) {
             const float u = (static_cast<float>(mx) + 0.5f) / static_cast<float>(kMaskSize);
-            const float relX = (u - fL) / fW;
+            const float rawRelX = (u - fL) / fW;
+            const float cx = rawRelX - 0.5f;
+            const float cy = rawRelY - 0.5f;
+            const float relX = 0.5f + cx * cosR - cy * sinR;
+            const float relY = 0.5f + cx * sinR + cy * cosR;
             const float ex = (relX - 0.5f) / 0.48f;
             const float ey = (relY - 0.50f) / 0.48f;
             if (ex * ex + ey * ey > 1.0f) continue;

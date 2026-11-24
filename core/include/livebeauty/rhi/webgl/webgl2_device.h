@@ -96,6 +96,7 @@ public:
     ~WebGl2Device() override;
 
     void releaseAll(bool contextAlive);
+    bool isReady() const;
     bool supportsHalfFloatColorBuffer() const { return colorBufferFloatExt_; }
 
     /** Wrap an external WebGLTexture ID (e.g. uploaded from HTMLVideoElement / VideoFrame). */

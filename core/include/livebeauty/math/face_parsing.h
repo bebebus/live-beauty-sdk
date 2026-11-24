@@ -79,7 +79,9 @@ private:
     std::array<float, kOutPixels> emaHair_{};
     std::array<float, kOutPixels> emaPerson_{};
     std::vector<uint8_t> argmaxScratch_;
-    bool hasHistory_ = false;
+    bool hasOccHistory_ = false;
+    bool hasHairHistory_ = false;
+    bool hasPersonHistory_ = false;
 };
 
 /**

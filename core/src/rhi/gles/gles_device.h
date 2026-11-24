@@ -88,6 +88,8 @@ private:
     RenderTargetId oesRt_ = kInvalidRenderTarget;
     int oesW_ = 0;
     int oesH_ = 0;
+    // 0 = unprobed, 1 = GLES3 RGBA16F + HALF_FLOAT, 2 = GLES2 RGBA + HALF_FLOAT_OES + linear, 3 = RGBA8 fallback
+    int halfFloatMode_ = 0;
     std::array<ProgramCache, static_cast<size_t>(ShaderId::kCount)> programs_{};
     std::unordered_map<RenderTargetId, RtRecord> rts_;
     std::unordered_map<TextureId, TexRecord> textures_;

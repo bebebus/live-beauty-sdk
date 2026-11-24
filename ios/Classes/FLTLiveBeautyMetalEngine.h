@@ -55,6 +55,26 @@ NS_ASSUME_NONNULL_BEGIN
                  springDamping:(float)springDamping
                  headOcclusion:(BOOL)headOcclusion;
 
+/** Extended 3D AR accessory configuration with curved mesh preset & expression trigger rule. */
+- (void)setAr3dAccessoryAtSlot:(int)slot
+                        enabled:(BOOL)enabled
+                         anchor:(int)anchor
+                        texture:(nullable id<MTLTexture>)texture
+                          scale:(float)scale
+                        offsetX:(float)offsetX
+                        offsetY:(float)offsetY
+                        offsetZ:(float)offsetZ
+                         yawRad:(float)yawRad
+                       pitchRad:(float)pitchRad
+                        rollRad:(float)rollRad
+                        opacity:(float)opacity
+                  textureAspect:(float)textureAspect
+                springStiffness:(float)springStiffness
+                  springDamping:(float)springDamping
+                  headOcclusion:(BOOL)headOcclusion
+                     meshPreset:(int)meshPreset
+                    triggerRule:(int)triggerRule;
+
 - (void)clearAr3dAccessories;
 
 /** Submit 468/478-pt MediaPipe normalized face landmarks (y-down, interleaved x0,y0,x1,y1,...). */

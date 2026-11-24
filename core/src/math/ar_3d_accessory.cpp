@@ -119,13 +119,14 @@ void Ar3dSolver::getCurvedGlassesMesh(
         { 0.96f,  0.18f, -0.16f, 0.97f, 0.42f}, { 0.96f,  0.46f, -0.16f, 0.97f, 0.28f},
         { 0.92f, -0.05f, -1.30f, 0.92f, 0.42f}, { 0.92f,  0.22f, -1.30f, 0.92f, 0.28f},
     };
+    // Painter's back-to-front order: draw receding -Z side temples (10..17) BEFORE front frame (0..9)
     static const uint16_t kIndices[36] = {
+        10, 12, 11,  11, 12, 13,
+        14, 16, 15,  15, 16, 17,
         0, 2, 1,  1, 2, 3,
         2, 4, 3,  3, 4, 5,
         4, 6, 5,  5, 6, 7,
         6, 8, 7,  7, 8, 9,
-        10, 12, 11,  11, 12, 13,
-        14, 16, 15,  15, 16, 17,
     };
     outVerts = kVerts;
     outVertCount = 18;
@@ -151,8 +152,11 @@ void Ar3dSolver::getCurvedTiaraMesh(
                 verts[c * 2 + 0] = {x, -1.0f, z, u, 1.0f};
                 verts[c * 2 + 1] = {x,  1.0f, z, u, 0.0f};
             }
+            // Painter's back-to-front order from outer -Z cranium wings inward to front center
+            constexpr int kColOrder[8] = {0, 7, 1, 6, 2, 5, 3, 4};
             int idx = 0;
-            for (int c = 0; c < kCols - 1; ++c) {
+            for (int k = 0; k < 8; ++k) {
+                const int c = kColOrder[k];
                 const uint16_t b0 = static_cast<uint16_t>(c * 2);
                 const uint16_t t0 = static_cast<uint16_t>(b0 + 1);
                 const uint16_t b1 = static_cast<uint16_t>(b0 + 2);
@@ -169,14 +173,39 @@ void Ar3dSolver::getCurvedTiaraMesh(
     outIndexCount = 48;
 }
 
+bool Ar3dSolver::validateCustomMesh(
+    const Ar3dMeshVertex* verts, int vertCount,
+    const uint16_t* indices, int indexCount,
+    int maxVertices) {
+    const int capVerts = std::min(maxVertices, kMaxMeshVertices);
+    if (!verts || !indices || vertCount < 3 || vertCount > capVerts ||
+        indexCount < 3 || indexCount > kMaxMeshIndices || (indexCount % 3) != 0) {
+        return false;
+    }
+    for (int i = 0; i < vertCount; ++i) {
+        if (!std::isfinite(verts[i].x) || !std::isfinite(verts[i].y) || !std::isfinite(verts[i].z) ||
+            !std::isfinite(verts[i].u) || !std::isfinite(verts[i].v)) {
+            return false;
+        }
+    }
+    for (int i = 0; i < indexCount; ++i) {
+        if (static_cast<int>(indices[i]) >= vertCount) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Ar3dSolver::buildHeadDepthShell(
     const float* landmarks478x2,
     const HeadPose3D& pose,
-    float* outShell468x5) {
+    float* outShell468x5,
+    bool mirrored) {
     if (!landmarks478x2 || !outShell468x5) return;
     const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const float mirrorSign = mirrored ? -1.0f : 1.0f;
     for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
-        const Vec3 pLocal{xyz[i * 3 + 0], xyz[i * 3 + 1], xyz[i * 3 + 2]};
+        const Vec3 pLocal{xyz[i * 3 + 0] * mirrorSign, xyz[i * 3 + 1], xyz[i * 3 + 2]};
         const Vec3 pWorld = pose.valid ? FaceRelightSolver::rotateVec(pose, pLocal) : pLocal;
         const float depth01 = normalizeDepth(pWorld.z);
         const int k = i * kFloatsPerVertex;
@@ -196,7 +225,8 @@ bool Ar3dSolver::buildAccessoryQuad(
     const SpringPendulum* spring,
     float* outQuad20,
     float& outAnchorX,
-    float& outAnchorY) {
+    float& outAnchorY,
+    bool mirrored) {
     if (!cfg.enabled || cfg.texture == rhi::kInvalidTexture || cfg.opacity <= 1e-4f ||
         !landmarks478x2 || !pose.valid || !outQuad20 || !(aspect > 0.0f)) {
         return false;
@@ -206,6 +236,9 @@ bool Ar3dSolver::buildAccessoryQuad(
     // Canonical face width in kCanonicalXyz is ~15.328 units (lm[454].x - lm[234].x)
     constexpr float kCanonicalFw = 15.328f;
     const float pxPerCanonical = fw / kCanonicalFw;
+    const float mirrorSign = mirrored ? -1.0f : 1.0f;
+    const float cosRoll = std::cos(pose.rollRad);
+    const float sinRoll = std::sin(pose.rollRad);
 
     // Pick screen anchor & base canonical Z depth per anatomical slot
     float ax = pose.centerX;
@@ -238,8 +271,10 @@ bool Ar3dSolver::buildAccessoryQuad(
         case Ar3dAnchor::kLeftEar: {
             const auto p454 = lm(454);
             const auto p361 = lm(361);
-            ax = 0.5f * (p454.first + p361.first) + 0.06f * fw;
-            ay = 0.5f * (p454.second + p361.second) - 0.14f * fw * aspect;
+            const float outX = mirrorSign * 0.06f * fw;
+            const float downY = -0.14f * fw;
+            ax = 0.5f * (p454.first + p361.first) + (outX * cosRoll - downY * sinRoll);
+            ay = 0.5f * (p454.second + p361.second) + (outX * sinRoll + downY * cosRoll) * aspect;
             baseZ = -2.2f;  // Sits at ear plane: naturally occluded behind cheek when turning head!
             defaultWidth = 0.34f * fw;
             break;
@@ -247,8 +282,10 @@ bool Ar3dSolver::buildAccessoryQuad(
         case Ar3dAnchor::kRightEar: {
             const auto p234 = lm(234);
             const auto p132 = lm(132);
-            ax = 0.5f * (p234.first + p132.first) - 0.06f * fw;
-            ay = 0.5f * (p234.second + p132.second) - 0.14f * fw * aspect;
+            const float outX = -mirrorSign * 0.06f * fw;
+            const float downY = -0.14f * fw;
+            ax = 0.5f * (p234.first + p132.first) + (outX * cosRoll - downY * sinRoll);
+            ay = 0.5f * (p234.second + p132.second) + (outX * sinRoll + downY * cosRoll) * aspect;
             baseZ = -2.2f;
             defaultWidth = 0.34f * fw;
             break;
@@ -333,7 +370,8 @@ bool Ar3dSolver::buildAccessoryMesh(
     const uint16_t*& outIndices,
     int& outIndexCount,
     float& outAnchorX,
-    float& outAnchorY) {
+    float& outAnchorY,
+    bool mirrored) {
     outVertCount = 0;
     outIndices = nullptr;
     outIndexCount = 0;
@@ -355,13 +393,19 @@ bool Ar3dSolver::buildAccessoryMesh(
     const uint16_t* srcIdx = kQuadIndices;
     int srcIdxCount = 6;
 
-    if (cfg.customVertices != nullptr && cfg.customIndices != nullptr &&
-        cfg.customVertexCount >= 3 && cfg.customVertexCount <= maxVertices &&
-        cfg.customIndexCount >= 3) {
-        srcVerts = cfg.customVertices;
-        srcVertCount = cfg.customVertexCount;
-        srcIdx = cfg.customIndices;
-        srcIdxCount = cfg.customIndexCount;
+    const Ar3dMeshVertex* candVerts = !cfg.ownedVertices.empty() ? cfg.ownedVertices.data() : cfg.customVertices;
+    const int candVertCount = !cfg.ownedVertices.empty() ? static_cast<int>(cfg.ownedVertices.size()) : cfg.customVertexCount;
+    const uint16_t* candIdx = !cfg.ownedIndices.empty() ? cfg.ownedIndices.data() : cfg.customIndices;
+    const int candIdxCount = !cfg.ownedIndices.empty() ? static_cast<int>(cfg.ownedIndices.size()) : cfg.customIndexCount;
+
+    if (candVerts != nullptr || candIdx != nullptr || candVertCount > 0 || candIdxCount > 0) {
+        if (!validateCustomMesh(candVerts, candVertCount, candIdx, candIdxCount, maxVertices)) {
+            return false;
+        }
+        srcVerts = candVerts;
+        srcVertCount = candVertCount;
+        srcIdx = candIdx;
+        srcIdxCount = candIdxCount;
     } else if (cfg.meshPreset == Ar3dMeshPreset::kCurvedGlasses) {
         getCurvedGlassesMesh(srcVerts, srcVertCount, srcIdx, srcIdxCount);
     } else if (cfg.meshPreset == Ar3dMeshPreset::kCurvedTiara) {
@@ -372,6 +416,9 @@ bool Ar3dSolver::buildAccessoryMesh(
     const float fw = std::max(pose.scale, 0.02f);
     constexpr float kCanonicalFw = 15.328f;
     const float pxPerCanonical = fw / kCanonicalFw;
+    const float mirrorSign = mirrored ? -1.0f : 1.0f;
+    const float cosRoll = std::cos(pose.rollRad);
+    const float sinRoll = std::sin(pose.rollRad);
 
     float ax = pose.centerX;
     float ay = pose.centerY;
@@ -401,8 +448,10 @@ bool Ar3dSolver::buildAccessoryMesh(
         case Ar3dAnchor::kLeftEar: {
             const auto p454 = lm(454);
             const auto p361 = lm(361);
-            ax = 0.5f * (p454.first + p361.first) + 0.06f * fw;
-            ay = 0.5f * (p454.second + p361.second) - 0.14f * fw * aspect;
+            const float outX = mirrorSign * 0.06f * fw;
+            const float downY = -0.14f * fw;
+            ax = 0.5f * (p454.first + p361.first) + (outX * cosRoll - downY * sinRoll);
+            ay = 0.5f * (p454.second + p361.second) + (outX * sinRoll + downY * cosRoll) * aspect;
             baseZ = -2.2f;
             defaultWidth = 0.34f * fw;
             break;
@@ -410,8 +459,10 @@ bool Ar3dSolver::buildAccessoryMesh(
         case Ar3dAnchor::kRightEar: {
             const auto p234 = lm(234);
             const auto p132 = lm(132);
-            ax = 0.5f * (p234.first + p132.first) - 0.06f * fw;
-            ay = 0.5f * (p234.second + p132.second) - 0.14f * fw * aspect;
+            const float outX = -mirrorSign * 0.06f * fw;
+            const float downY = -0.14f * fw;
+            ax = 0.5f * (p234.first + p132.first) + (outX * cosRoll - downY * sinRoll);
+            ay = 0.5f * (p234.second + p132.second) + (outX * sinRoll + downY * cosRoll) * aspect;
             baseZ = -2.2f;
             defaultWidth = 0.34f * fw;
             break;

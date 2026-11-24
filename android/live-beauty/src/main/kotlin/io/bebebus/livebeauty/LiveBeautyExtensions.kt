@@ -49,8 +49,15 @@ enum class Ar3dAnchor(val id: Int) {
     CHIN(5),
 }
 
-/** 单个 3D AR 挂件层配置（支持 3D 透视旋转、头部深度遮挡与二阶弹簧摆物理）。 */
-data class LiveBeautyAr3dAccessory(
+/** 3D AR 曲面网格预设（与 C++17 `livebeauty::math::Ar3dMeshPreset` 一一对应）。 */
+enum class Ar3dMeshPreset(val id: Int) {
+    BILLBOARD_QUAD(0),
+    CURVED_GLASSES(1),
+    CURVED_TIARA(2),
+}
+
+/** 单个 3D AR 挂件层配置（支持 3D 透视旋转、曲面网格、头部深度遮挡与二阶弹簧摆物理）。 */
+data class LiveBeautyAr3dAccessory @JvmOverloads constructor(
     val enabled: Boolean = true,
     val anchor: Ar3dAnchor = Ar3dAnchor.HEAD_CROWN,
     val glTextureId: Int = 0,
@@ -66,6 +73,8 @@ data class LiveBeautyAr3dAccessory(
     val springStiffness: Float = 0.0f,
     val springDamping: Float = 4.5f,
     val headOcclusion: Boolean = true,
+    val meshPreset: Ar3dMeshPreset = Ar3dMeshPreset.BILLBOARD_QUAD,
+    val triggerRule: Int = 0,
 )
 
 /** C++17 渲染内核实时性能遥测快照。 */

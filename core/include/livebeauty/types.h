@@ -47,10 +47,12 @@ struct CropRect {
 namespace detail {
 
 inline float clampf(float v, float lo, float hi) {
+    if (v != v) return (lo <= 0.0f && hi >= 0.0f) ? 0.0f : lo;
     return std::max(lo, std::min(hi, v));
 }
 
 inline double clampd(double v, double lo, double hi) {
+    if (v != v) return (lo <= 0.0 && hi >= 0.0) ? 0.0 : lo;
     return std::max(lo, std::min(hi, v));
 }
 

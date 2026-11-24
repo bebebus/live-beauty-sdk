@@ -68,6 +68,7 @@ internal class LiveBeautyCppEngine(
     private val faceSampler = FaceTextureSampler(maxSide = 384)
     private var faceWorker: RawFaceWorker? = null
     private var bodyWorker: RawBodyWorker? = null
+    private var auxWorker: RawAuxWorker? = null
     private var personSegmenter: PersonSegmenter? = null
     private var hairSegmenter: HairSegmenter? = null
 
@@ -442,7 +443,7 @@ internal class LiveBeautyCppEngine(
             for (slot in 0 until MAX_STICKERS) {
                 val a = ar3dAccessories[slot] ?: continue
                 if (a.enabled && a.glTextureId != 0) {
-                    NativeBeautyBridge.nativeSetAr3dAccessory(
+                    NativeBeautyBridge.nativeSetAr3dAccessoryEx(
                         handle = h,
                         slot = slot,
                         enabled = true,
@@ -460,6 +461,8 @@ internal class LiveBeautyCppEngine(
                         springStiffness = a.springStiffness,
                         springDamping = a.springDamping,
                         headOcclusion = a.headOcclusion,
+                        meshPreset = a.meshPreset.id,
+                        triggerRule = a.triggerRule,
                     )
                 }
             }
@@ -483,6 +486,7 @@ internal class LiveBeautyCppEngine(
 
         faceWorker?.close(); faceWorker = null
         bodyWorker?.close(); bodyWorker = null
+        auxWorker?.close(); auxWorker = null
         personSegmenter?.close(); personSegmenter = null
         hairSegmenter?.close(); hairSegmenter = null
         atlasDecoder.cancel()
@@ -665,19 +669,24 @@ internal class LiveBeautyCppEngine(
                 lightHealthy = false
             }
         }
-        // v3.2+: C++17 ARM NEON foreground occlusion & structural skin residual solver on shared staging buffer
+        // v3.2+: C++17 ARM NEON foreground occlusion & structural skin residual solver on background worker
         if (wantFace && occlusionMaskTex == 0 &&
             (lastAuxSampleMs == Long.MIN_VALUE || frameTsMs - lastAuxSampleMs >= AUX_INTERVAL_MS)
         ) {
-            lastAuxSampleMs = frameTsMs
-            try {
-                faceSampler.staging?.let { sample ->
-                    val retouchStrength = maxOf(currentConfig.darkCircles, currentConfig.nasolabial) * 0.65f
-                    NativeBeautyBridge.nativeSubmitAuxRgbaSample(
-                        h, sample.pixels, sample.width, sample.height, retouchStrength,
-                    )
-                }
-            } catch (_: Exception) {}
+            if (auxWorker == null) auxWorker = RawAuxWorker()
+            if (auxWorker?.canAccept() == true) {
+                lastAuxSampleMs = frameTsMs
+                try {
+                    faceSampler.staging?.let { sample ->
+                        val retouchStrength = maxOf(
+                            currentConfig.darkCircles,
+                            currentConfig.nasolabial,
+                            currentConfig.blemishRemove,
+                        ) * 0.65f
+                        auxWorker?.submit(h, sample.pixels, sample.width, sample.height, retouchStrength)
+                    }
+                } catch (_: Exception) {}
+            }
         }
         if (doFace) {
             lastFaceSampleMs = frameTsMs
@@ -980,6 +989,54 @@ internal class LiveBeautyCppEngine(
             if (!closed.compareAndSet(false, true)) return
             epoch.incrementAndGet(); latest.set(null)
             try { worker.execute { detector?.close(); detector = null } } catch (_: Exception) {}
+            worker.shutdown()
+        }
+    }
+
+    private class RawAuxWorker {
+        private val runLock = Any()
+        private val closed = AtomicBoolean(false)
+        private val inFlight = AtomicBoolean(false)
+        private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "lb-sdk-aux").apply { isDaemon = true } }
+        private var stagingCopy: ByteBuffer? = null
+
+        fun canAccept(): Boolean = !closed.get() && !inFlight.get()
+
+        fun submit(handle: Long, src: ByteBuffer, width: Int, height: Int, retouchStrength: Float) {
+            if (handle == 0L || width <= 0 || height <= 0) return
+            val needed = width * height * 4
+            if (src.capacity() < needed) return
+            if (closed.get() || !inFlight.compareAndSet(false, true)) return
+            val buf = stagingCopy?.takeIf { it.capacity() >= needed }
+                ?: ByteBuffer.allocateDirect(needed).also { stagingCopy = it }
+            val dup = src.duplicate()
+            dup.position(0)
+            dup.limit(needed)
+            buf.clear()
+            buf.put(dup)
+            buf.flip()
+            try {
+                worker.execute {
+                    try {
+                        synchronized(runLock) {
+                            if (!closed.get()) {
+                                NativeBeautyBridge.nativeSubmitAuxRgbaSample(handle, buf, width, height, retouchStrength)
+                            }
+                        }
+                    } catch (_: Throwable) {
+                    } finally {
+                        inFlight.set(false)
+                    }
+                }
+            } catch (_: RejectedExecutionException) {
+                inFlight.set(false)
+            }
+        }
+
+        fun close() {
+            synchronized(runLock) {
+                if (!closed.compareAndSet(false, true)) return
+            }
             worker.shutdown()
         }
     }

@@ -765,6 +765,83 @@ void testV35Curved3dMeshesAndEffectBundleParser() {
     EXPECT_TRUE(bridgeDepth > templeRearDepth + 0.12f);
 }
 
+void testCodeReviewRegressionGuards() {
+    // 1. NaN clamp guard: neural residual NaN maps to exact 0 delta (128 byte), [0,1] maps to lo
+    const float nanVal = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_TRUE(livebeauty::detail::clampf(nanVal, -0.24f, 0.24f) == 0.0f);
+    EXPECT_TRUE(livebeauty::detail::clampf(nanVal, 0.20f, 1.0f) == 0.20f);
+    std::vector<float> nanTensor(4 * 16 * 16, nanVal);
+    std::array<uint8_t, NeuralSkinResidualAdapter::kOutPixels * 4> resRgba{};
+    EXPECT_TRUE(NeuralSkinResidualAdapter::packExternalTensorNchw(nanTensor.data(), 4, 16, 16, resRgba.data()));
+    EXPECT_TRUE(resRgba[0] == 128 && resRgba[1] == 128 && resRgba[2] == 128 && resRgba[3] == 0);
+
+    // 2. FaceParsingMapper ignore_index = 255 stays visible (255), NOT false-positive occluder (0)
+    FaceParsingMapper mapper;
+    std::vector<uint8_t> ignoreMap(32 * 32, 255);
+    std::array<uint8_t, FaceParsingMapper::kOutPixels> occOut{}, hairOut{};
+    EXPECT_TRUE(mapper.mapClassIds(ignoreMap.data(), 32, 32, occOut.data(), hairOut.data(), nullptr));
+    EXPECT_TRUE(occOut[FaceParsingMapper::kOutPixels / 2] == 255);
+    EXPECT_TRUE(hairOut[FaceParsingMapper::kOutPixels / 2] == 0);
+
+    // 3. Ar3dSolver custom mesh validation rejects OOB indices, non-triangles, and NaN coords
+    const Ar3dMeshVertex goodVerts[3] = {{-0.5f, -0.5f, 0.0f, 0.0f, 0.0f}, {0.5f, -0.5f, 0.0f, 1.0f, 0.0f}, {0.0f, 0.5f, 0.0f, 0.5f, 1.0f}};
+    const uint16_t goodIdx[3] = {0, 1, 2};
+    const uint16_t badOobIdx[3] = {0, 1, 3};
+    const uint16_t badCountIdx[4] = {0, 1, 2, 0};
+    EXPECT_TRUE(Ar3dSolver::validateCustomMesh(goodVerts, 3, goodIdx, 3));
+    EXPECT_TRUE(!Ar3dSolver::validateCustomMesh(goodVerts, 3, badOobIdx, 3));
+    EXPECT_TRUE(!Ar3dSolver::validateCustomMesh(goodVerts, 3, badCountIdx, 4));
+
+    // 4. Mirrored front-camera HeadDepthShell keeps nose closer than cheek
+    std::array<float, FaceMeshFrame::kCoordCount> mirrorLm{};
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 9.0f / 16.0f;
+    const float scale = 0.40f / FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+        mirrorLm[i * 2] = 0.5f - xyz[i * 3] * scale;  // mirrored X (CW front face)
+        mirrorLm[i * 2 + 1] = (0.5f / aspect + xyz[i * 3 + 1] * scale) * aspect;
+    }
+    const auto mirrorPose = FaceRelightSolver::estimateHeadPose(mirrorLm.data(), aspect, -1.0f, 0.0f, 1.0f);
+    EXPECT_TRUE(mirrorPose.valid);
+    std::array<float, Ar3dSolver::kHeadShellFloats> shellMirrored{};
+    Ar3dSolver::buildHeadDepthShell(mirrorLm.data(), mirrorPose, shellMirrored.data(), /*mirrored=*/true);
+    EXPECT_TRUE(shellMirrored[4 * 5 + 4] > shellMirrored[234 * 5 + 4]);
+
+    // 5. EffectBundleParser: out-of-order slots, UTF-16 surrogate pairs, body/bg/pipeline overrides, hex reject
+    const std::string bundleJson = R"JSON({
+        "schemaVersion": 1,
+        "id": "review_guard",
+        "name": "\uD83C\uDF38 Blossom",
+        "beauty": { "waistSlim": 0.42, "neckTone": 0.35, "oilControl": 0.50, "matteTemporal": 0.72 },
+        "background": { "mode": "virtual_blur", "strength": 0.85 },
+        "pipelineOptions": { "maxFaces": 2, "frameDelayFrames": 2 },
+        "stickers": [
+            { "slot": 3, "anchor": "forehead", "assetPath": "s3.png" },
+            { "slot": 0, "anchor": "cheeks", "assetPath": "s0.png", "trigger": "tongue_out" }
+        ]
+    })JSON";
+    bundle::EffectBundleManifest mf{};
+    EXPECT_TRUE(bundle::EffectBundleParser::parseJson(bundleJson, mf, nullptr));
+    EXPECT_TRUE(mf.name == "\xF0\x9F\x8C\xB8 Blossom");
+    EXPECT_TRUE(mf.beauty.needsFaceTracking());
+    EXPECT_TRUE(std::fabs(mf.beauty.waistSlim - 0.42f) < 1e-5f);
+    EXPECT_TRUE(mf.overridesBackground && mf.beauty.backgroundMode == BackgroundMode::kVirtualBlur);
+    EXPECT_TRUE(mf.overridesPipelineOptions && mf.beauty.maxFaces == 2 && mf.beauty.frameDelayFrames == 2);
+    EXPECT_TRUE(mf.stickers.size() == 2);
+    EXPECT_TRUE(mf.stickers[1].slot == 0 && mf.stickers[1].trigger == bundle::BundleTriggerRule::kTongueOut);
+
+    bundle::EffectBundleManifest hexBad{};
+    EXPECT_TRUE(!bundle::EffectBundleParser::parseJson(R"({"beauty":{"smoothing":0x1.0p0}})", hexBad, nullptr));
+
+    // 6. FaceExpressionBus: blink does not dim permanent kAlways opacityBoost, and kTongueOut activates cleanly
+    FaceExpressionBus bus;
+    const BlendshapeInput bsSample{0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.90f};
+    bus.update(&bsSample);
+    const auto rxBlink = bus.update(&bsSample);
+    EXPECT_TRUE(rxBlink.opacityBoost == 1.0f);
+    EXPECT_TRUE(bundle::EffectBundleParser::evaluateTriggerGain(bundle::BundleTriggerRule::kTongueOut, rxBlink) > 0.8f);
+}
+
 }  // namespace
 
 int main() {
@@ -782,6 +859,7 @@ int main() {
     testFaceAuxVisionNeonAndExpressionBus();
     testFaceParsing19ClassAndNeuralResidualAdapter();
     testV35Curved3dMeshesAndEffectBundleParser();
+    testCodeReviewRegressionGuards();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

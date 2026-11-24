@@ -47,7 +47,7 @@ struct PerfStats {
 class LiveBeautyEngine {
 public:
     explicit LiveBeautyEngine(rhi::IRhiDevice& device);
-    ~LiveBeautyEngine() = default;
+    ~LiveBeautyEngine();
 
     void setConfig(const BeautyConfig& config);
     const BeautyConfig& config() const { return config_; }
@@ -200,6 +200,8 @@ private:
     bool expressionReactive_ = true;
     bool hasLatestFaceBounds_ = false;
     CropRect latestFaceBounds_ = CropRect::full();
+    float latestFaceRollRad_ = 0.0f;
+    bool semanticOccActive_ = false;
     bool stagedOccDirty_ = false;
     int stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
     std::array<uint8_t, math::FaceParsingMapper::kOutPixels> stagedOccMask_{};
@@ -214,7 +216,9 @@ private:
     rhi::TextureId autoOccTex_ = rhi::kInvalidTexture;
     int autoOccTexSize_ = 0;
     rhi::TextureId autoParseHairTex_ = rhi::kInvalidTexture;
+    bool autoParseHairValid_ = false;
     int64_t autoParseHairTsMs_ = kTimeInvalid;
+    uint64_t nextAr3dMeshGen_ = 0;
     rhi::TextureId autoResidualTex_ = rhi::kInvalidTexture;
     CropRect autoResidualRect_ = CropRect::full();
     float autoResidualStrength_ = 0.0f;

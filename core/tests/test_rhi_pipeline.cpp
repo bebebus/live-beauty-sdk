@@ -724,6 +724,72 @@ void testV35EffectBundleTriggersAndWebGl2Backend() {
 #endif
 }
 
+void testCodeReviewEngineLifecycleAndPriorityGuards() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    engine.setHardwareProfile("Apple M3 GPU", 8, 8192);
+    const TextureId inputTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId arTex = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+
+    auto cfg = BeautyConfig::clearColdWhite();
+    cfg.lutUrl = "";
+    cfg.hairDye = 0.80f;
+    cfg.maxFaces = 2;
+    engine.setConfig(cfg);
+
+    std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+    makeMediaPipeFace(720.0f / 1280.0f, mpXy);
+    std::vector<uint8_t> parsing(32 * 32, 17);  // hair class
+
+    engine.submitFaceLandmarks(1000, mpXy.data(), 478, 720, 1280, 1000);
+    engine.submitFaceParsingClassMap(parsing.data(), 32, 32, 1000);
+    engine.processFrame(inputTex, 720, 1280, 1000, 1000);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) != 0);
+
+    // 1. resetTracking() must clear autoParseHairValid_ so ghost hair mask never persists
+    engine.resetTracking();
+    engine.submitFaceLandmarks(2000, mpXy.data(), 478, 720, 1280, 2000);
+    engine.processFrame(inputTex, 720, 1280, 2000, 2000);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
+
+    // 2. Stack-scoped custom 3D mesh is deep-copied safely; OOB custom indices are rejected
+    {
+        std::vector<math::Ar3dMeshVertex> stackVerts = {
+            {-0.4f, -0.4f, 0.0f, 0.0f, 0.0f},
+            { 0.4f, -0.4f, 0.0f, 1.0f, 0.0f},
+            { 0.0f,  0.4f, 0.0f, 0.5f, 1.0f},
+        };
+        std::vector<uint16_t> stackIdx = {0, 1, 2};
+        math::Ar3dAccessoryConfig customAcc{};
+        customAcc.enabled = true;
+        customAcc.texture = arTex;
+        customAcc.customVertices = stackVerts.data();
+        customAcc.customVertexCount = 3;
+        customAcc.customIndices = stackIdx.data();
+        customAcc.customIndexCount = 3;
+        engine.setAr3dAccessory(0, customAcc);
+
+        std::vector<uint16_t> badIdx = {0, 1, 99};
+        customAcc.customIndices = badIdx.data();
+        engine.setAr3dAccessory(1, customAcc);  // invalid OOB custom mesh must be disabled safely
+    }
+    dev.calls.clear();
+    engine.submitFaceLandmarks(2033, mpXy.data(), 478, 720, 1280, 2033);
+    engine.processFrame(inputTex, 720, 1280, 2033, 2033);
+    int ar3dDraws = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kAr3dMesh) {
+            ++ar3dDraws;
+            EXPECT_TRUE(c.indexCount == 3);
+        }
+    }
+    EXPECT_TRUE(ar3dDraws == 1);
+
+    // 3. applyEffectBundleJson without pipelineOptions preserves existing runtime maxFaces=2
+    EXPECT_TRUE(engine.applyEffectBundleJson(R"({"schemaVersion":1,"beauty":{"smoothing":0.5}})", nullptr, nullptr));
+    EXPECT_TRUE(engine.config().maxFaces == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -735,6 +801,7 @@ int main() {
     testP1ToP4PassesAndHardwareTierGating();
     testV34HairDyeHalfFloatAndFaceParsingIntegration();
     testV35EffectBundleTriggersAndWebGl2Backend();
+    testCodeReviewEngineLifecycleAndPriorityGuards();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

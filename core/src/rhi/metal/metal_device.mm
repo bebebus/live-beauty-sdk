@@ -2,15 +2,20 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 #include "metal_shaders.h"
 
 namespace livebeauty::rhi::metal {
 
 struct MetalDevice::Impl {
+    static constexpr NSUInteger kSlabAlign = 256;
+    static constexpr NSUInteger kSlabDefaultSize = 256 * 1024;
+
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
     id<MTLLibrary> library = nil;
@@ -19,7 +24,13 @@ struct MetalDevice::Impl {
     // Active command buffer & render pass state (one command buffer per frame or flush)
     id<MTLCommandBuffer> cmdBuf = nil;
     id<MTLRenderCommandEncoder> encoder = nil;
-    TextureFormat activeRtFormat = TextureFormat::kRgba8;
+    MTLPixelFormat activeMtlFormat = MTLPixelFormatRGBA8Unorm;
+
+    // Per-frame dynamic vertex buffer slab arena: prevents intra-frame VBO overwrites across
+    // multi-pass / multi-slot / dual-face draws sharing one uncommitted MTLCommandBuffer.
+    std::vector<id<MTLBuffer>> dynamicSlabs;
+    size_t activeSlab = 0;
+    NSUInteger slabHead = 0;
 
     static MTLPixelFormat mtlFormatFor(TextureFormat format) {
         switch (format) {
@@ -39,14 +50,20 @@ struct MetalDevice::Impl {
     struct TexRec {
         id<MTLTexture> tex = nil;
         bool external = false;
+        bool transient = false;
+    };
+    struct BufRec {
+        id<MTLBuffer> buf = nil;
+        NSUInteger offset = 0;
+        bool dynamic = false;
     };
 
     uint32_t nextId = 1;
     std::unordered_map<RenderTargetId, RtRec> rts;
     std::unordered_map<TextureId, TexRec> textures;
-    std::unordered_map<BufferId, id<MTLBuffer>> buffers;
-    // Key = (shaderId << 8) | (layout << 4) | (blend << 1) | colorMaskAlphaOnly
-    std::unordered_map<uint32_t, id<MTLRenderPipelineState>> pipelines;
+    std::unordered_map<BufferId, BufRec> buffers;
+    // Key = (activeMtlFormat << 24) | (shaderId << 8) | (layout << 4) | (blend << 1) | colorMaskAlphaOnly
+    std::unordered_map<uint64_t, id<MTLRenderPipelineState>> pipelines;
 
     Impl() {
         device = MTLCreateSystemDefaultDevice();
@@ -178,11 +195,11 @@ struct MetalDevice::Impl {
     }
 
     id<MTLRenderPipelineState> getPipeline(ShaderId shaderId, VertexLayout layout, const RenderState& st) {
-        const uint32_t key = (static_cast<uint32_t>(activeRtFormat) << 16) |
-                             (static_cast<uint32_t>(shaderId) << 8) |
-                             (static_cast<uint32_t>(layout) << 4) |
-                             (st.blendEnable ? 2u : 0u) |
-                             (st.colorMaskAlphaOnly ? 1u : 0u);
+        const uint64_t key = (static_cast<uint64_t>(activeMtlFormat) << 24) |
+                             (static_cast<uint64_t>(shaderId) << 8) |
+                             (static_cast<uint64_t>(layout) << 4) |
+                             (st.blendEnable ? 2ULL : 0ULL) |
+                             (st.colorMaskAlphaOnly ? 1ULL : 0ULL);
         auto it = pipelines.find(key);
         if (it != pipelines.end()) return it->second;
 
@@ -197,7 +214,7 @@ struct MetalDevice::Impl {
         desc.vertexFunction = vf;
         desc.fragmentFunction = ff;
         desc.vertexDescriptor = vertexDescFor(layout);
-        desc.colorAttachments[0].pixelFormat = mtlFormatFor(activeRtFormat);
+        desc.colorAttachments[0].pixelFormat = activeMtlFormat;
         if (st.blendEnable) {
             desc.colorAttachments[0].blendingEnabled = YES;
             desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
@@ -219,6 +236,38 @@ struct MetalDevice::Impl {
         }
         pipelines[key] = pso;
         return pso;
+    }
+
+    bool allocDynamicSlice(size_t byteSize, id<MTLBuffer>* outBuf, NSUInteger* outOffset) {
+        if (!device || byteSize == 0) return false;
+        const NSUInteger reqBytes = static_cast<NSUInteger>(byteSize);
+        NSUInteger alignedHead = (slabHead + kSlabAlign - 1) & ~(kSlabAlign - 1);
+        if (activeSlab < dynamicSlabs.size() &&
+            alignedHead + reqBytes <= dynamicSlabs[activeSlab].length) {
+            *outBuf = dynamicSlabs[activeSlab];
+            *outOffset = alignedHead;
+            slabHead = alignedHead + reqBytes;
+            return true;
+        }
+        if (!dynamicSlabs.empty() && activeSlab < dynamicSlabs.size() && slabHead > 0) {
+            ++activeSlab;
+            slabHead = 0;
+        }
+        while (activeSlab < dynamicSlabs.size() && dynamicSlabs[activeSlab].length < reqBytes) {
+            ++activeSlab;
+        }
+        if (activeSlab >= dynamicSlabs.size()) {
+            const NSUInteger alignedReq = (reqBytes + kSlabAlign - 1) & ~(kSlabAlign - 1);
+            const NSUInteger allocLen = std::max(kSlabDefaultSize, alignedReq);
+            id<MTLBuffer> slab = [device newBufferWithLength:allocLen options:MTLResourceStorageModeShared];
+            if (!slab) return false;
+            dynamicSlabs.push_back(slab);
+            activeSlab = dynamicSlabs.size() - 1;
+        }
+        *outBuf = dynamicSlabs[activeSlab];
+        *outOffset = 0;
+        slabHead = reqBytes;
+        return true;
     }
 
     void bindCommon(const RenderState& st, const TextureBindings& textures, const UniformBlock& uniforms) {
@@ -252,22 +301,73 @@ bool MetalDevice::isReady() const {
     return impl_ && impl_->device != nil && impl_->queue != nil && impl_->library != nil;
 }
 
+size_t MetalDevice::trackedTextureCount() const {
+    return impl_ ? impl_->textures.size() : 0;
+}
+
 id<MTLDevice> MetalDevice::nativeDevice() const { return impl_->device; }
 id<MTLCommandQueue> MetalDevice::nativeQueue() const { return impl_->queue; }
 
 TextureId MetalDevice::wrapMetalTexture(id<MTLTexture> tex) {
     if (!tex) return kInvalidTexture;
+    for (auto& [id, rec] : impl_->textures) {
+        if (rec.external && rec.tex == tex) {
+            rec.transient = false;
+            return id;
+        }
+    }
+    const TextureId id = impl_->nextId++;
+    impl_->textures[id] = Impl::TexRec{tex, true, false};
+    return id;
+}
+
+TextureId MetalDevice::wrapTransientMetalTexture(id<MTLTexture> tex) {
+    if (!tex) return kInvalidTexture;
     for (const auto& [id, rec] : impl_->textures) {
         if (rec.external && rec.tex == tex) return id;
     }
     const TextureId id = impl_->nextId++;
-    impl_->textures[id] = Impl::TexRec{tex, true};
+    impl_->textures[id] = Impl::TexRec{tex, true, true};
     return id;
 }
 
 id<MTLTexture> MetalDevice::unwrapMetalTexture(TextureId tex) const {
     auto it = impl_->textures.find(tex);
     return (it != impl_->textures.end()) ? it->second.tex : nil;
+}
+
+bool MetalDevice::renderToExternalTexture(TextureId srcTex, id<MTLTexture> dstTex) {
+    if (!isReady() || srcTex == kInvalidTexture || !dstTex) return false;
+    if ((dstTex.usage & MTLTextureUsageRenderTarget) == 0) return false;
+    if (!unwrapMetalTexture(srcTex)) return false;
+
+    endPass();
+    impl_->activeMtlFormat = dstTex.pixelFormat;
+    id<MTLCommandBuffer> cb = impl_->ensureCmdBuf();
+    MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+    passDesc.colorAttachments[0].texture = dstTex;
+    passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+    impl_->encoder = [cb renderCommandEncoderWithDescriptor:passDesc];
+    if (!impl_->encoder) {
+        impl_->activeMtlFormat = MTLPixelFormatRGBA8Unorm;
+        return false;
+    }
+    MTLViewport vp{
+        0.0, 0.0,
+        static_cast<double>(dstTex.width),
+        static_cast<double>(dstTex.height),
+        0.0, 1.0,
+    };
+    [impl_->encoder setViewport:vp];
+
+    RenderState st{};
+    TextureBindings tb{};
+    UniformBlock ub{};
+    tb.bind(0, srcTex);
+    drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
+    endPass();
+    return true;
 }
 
 bool MetalDevice::readbackTextureRgba8(TextureId tex, uint8_t* outRgba, int width, int height) {
@@ -280,7 +380,7 @@ bool MetalDevice::readbackTextureRgba8(TextureId tex, uint8_t* outRgba, int widt
 }
 
 RenderTargetId MetalDevice::createRenderTarget(int width, int height, TextureFormat format) {
-    if (!isReady()) return kInvalidRenderTarget;
+    if (!isReady() || width <= 0 || height <= 0) return kInvalidRenderTarget;
     MTLTextureDescriptor* desc = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:Impl::mtlFormatFor(format)
                                      width:static_cast<NSUInteger>(width)
@@ -289,8 +389,9 @@ RenderTargetId MetalDevice::createRenderTarget(int width, int height, TextureFor
     desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
     desc.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [impl_->device newTextureWithDescriptor:desc];
+    if (!tex) return kInvalidRenderTarget;
     const TextureId texId = impl_->nextId++;
-    impl_->textures[texId] = Impl::TexRec{tex, false};
+    impl_->textures[texId] = Impl::TexRec{tex, false, false};
     const RenderTargetId rtId = impl_->nextId++;
     impl_->rts[rtId] = Impl::RtRec{texId, width, height, format};
     return rtId;
@@ -309,7 +410,7 @@ TextureId MetalDevice::textureOf(RenderTargetId rt) const {
 }
 
 TextureId MetalDevice::createTexture2D(int width, int height, TextureFormat format, const uint8_t* pixels) {
-    if (!isReady()) return kInvalidTexture;
+    if (!isReady() || width <= 0 || height <= 0) return kInvalidTexture;
     MTLTextureDescriptor* desc = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:Impl::mtlFormatFor(format)
                                      width:static_cast<NSUInteger>(width)
@@ -318,6 +419,7 @@ TextureId MetalDevice::createTexture2D(int width, int height, TextureFormat form
     desc.usage = MTLTextureUsageShaderRead;
     desc.storageMode = MTLStorageModeShared;
     id<MTLTexture> tex = [impl_->device newTextureWithDescriptor:desc];
+    if (!tex) return kInvalidTexture;
     if (pixels) {
         const NSUInteger bpp = (format == TextureFormat::kR8) ? 1 : (format == TextureFormat::kRgba16f ? 8 : 4);
         [tex replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(width), static_cast<NSUInteger>(height))
@@ -326,14 +428,14 @@ TextureId MetalDevice::createTexture2D(int width, int height, TextureFormat form
                bytesPerRow:static_cast<NSUInteger>(width) * bpp];
     }
     const TextureId id = impl_->nextId++;
-    impl_->textures[id] = Impl::TexRec{tex, false};
+    impl_->textures[id] = Impl::TexRec{tex, false, false};
     return id;
 }
 
 void MetalDevice::updateTexture2D(TextureId tex, int width, int height, TextureFormat format, const uint8_t* pixels) {
     id<MTLTexture> mtlTex = unwrapMetalTexture(tex);
-    if (!mtlTex || !pixels) return;
-    const NSUInteger bpp = (format == TextureFormat::kR8) ? 1 : 4;
+    if (!mtlTex || !pixels || width <= 0 || height <= 0) return;
+    const NSUInteger bpp = (format == TextureFormat::kR8) ? 1 : (format == TextureFormat::kRgba16f ? 8 : 4);
     [mtlTex replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(width), static_cast<NSUInteger>(height))
               mipmapLevel:0
                 withBytes:pixels
@@ -345,20 +447,32 @@ void MetalDevice::destroyTexture(TextureId tex) {
 }
 
 BufferId MetalDevice::createDynamicVertexBuffer(size_t byteSize) {
-    if (!isReady()) return kInvalidBuffer;
-    id<MTLBuffer> buf = [impl_->device newBufferWithLength:byteSize options:MTLResourceStorageModeShared];
+    if (!isReady() || byteSize == 0) return kInvalidBuffer;
     const BufferId id = impl_->nextId++;
-    impl_->buffers[id] = buf;
+    impl_->buffers[id] = Impl::BufRec{nil, 0, true};
     return id;
 }
 
 void MetalDevice::updateVertexBuffer(BufferId buf, const void* data, size_t byteSize) {
     auto it = impl_->buffers.find(buf);
-    if (it == impl_->buffers.end() || !data) return;
-    if (it->second.length < byteSize) {
-        it->second = [impl_->device newBufferWithLength:byteSize options:MTLResourceStorageModeShared];
+    if (it == impl_->buffers.end() || !data || byteSize == 0) return;
+    if (it->second.dynamic) {
+        id<MTLBuffer> slab = nil;
+        NSUInteger offset = 0;
+        if (impl_->allocDynamicSlice(byteSize, &slab, &offset)) {
+            std::memcpy(static_cast<uint8_t*>([slab contents]) + offset, data, byteSize);
+            it->second.buf = slab;
+            it->second.offset = offset;
+        }
+        return;
     }
-    std::memcpy([it->second contents], data, byteSize);
+    if (!it->second.buf || it->second.buf.length < byteSize) {
+        it->second.buf = [impl_->device newBufferWithLength:byteSize options:MTLResourceStorageModeShared];
+        it->second.offset = 0;
+    }
+    if (it->second.buf) {
+        std::memcpy([it->second.buf contents], data, byteSize);
+    }
 }
 
 BufferId MetalDevice::createStaticIndexBuffer(const uint16_t* indices, size_t count) {
@@ -366,8 +480,9 @@ BufferId MetalDevice::createStaticIndexBuffer(const uint16_t* indices, size_t co
     id<MTLBuffer> buf = [impl_->device newBufferWithBytes:indices
                                                    length:count * sizeof(uint16_t)
                                                   options:MTLResourceStorageModeShared];
+    if (!buf) return kInvalidBuffer;
     const BufferId id = impl_->nextId++;
-    impl_->buffers[id] = buf;
+    impl_->buffers[id] = Impl::BufRec{buf, 0, false};
     return id;
 }
 
@@ -381,7 +496,7 @@ void MetalDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, boo
     if (it == impl_->rts.end()) return;
     id<MTLTexture> targetTex = unwrapMetalTexture(it->second.texId);
     if (!targetTex) return;
-    impl_->activeRtFormat = it->second.format;
+    impl_->activeMtlFormat = Impl::mtlFormatFor(it->second.format);
 
     id<MTLCommandBuffer> cb = impl_->ensureCmdBuf();
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -413,20 +528,21 @@ void MetalDevice::drawIndexed(
     BufferId vertexBuffer, BufferId indexBuffer,
     int indexOffset, int indexCount, VertexLayout layout,
     const TextureBindings& textures, const UniformBlock& uniforms) {
-    if (!impl_->encoder) return;
+    if (!impl_->encoder || indexCount <= 0 || indexOffset < 0) return;
     auto vbIt = impl_->buffers.find(vertexBuffer);
     auto ibIt = impl_->buffers.find(indexBuffer);
     if (vbIt == impl_->buffers.end() || ibIt == impl_->buffers.end()) return;
+    if (!vbIt->second.buf || !ibIt->second.buf) return;
     id<MTLRenderPipelineState> pso = impl_->getPipeline(shader, layout, state);
     if (!pso) return;
 
     [impl_->encoder setRenderPipelineState:pso];
-    [impl_->encoder setVertexBuffer:vbIt->second offset:0 atIndex:0];
+    [impl_->encoder setVertexBuffer:vbIt->second.buf offset:vbIt->second.offset atIndex:0];
     impl_->bindCommon(state, textures, uniforms);
     [impl_->encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                                indexCount:static_cast<NSUInteger>(indexCount)
                                 indexType:MTLIndexTypeUInt16
-                              indexBuffer:ibIt->second
+                              indexBuffer:ibIt->second.buf
                         indexBufferOffset:static_cast<NSUInteger>(indexOffset) * sizeof(uint16_t)];
 }
 
@@ -435,15 +551,25 @@ void MetalDevice::endPass() {
         [impl_->encoder endEncoding];
         impl_->encoder = nil;
     }
-    impl_->activeRtFormat = TextureFormat::kRgba8;
+    impl_->activeMtlFormat = MTLPixelFormatRGBA8Unorm;
 }
 
 void MetalDevice::flush() {
+    if (!impl_) return;
     endPass();
     if (impl_->cmdBuf) {
         [impl_->cmdBuf commit];
         [impl_->cmdBuf waitUntilCompleted];
         impl_->cmdBuf = nil;
+    }
+    impl_->activeSlab = 0;
+    impl_->slabHead = 0;
+    for (auto it = impl_->textures.begin(); it != impl_->textures.end(); ) {
+        if (it->second.transient) {
+            it = impl_->textures.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

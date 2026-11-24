@@ -806,6 +806,118 @@ void testP1ToP4GpuPixelGates(MetalDevice& dev) {
     }
 }
 
+void testMetalIntraFrameMultiSlotVboZeroCopyBgraAndTransientEviction(MetalDevice& dev) {
+    // 1. Intra-frame dynamic VBO slab arena: two sequential updates + draws to the SAME BufferId
+    //    inside one uncommitted pass must NOT overwrite each other!
+    {
+        constexpr int kW = 32, kH = 32;
+        const TextureId baseTex = makeSolidTex(dev, kW, kH, 20, 20, 20, 255);
+        const TextureId redTex = makeSolidTex(dev, kW, kH, 250, 10, 10, 255);
+        const TextureId greenTex = makeSolidTex(dev, kW, kH, 10, 250, 10, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        static constexpr float kLeftQuad[16] = {
+            -0.9f, -0.5f, 0.0f, 1.0f,
+            -0.1f, -0.5f, 1.0f, 1.0f,
+            -0.9f,  0.5f, 0.0f, 0.0f,
+            -0.1f,  0.5f, 1.0f, 0.0f,
+        };
+        static constexpr float kRightQuad[16] = {
+             0.1f, -0.5f, 0.0f, 1.0f,
+             0.9f, -0.5f, 1.0f, 1.0f,
+             0.1f,  0.5f, 0.0f, 0.0f,
+             0.9f,  0.5f, 1.0f, 0.0f,
+        };
+        static constexpr uint16_t kIdx[6] = {0, 1, 2, 2, 1, 3};
+        const BufferId sharedVb = dev.createDynamicVertexBuffer(sizeof(kLeftQuad));
+        const BufferId ib = dev.createStaticIndexBuffer(kIdx, 6);
+
+        dev.beginPass(rt, kW, kH, false, {});
+        {
+            RenderState copySt{}; TextureBindings tb{}; tb.bind(0, baseTex); UniformBlock ub{};
+            dev.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+        }
+        {
+            RenderState blendSt{}; blendSt.blendEnable = true;
+            UniformBlock ub{}; ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+
+            dev.updateVertexBuffer(sharedVb, kLeftQuad, sizeof(kLeftQuad));
+            TextureBindings tbL{}; tbL.bind(0, redTex);
+            dev.drawIndexed(ShaderId::kStickerQuad, blendSt, sharedVb, ib, 0, 6, VertexLayout::kQuadPos2Uv2, tbL, ub);
+
+            dev.updateVertexBuffer(sharedVb, kRightQuad, sizeof(kRightQuad));
+            TextureBindings tbR{}; tbR.bind(0, greenTex);
+            dev.drawIndexed(ShaderId::kStickerQuad, blendSt, sharedVb, ib, 0, 6, VertexLayout::kQuadPos2Uv2, tbR, ub);
+        }
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        const int leftPx = (16 * kW + 8) * 4;
+        const int rightPx = (16 * kW + 24) * 4;
+        EXPECT_TRUE(out[leftPx + 0] > 230 && out[leftPx + 1] < 30);    // Left stayed Red!
+        EXPECT_TRUE(out[rightPx + 1] > 230 && out[rightPx + 0] < 30);  // Right drew Green!
+
+        dev.destroyBuffer(ib);
+        dev.destroyBuffer(sharedVb);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(greenTex);
+        dev.destroyTexture(redTex);
+        dev.destroyTexture(baseTex);
+    }
+
+    // 2. Transient external texture eviction & zero-copy RGBA8 -> BGRA8 external target blit
+    {
+        const size_t baseCount = dev.trackedTextureCount();
+        constexpr int kW = 16, kH = 16;
+        std::vector<uint8_t> asymRgba(kW * kH * 4, 0);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int i = (y * kW + x) * 4;
+                if (x < 8 && y < 8) {
+                    asymRgba[i + 0] = 240; asymRgba[i + 1] = 20; asymRgba[i + 2] = 10; asymRgba[i + 3] = 255;  // Top-left Red
+                } else {
+                    asymRgba[i + 0] = 10; asymRgba[i + 1] = 30; asymRgba[i + 2] = 245; asymRgba[i + 3] = 255;  // Else Blue
+                }
+            }
+        }
+        const TextureId srcId = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, asymRgba.data());
+
+        MTLTextureDescriptor* bgraDesc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:kW
+                                        height:kH
+                                     mipmapped:NO];
+        bgraDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        bgraDesc.storageMode = MTLStorageModeShared;
+
+        for (int iter = 0; iter < 32; ++iter) {
+            id<MTLTexture> transientIn = [dev.nativeDevice() newTextureWithDescriptor:bgraDesc];
+            const TextureId trId = dev.wrapTransientMetalTexture(transientIn);
+            EXPECT_TRUE(trId != kInvalidTexture);
+            dev.flush();
+        }
+        // All 32 transient textures must be evicted; only srcId remains above baseCount!
+        EXPECT_TRUE(dev.trackedTextureCount() == baseCount + 1);
+
+        id<MTLTexture> dstBgra = [dev.nativeDevice() newTextureWithDescriptor:bgraDesc];
+        EXPECT_TRUE(dev.renderToExternalTexture(srcId, dstBgra));
+        dev.flush();
+
+        std::vector<uint8_t> bgraBytes(kW * kH * 4, 0);
+        [dstBgra getBytes:bgraBytes.data() bytesPerRow:kW * 4 fromRegion:MTLRegionMake2D(0, 0, kW, kH) mipmapLevel:0];
+        // Top-left (2, 2) in BGRA byte order: B=10, G=20, R=240, A=255
+        const int tl = (2 * kW + 2) * 4;
+        EXPECT_TRUE(bgraBytes[tl + 0] < 25 && bgraBytes[tl + 1] < 35 && bgraBytes[tl + 2] > 225 && bgraBytes[tl + 3] == 255);
+        // Bottom-right (12, 12) in BGRA byte order: B=245, G=30, R=10, A=255
+        const int br = (12 * kW + 12) * 4;
+        EXPECT_TRUE(bgraBytes[br + 0] > 230 && bgraBytes[br + 1] < 45 && bgraBytes[br + 2] < 25 && bgraBytes[br + 3] == 255);
+
+        dev.destroyTexture(srcId);
+        EXPECT_TRUE(dev.trackedTextureCount() == baseCount);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -824,6 +936,7 @@ int main() {
         testHairWeightedGuidedNoBleedProbeH2(dev);
         testDualFaceCoStreamingMetalProbeM1(dev);
         testP1ToP4GpuPixelGates(dev);
+        testMetalIntraFrameMultiSlotVboZeroCopyBgraAndTransientEviction(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

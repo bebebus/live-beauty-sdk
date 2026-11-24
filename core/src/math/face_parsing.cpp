@@ -17,22 +17,16 @@ namespace {
 constexpr float kParseEmaAlpha = 0.55f;
 constexpr float kInv255 = 1.0f / 255.0f;
 
-inline bool isPaintableFaceClass(uint8_t cls) {
-    switch (static_cast<FaceParsingClass>(cls)) {
-        case FaceParsingClass::kSkin:
-        case FaceParsingClass::kLeftBrow:
-        case FaceParsingClass::kRightBrow:
-        case FaceParsingClass::kLeftEye:
-        case FaceParsingClass::kRightEye:
-        case FaceParsingClass::kNose:
-        case FaceParsingClass::kUpperLip:
-        case FaceParsingClass::kLowerLip:
-        case FaceParsingClass::kNeck:
-            return true;
-        default:
-            // Eyeglasses(6), Earring(9), InnerMouth/Teeth(11), Necklace(15), Cloth(16), Hair(17), Hat(18), Hand(19)
-            return false;
-    }
+inline bool isOccluderClass(uint8_t cls) {
+    // Explicit foreground occluders within 19+1 taxonomy; >=20 (e.g. ignore_index=255) stays neutral.
+    return cls == static_cast<uint8_t>(FaceParsingClass::kEyeglasses) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kEarring) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kInnerMouth) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kNecklace) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kCloth) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kHair) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kHat) ||
+           cls == static_cast<uint8_t>(FaceParsingClass::kHand);
 }
 
 inline bool isForegroundPersonClass(uint8_t cls) {
@@ -84,7 +78,9 @@ FaceParsingMapper::FaceParsingMapper() {
 }
 
 void FaceParsingMapper::reset() {
-    hasHistory_ = false;
+    hasOccHistory_ = false;
+    hasHairHistory_ = false;
+    hasPersonHistory_ = false;
     emaOcc_.fill(255.0f);
     emaHair_.fill(0.0f);
     emaPerson_.fill(0.0f);
@@ -97,34 +93,34 @@ bool FaceParsingMapper::mapClassIds(
     uint8_t* outOcclusionR8,
     uint8_t* outHairR8,
     uint8_t* outPersonR8) {
-    if (!classIds || srcW <= 0 || srcH <= 0 || !outOcclusionR8) return false;
+    if (!classIds || srcW <= 0 || srcH <= 0 || srcW > 8192 || srcH > 8192 || !outOcclusionR8) return false;
 
     for (int y = 0; y < kOutSize; ++y) {
-        const int sy = std::clamp((y * srcH) / kOutSize, 0, srcH - 1);
-        const int srcRow = sy * srcW;
+        const int sy = std::clamp(static_cast<int>((static_cast<int64_t>(y) * srcH) / kOutSize), 0, srcH - 1);
+        const size_t srcRow = static_cast<size_t>(sy) * static_cast<size_t>(srcW);
         const int dstRow = y * kOutSize;
         for (int x = 0; x < kOutSize; ++x) {
-            const int sx = std::clamp((x * srcW) / kOutSize, 0, srcW - 1);
-            const uint8_t cls = classIds[srcRow + sx];
+            const int sx = std::clamp(static_cast<int>((static_cast<int64_t>(x) * srcW) / kOutSize), 0, srcW - 1);
+            const uint8_t cls = classIds[srcRow + static_cast<size_t>(sx)];
             const int idx = dstRow + x;
-            // Background outside person stays neutral (255) for occlusion so neck/collar boundary doesn't hard-clip;
+            // Background (0) and ignore labels (>=20) stay neutral (255) for occlusion;
             // explicit occluders (eyeglasses, inner-mouth teeth, hair bangs, hat, cloth, hand) go to 0!
-            const bool occluded = (cls != 0) && !isPaintableFaceClass(cls);
-            rawOcc_[idx] = occluded ? 0 : 255;
+            rawOcc_[idx] = isOccluderClass(cls) ? 0 : 255;
             rawHair_[idx] = (cls == static_cast<uint8_t>(FaceParsingClass::kHair)) ? 255 : 0;
             rawPerson_[idx] = isForegroundPersonClass(cls) ? 255 : 0;
         }
     }
 
-    const float alpha = hasHistory_ ? kParseEmaAlpha : 1.0f;
-    boxBlur3x3AndEma(rawOcc_.data(), emaOcc_.data(), alpha, outOcclusionR8, kOutSize);
+    boxBlur3x3AndEma(rawOcc_.data(), emaOcc_.data(), hasOccHistory_ ? kParseEmaAlpha : 1.0f, outOcclusionR8, kOutSize);
+    hasOccHistory_ = true;
     if (outHairR8) {
-        boxBlur3x3AndEma(rawHair_.data(), emaHair_.data(), alpha, outHairR8, kOutSize);
+        boxBlur3x3AndEma(rawHair_.data(), emaHair_.data(), hasHairHistory_ ? kParseEmaAlpha : 1.0f, outHairR8, kOutSize);
+        hasHairHistory_ = true;
     }
     if (outPersonR8) {
-        boxBlur3x3AndEma(rawPerson_.data(), emaPerson_.data(), alpha, outPersonR8, kOutSize);
+        boxBlur3x3AndEma(rawPerson_.data(), emaPerson_.data(), hasPersonHistory_ ? kParseEmaAlpha : 1.0f, outPersonR8, kOutSize);
+        hasPersonHistory_ = true;
     }
-    hasHistory_ = true;
     return true;
 }
 
@@ -136,22 +132,24 @@ bool FaceParsingMapper::mapLogitsNchw(
     uint8_t* outOcclusionR8,
     uint8_t* outHairR8,
     uint8_t* outPersonR8) {
-    if (!logitsNchw || numClasses < 19 || srcW <= 0 || srcH <= 0 || !outOcclusionR8) return false;
-    const int plane = srcW * srcH;
-    argmaxScratch_.resize(static_cast<size_t>(plane));
+    if (!logitsNchw || numClasses < 19 || srcW <= 0 || srcH <= 0 || srcW > 8192 || srcH > 8192 || !outOcclusionR8) {
+        return false;
+    }
+    const size_t plane = static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
+    argmaxScratch_.resize(plane);
     const int cappedClasses = std::min(numClasses, 32);
 
-    for (int i = 0; i < plane; ++i) {
+    for (size_t i = 0; i < plane; ++i) {
         float bestVal = logitsNchw[i];
         uint8_t bestCls = 0;
         for (int c = 1; c < cappedClasses; ++c) {
-            const float v = logitsNchw[c * plane + i];
+            const float v = logitsNchw[static_cast<size_t>(c) * plane + i];
             if (v > bestVal) {
                 bestVal = v;
                 bestCls = static_cast<uint8_t>(c);
             }
         }
-        argmaxScratch_[static_cast<size_t>(i)] = bestCls;
+        argmaxScratch_[i] = bestCls;
     }
     return mapClassIds(argmaxScratch_.data(), srcW, srcH, outOcclusionR8, outHairR8, outPersonR8);
 }
@@ -166,20 +164,21 @@ bool NeuralSkinResidualAdapter::packExternalTensorNchw(
     int srcW,
     int srcH,
     uint8_t* outRgba64x64) {
-    if (!tensorNchw || (channels != 3 && channels != 4) || srcW <= 0 || srcH <= 0 || !outRgba64x64) {
+    if (!tensorNchw || (channels != 3 && channels != 4) || srcW <= 0 || srcH <= 0 ||
+        srcW > 8192 || srcH > 8192 || !outRgba64x64) {
         return false;
     }
-    const int plane = srcW * srcH;
+    const size_t plane = static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
     const float* chR = tensorNchw;
     const float* chG = tensorNchw + plane;
     const float* chB = tensorNchw + plane * 2;
     const float* chA = (channels == 4) ? (tensorNchw + plane * 3) : nullptr;
 
     for (int y = 0; y < kOutSize; ++y) {
-        const int sy = std::clamp((y * srcH) / kOutSize, 0, srcH - 1);
+        const int sy = std::clamp(static_cast<int>((static_cast<int64_t>(y) * srcH) / kOutSize), 0, srcH - 1);
         for (int x = 0; x < kOutSize; ++x) {
-            const int sx = std::clamp((x * srcW) / kOutSize, 0, srcW - 1);
-            const int sIdx = sy * srcW + sx;
+            const int sx = std::clamp(static_cast<int>((static_cast<int64_t>(x) * srcW) / kOutSize), 0, srcW - 1);
+            const size_t sIdx = static_cast<size_t>(sy) * static_cast<size_t>(srcW) + static_cast<size_t>(sx);
             uint8_t* dst = outRgba64x64 + (y * kOutSize + x) * 4;
             const float dR = detail::clampf(chR[sIdx], -0.24f, 0.24f);
             const float dG = detail::clampf(chG[sIdx], -0.24f, 0.24f);
