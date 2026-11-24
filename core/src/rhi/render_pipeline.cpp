@@ -1521,7 +1521,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     const float effRelight = in.tierCaps.enableRelight3d
         ? detail::clampf(config.relight * in.loadFadeFace, 0.0f, 1.0f) : 0.0f;
     const float effNeckTone = in.tierCaps.enableNeckTone
-        ? detail::clampf(config.neckTone * in.loadFadeSmooth, 0.0f, 1.0f) : 0.0f;
+        ? detail::clampf(std::max(config.neckTone, config.whiten * 0.45f) * in.loadFadeSmooth, 0.0f, 1.0f) : 0.0f;
     if (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) {
         renderSkinMask(postWarpLandmarks,
                        in.faceMeta15[math::FaceMeshFrame::kMetaAxisX],

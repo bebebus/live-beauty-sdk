@@ -345,8 +345,8 @@ void testHairWeightedGuidedDualFaceAndFrameDelayRing() {
     EXPECT_TRUE(sawWeightBlur);
     EXPECT_TRUE(sawWeightDiff);
     EXPECT_TRUE(sawWeightCoeff);
-    // Primary + Secondary face each issue feather + inner skin-mask draws = 4 draws
-    EXPECT_TRUE(skinMaskDraws == 4);
+    // Primary + Secondary face each issue auto neck-apron + feather + inner skin-mask draws = 6 draws
+    EXPECT_TRUE(skinMaskDraws == 6);
     // SkinMask must execute 2-pass H+V Gaussian feathering BEFORE HairAlpha writes alpha
     EXPECT_TRUE(blurCallsAfterSkinMask == 2);
     // HairAlpha must follow primary face mesh warp (outer + inner indexed passes)

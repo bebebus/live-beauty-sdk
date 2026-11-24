@@ -199,8 +199,11 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
             const float invSum = 1.0f / std::max(sumE, 1e-6f);
             for (int c = 0; c < 6; ++c) p[c] *= invSum;
 
-            // Hair wisps (1), clothes (4), and accessories/glasses/hands/hats (5) occlude bare face makeup & skin retouch!
-            const float pOcc = detail::clampf(p[1] + p[4] + p[5], 0.0f, 1.0f);
+            // Hair wisps (1), clothes (4), and accessories/glasses/hands/hats (5) occlude bare face makeup & skin retouch,
+            // gated with conservative margin against skin probability (p[2] + p[3]) so uncertain INT8 pixels never dim bare skin/lips!
+            const float pSkin = p[2] + p[3];
+            const float rawOccluder = p[1] + p[4] + p[5];
+            const float pOcc = detail::smoothstep(0.45f, 0.80f, rawOccluder - 0.55f * pSkin);
             const float pHair = detail::clampf(p[1], 0.0f, 1.0f);
             const float pPerson = detail::clampf(1.0f - p[0], 0.0f, 1.0f);
 

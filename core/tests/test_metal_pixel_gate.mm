@@ -1009,6 +1009,100 @@ void testV36MetalChromaKeyParticleSdfAndHandShieldProbes(MetalDevice& dev) {
     }
 }
 
+void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
+    // 1. Dim indoor lips (135, 82, 80) with rose_bean / cherry_red / berry_plum must brighten into rosy/vivid sRGB
+    //    and NEVER darken R below bare lip (135)!
+    {
+        const Vec3 rose = FaceMakeupUv::lipstickRgb(LipstickColor::kRoseBean);
+        const Vec3 cherry = FaceMakeupUv::lipstickRgb(LipstickColor::kCherryRed);
+        const Vec3 berry = FaceMakeupUv::lipstickRgb(LipstickColor::kBerryPlum);
+
+        UniformBlock ubRose{};
+        ubRose.push(rose.x, rose.y, rose.z, 0.55f);
+        ubRose.push(1.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);
+
+        UniformBlock ubCherry{};
+        ubCherry.push(cherry.x, cherry.y, cherry.z, 0.72f);
+        ubCherry.push(1.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);
+
+        UniformBlock ubBerry{};
+        ubBerry.push(berry.x, berry.y, berry.z, 0.65f);
+        ubBerry.push(0.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);
+
+        const Rgba dimRose = evalMakeupShader(dev, ShaderId::kMakeupLip, {135, 82, 80, 255}, {0, 0, 255, 255}, ubRose, 0.5f, 0.73f);
+        const Rgba dimCherry = evalMakeupShader(dev, ShaderId::kMakeupLip, {135, 82, 80, 255}, {0, 0, 255, 255}, ubCherry, 0.5f, 0.73f);
+        const Rgba dimBerry = evalMakeupShader(dev, ShaderId::kMakeupLip, {135, 82, 80, 255}, {0, 0, 255, 255}, ubBerry, 0.5f, 0.73f);
+        EXPECT_TRUE(dimRose.r >= 155 && dimRose.r > dimRose.g + 45);
+        EXPECT_TRUE(dimCherry.r >= 165 && dimCherry.r > dimCherry.g + 85);
+        EXPECT_TRUE(dimBerry.r >= 150 && dimBerry.b > dimBerry.g + 15);
+    }
+
+    // 2. Cold-porcelain skin whitening & bare-lip complexion care in CompositePro:
+    //    - Indoor yellowish skin (175, 135, 112) at whiten=0.60 lifts luma by >= +26/255 without amplifying yellow R-B (>66)
+    //    - Bare dull/purplish lip (112, 74, 80) in default natural mode (whiten=0.30, rosy=0.15, lipstick=0) lifts R >= 132
+    //    - Dark lip parting seam (45, 25, 27) & white teeth (222, 216, 206) inside mouthZone stay protected (<= 2/255)
+    {
+        auto evalComp = [&](Rgba px, uint8_t faceByte, uint8_t exclByte, float whiten, float rosy) -> Rgba {
+            constexpr int kSz = 16;
+            const TextureId srcTex = makeSolidTex(dev, kSz, kSz, px.r, px.g, px.b, 255);
+            const TextureId coeffTex = makeSolidTex(dev, kSz, kSz, px.r, px.g, px.b, 0);
+            const TextureId semTex = makeSolidTex(dev, kSz, kSz, faceByte, exclByte, 76, 255);
+            const TextureId lutTex = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+            const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+
+            RenderState st{};
+            TextureBindings tb{};
+            tb.bind(0, srcTex);
+            tb.bind(1, coeffTex);
+            tb.bind(2, semTex);
+            tb.bind(3, lutTex);
+
+            UniformBlock ub{};
+            ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);  // uFrame: poly skin mask active (pres = 1.0)
+            ub.push(16.0f, 0.0f, 0.0f, 0.0f);             // uParams: skinOnly=true, smooth=0, brightness=0
+            ub.push(0.0f, 0.30f, 1.0f, 0.0f);             // uDetails: sharpness=0.30, sat=1.0
+            ub.push(whiten, rosy, 0.0f, 0.0f);            // uTone: whiten, rosy
+            ub.push(0.0f, 0.0f, 0.0f, 1.0f);              // uEye0 (axisX = 1.0)
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // uEye1 (axisY = 0.0)
+            ub.push(0.5f, 0.5f, 0.35f, 0.45f);            // uOval
+            ub.push(0.5f, 0.5f, 0.20f, 0.12f);            // uMouth centered at (0.5, 0.5)
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // uEyeMask0
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // uEyeMask1
+            ub.push(0.0f, 0.015f, 0.0f, 0.0f);            // uGrade
+
+            dev.beginPass(rt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+            dev.endPass();
+
+            std::vector<uint8_t> out(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+            const int idx = ((kSz / 2) * kSz + (kSz / 2)) * 4;
+            const Rgba res{out[idx], out[idx + 1], out[idx + 2], out[idx + 3]};
+
+            dev.destroyRenderTarget(rt);
+            dev.destroyTexture(lutTex);
+            dev.destroyTexture(semTex);
+            dev.destroyTexture(coeffTex);
+            dev.destroyTexture(srcTex);
+            return res;
+        };
+
+        const Rgba porcelainSkin = evalComp({175, 135, 112, 255}, 255, 0, 0.60f, 0.15f);
+        const float ySkin0 = 0.2126f * 175.0f + 0.7152f * 135.0f + 0.0722f * 112.0f;
+        const float ySkin1 = 0.2126f * porcelainSkin.r + 0.7152f * porcelainSkin.g + 0.0722f * porcelainSkin.b;
+        EXPECT_TRUE((ySkin1 - ySkin0) >= 26.0f && (int(porcelainSkin.r) - int(porcelainSkin.b)) <= 66);
+
+        const Rgba caredBareLip = evalComp({112, 74, 80, 255}, 0, 255, 0.30f, 0.15f);
+        EXPECT_TRUE(caredBareLip.r >= 132 && caredBareLip.r > caredBareLip.b + 30);
+
+        const Rgba protectedSeam = evalComp({45, 25, 27, 255}, 0, 255, 0.55f, 0.20f);
+        EXPECT_TRUE(std::abs(int(protectedSeam.r) - 45) <= 2 && std::abs(int(protectedSeam.g) - 25) <= 2);
+
+        const Rgba protectedTeeth = evalComp({222, 216, 206, 255}, 0, 255, 0.55f, 0.20f);
+        EXPECT_TRUE(std::abs(int(protectedTeeth.r) - 222) <= 2 && std::abs(int(protectedTeeth.g) - 216) <= 2);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1029,6 +1123,7 @@ int main() {
         testP1ToP4GpuPixelGates(dev);
         testMetalIntraFrameMultiSlotVboZeroCopyBgraAndTransientEviction(dev);
         testV36MetalChromaKeyParticleSdfAndHandShieldProbes(dev);
+        testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

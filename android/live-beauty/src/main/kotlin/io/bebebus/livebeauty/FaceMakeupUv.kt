@@ -101,12 +101,12 @@ internal object FaceMakeupUv {
     // ---- 秀场精选调色板（RGB 0..1）----
 
     fun lipstickRgb(color: String): FloatArray = when (color) {
-        "coral_peach" -> floatArrayOf(0.76f, 0.27f, 0.17f) // 暖珊瑚杏橘（去荧光粉）
-        "cherry_red" -> floatArrayOf(0.58f, 0.06f, 0.05f) // 复古车厘子正红（纯正深红，G>B 不偏粉）
-        "milk_tea" -> floatArrayOf(0.56f, 0.29f, 0.18f) // 肉桂烤奶茶（高级裸棕，不发粉）
-        "berry_plum" -> floatArrayOf(0.46f, 0.08f, 0.16f) // 深酒红梅子（浓郁浆果红，去淡紫粉）
-        "orange_soda" -> floatArrayOf(0.74f, 0.21f, 0.05f) // 烂番茄暖橘（浓郁胡萝卜橘）
-        else -> floatArrayOf(0.60f, 0.23f, 0.19f) // rose_bean 温柔暖豆沙（自然唇血红棕，去冷粉）
+        "coral_peach" -> floatArrayOf(0.90f, 0.42f, 0.35f) // 暖珊瑚杏橘（校准 sRGB 元气珊瑚）
+        "cherry_red" -> floatArrayOf(0.84f, 0.16f, 0.15f) // 复古车厘子正红（校准 sRGB 纯正鲜红，G>=B 不发黑）
+        "milk_tea" -> floatArrayOf(0.79f, 0.45f, 0.37f) // 肉桂烤奶茶（校准 sRGB 温柔杏仁奶茶，不暗沉）
+        "berry_plum" -> floatArrayOf(0.72f, 0.19f, 0.33f) // 微醺冰透浆果（校准 sRGB 清透树莓红，不发紫黑）
+        "orange_soda" -> floatArrayOf(0.90f, 0.35f, 0.19f) // 烂番茄暖橘（校准 sRGB 活力鲜橘红）
+        else -> floatArrayOf(0.77f, 0.35f, 0.34f) // rose_bean 温柔暖豆沙（校准 sRGB 玫瑰豆沙，自然提气色）
     }
 
     fun blushRgb(color: String): FloatArray = when (color) {
