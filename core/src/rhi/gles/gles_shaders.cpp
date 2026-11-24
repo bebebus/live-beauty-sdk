@@ -327,7 +327,14 @@ void main() {
     if (alpha <= 0.001) { discard; }
     vec3 base = texture2D(uTex0, suv).rgb;
     float baseY = dot(base, vec3(0.299, 0.587, 0.114));
-    if (uU2.z > 0.5) {
+    if (uU2.z > 1.5) {
+        float darkGate = smoothstep(0.28, 0.52, baseY);
+        float relRB = (base.r - base.b) / max(baseY, 0.10);
+        float relRG = (base.r - base.g) / max(baseY, 0.10);
+        float skinGate = smoothstep(0.065, 0.165, relRB) * smoothstep(0.015, 0.075, relRG);
+        alpha *= darkGate * skinGate;
+        if (alpha <= 0.001) { discard; }
+    } else if (uU2.z > 0.5) {
         float darkGate = smoothstep(0.14, 0.30, baseY);
         float skinGate = smoothstep(0.025, 0.095, base.r - base.b) * smoothstep(0.015, 0.065, base.r - base.g);
         alpha *= darkGate * skinGate;
@@ -644,19 +651,24 @@ void main() {
     }
     float skinOnly = step(15.5, uU1.x);
     float style = uU1.x - skinOnly * 16.0;
+    float yFine = max(luma(fineLow), 0.0001);
     float gate = skinWeight(fineLow);
     float chromaGate = smoothstep(0.045, 0.10, fineLow.r - fineLow.b);
-    float warmPoly = smoothstep(0.018, 0.055, fineLow.r - fineLow.b) *
-        smoothstep(0.0, 0.025, fineLow.r - fineLow.g + 0.010);
-    float polyGate = smoothstep(0.06, 0.18, luma(fineLow)) *
-        mix(0.30 * smoothstep(0.42, 0.72, faceM) * warmPoly, 1.0, smoothstep(0.0, 0.25, gate));
+    float relRB = (fineLow.r - fineLow.b) / max(yFine, 0.08);
+    float relRG = (fineLow.r - fineLow.g) / max(yFine, 0.08);
+    float warmPoly = smoothstep(0.065, 0.165, relRB) *
+        smoothstep(0.010, 0.065, relRG + 0.015);
+    float polyGate = smoothstep(0.05, 0.14, yFine) *
+        mix(0.90 * smoothstep(0.04, 0.22, faceM) * warmPoly, 1.0, smoothstep(0.0, 0.25, gate));
     float skin = clamp(faceM * polyGate + (1.0 - faceM) * gate * chromaGate * (1.0 - 0.70 * exclM), 0.0, 1.0) * nonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
-    float bleedGuard = 1.0 - (1.0 - smoothstep(0.22, 0.31, luma(fineLow))) *
-        max(smoothstep(0.020, 0.055, luma(guided) - luma(fineLow)),
-            smoothstep(0.24, 0.48, guidedA) * smoothstep(0.003, 0.018, luma(guided) - luma(fineLow)));
-    float fineDark = (1.0 - smoothstep(0.02, 0.06, luma(fineLow) - luma(original.rgb)) * smoothstep(0.25, 0.55, guidedA)) * bleedGuard;
+    float yOrig = luma(original.rgb);
+    float hairStrand = smoothstep(0.022, 0.065, luma(wideLow) - yOrig) * (1.0 - smoothstep(0.18, 0.34, yOrig));
+    float bleedGuard = (1.0 - (1.0 - smoothstep(0.10, 0.18, yFine)) *
+        smoothstep(0.045, 0.105, luma(guided) - yFine)) * (1.0 - 0.82 * hairStrand);
+    float fineDark = (1.0 - smoothstep(0.025, 0.070, yFine - yOrig) * smoothstep(0.28, 0.58, guidedA)) * bleedGuard;
     float featureKeep = clamp(1.0 - exclM, 0.0, 1.0);
+    float toneKeep = 1.0 - smoothstep(0.58, 0.88, exclM);
     float core = max(uU10.y, 0.005);
     float band = luma(fineLow - wideLow);
     float micro = luma(original.rgb - fineLow);
@@ -677,11 +689,12 @@ void main() {
     if (uU2.y > 0.0) {
         float edge = smoothstep(1.5 * core, 4.0 * core, abs(band));
         float region = mix(0.35, 1.0, exclM) * (1.0 - 0.85 * skin * featureKeep * faceM);
-        float sharpDelta = clamp(band, mix(-0.06, -0.01, mouthZone), 0.06);
+        float negCap = mix(-0.05, -0.010, max(mouthZone, smoothstep(0.10, 0.45, faceM)));
+        float sharpDelta = clamp(band, negCap, 0.06);
         color += vec3(sharpDelta * edge * uU2.y * 1.6 * region);
     }
     color = clamp(color, 0.0, 1.0);
-    float w = skin * featureKeep * fineDark;
+    float w = skin * toneKeep;
     if (uU3.z > 0.0 && w > 0.0) {
         float yCur = luma(color);
         float chCur = max(max(color.r, color.g), color.b) - min(min(color.r, color.g), color.b);
@@ -700,7 +713,8 @@ void main() {
     float relightFill = 0.22 * uU3.w * w * faceM * (1.0 - smoothstep(0.20, 0.55, yPre));
     float liftA = (1.12 * uU3.x + 0.48 * uU1.z) * w + relightFill;
     float rosyA = 0.25 * uU3.y * w;
-    float sculpt = (0.30 * uU2.x + 0.42 * uU3.w) * (hiM - 0.30 * faceM) * w * faceM;
+    float sculptPlane = max(hiM - 0.18 * faceM, -0.05 * smoothstep(0.45, 0.70, yPre) * faceM);
+    float sculpt = (0.30 * uU2.x + 0.42 * uU3.w) * sculptPlane * w * faceM;
     if (liftA > 0.0 || rosyA > 0.0 || sculpt != 0.0) {
         float y0 = luma(color);
         if (uU3.x > 0.0) {
@@ -710,7 +724,7 @@ void main() {
             color.g -= min(max(color.g - target, 0.0) * excess * 0.75 * uU3.x, 0.035) * w;
         }
         float y1 = max(luma(color), 0.0001);
-        float shadowGate = smoothstep(0.07, 0.20, y0) * mix(0.68, 1.0, smoothstep(0.14, 0.38, y0));
+        float shadowGate = smoothstep(0.04, 0.13, y0) * mix(0.80, 1.0, smoothstep(0.10, 0.30, y0));
         float hiRoll = 1.0 - 0.55 * smoothstep(0.78, 0.96, y0);
         float a = liftA * shadowGate * hiRoll;
         float y2 = y0 * (1.0 + a) / (1.0 + a * y0);
@@ -720,7 +734,7 @@ void main() {
         }
         color *= y2 / y1;
         if (uU3.x > 0.0) {
-            float coolW = clamp(uU3.x * w, 0.0, 1.0);
+            float coolW = clamp(uU3.x * w, 0.0, 1.0) * mix(0.32, 1.0, smoothstep(0.18, 0.42, y2));
             vec3 ivory = vec3(min(y2 * 1.04, 1.0), y2 * 0.99, min(y2 * 1.03, 1.0));
             color = mix(color, ivory, 0.32 * coolW);
             y2 = luma(color);
@@ -858,9 +872,19 @@ void main() {
                         uU1.x * vSrc.x + uU1.y * vSrc.y + uU1.z);
         float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
         float hair = texture2D(uTex0, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
-        float inFace = uU3.w > 0.5 ? (1.0 - smoothstep(0.50, 1.0, ellipseE(vDst, uU2, uU3.xy, max(uU3.z, 0.0001)))) : 0.0;
+        float inFace = 0.0;
+        float beardShield = 0.0;
+        if (uU3.w > 0.5) {
+            float asp = max(uU3.z, 0.0001);
+            vec2 df = vec2(vDst.x - uU2.x, (vDst.y - uU2.y) / asp);
+            float fa = clamp(dot(df, uU3.xy) / max(uU2.z, 0.0001), -4.0, 4.0);
+            float fb = clamp(dot(df, vec2(-uU3.y, uU3.x)) / max(uU2.w, 0.0001), -4.0, 4.0);
+            inFace = 1.0 - smoothstep(0.50, 1.0, fa * fa + fb * fb);
+            beardShield = (1.0 - smoothstep(0.62, 0.90, abs(fa))) *
+                          (1.0 - smoothstep(0.05, 0.34, fb));
+        }
         float bias = 0.15 * inFace;
-        float h = smoothstep(0.35 + bias, 0.65 + bias, hair);
+        float h = smoothstep(0.35 + bias, 0.65 + bias, hair) * (1.0 - beardShield);
         nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
     }
     if (uU1.w > 0.001) {

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.7] - 2026-11-25
+
+### Fixed
+- **Eye-Socket, Nose-Contour & Beard-Contour Dark Trench / Patch Elimination (`RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`, `FaceOcclusionSolver`)**:
+  - Decoupled spatial guided-smoothing edge protection (`featureKeep * fineDark`, restricted to true dark-hair boundaries `yFine < 0.18` and fine dark eyebrow/beard hair fibers `hairStrand`) from per-pixel tone whitening weight (`w = skin * toneKeep`), eliminating razor-sharp `bleedGuard = 0` black trenches along nose-wing creases, eye corners, and beard rims.
+  - Separated upper orbital / brow-bone (`kBrowCore`: `skin = 0.88, excl = 0.52`) and glabella / temple rim (`kBrowBorder`: `skin = 0.95, excl = 0.20`) from eyeball/inner-lip full exclusions (`excl = 1.0`), preserving crisp eyebrow fibers while restoring seamless skin-tone brightening across eye sockets and the nasal root without goggle-shaped dark clouds.
+  - Replaced absolute YCbCr `polyGate` collapse in dim shadows with luminance-normalized skin chromaticity (`relRB`, `relRG`) extending cleanly across the outer `faceM` feather (`smoothstep(0.04, 0.22, faceM)`), clamped negative face sharpening (`negCap = -0.010`) and negative non-highlight `sculpt`, and scaled cool-ivory desaturation down in deep shadows (`y2 < 0.42`) so shaded contours and beard stubble never turn ashy black while keeping `0/255` bleed on neutral walls and jet-black scalp hair.
+  - Added `mode.z = 2.0` skin & brightness gating (`smoothstep(0.28, 0.52, baseY)`) for `contour` makeup so Multiply contour never blackens dark eye sockets, nasal creases, or jawline beards, added lower-central-face `beardShield` in `kHairAlpha` / `fs_hair_alpha`, and removed `darkObject` false-positive occluder cutouts on nostrils and beards in `FaceOcclusionSolver::compute`.
+
 ## [3.6.6] - 2026-11-25
 
 ### Fixed

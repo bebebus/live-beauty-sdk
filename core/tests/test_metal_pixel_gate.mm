@@ -1321,6 +1321,206 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
     }
 }
 
+void testV367EyeSocketNoseAndBeardContourNoDarkTrenches(MetalDevice& dev) {
+    // 1. Shaded nose-wing / eye-socket / beard-rim crease (58, 44, 37) next to lit cheek/nose skin (148, 114, 96)
+    //    under guided smoothing + cold-porcelain whitening + radiance/relight + sharpening:
+    //    MUST lift smoothly (>= +18/255 luma) without bleedGuard=0 razor-sharp black trenches or negative sculpt/sharpness darkening!
+    {
+        constexpr int kW = 32, kH = 32;
+        std::vector<uint8_t> srcPx(kW * kH * 4, 255);
+        std::vector<uint8_t> coeffPx(kW * kH * 4, 0);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int i = (y * kW + x) * 4;
+                const bool inCrease = (x >= 15 && x <= 17);
+                if (inCrease) {
+                    srcPx[i + 0] = 58; srcPx[i + 1] = 44; srcPx[i + 2] = 37; srcPx[i + 3] = 255;
+                } else {
+                    srcPx[i + 0] = 148; srcPx[i + 1] = 114; srcPx[i + 2] = 96; srcPx[i + 3] = 255;
+                }
+                // Guided filter across crease edge: a = 0.55 (140/255), mean = (118, 90, 76) -> b = (1 - a) * mean
+                const float a = 140.0f / 255.0f;
+                coeffPx[i + 0] = static_cast<uint8_t>(std::lround((1.0f - a) * 118.0f));
+                coeffPx[i + 1] = static_cast<uint8_t>(std::lround((1.0f - a) * 90.0f));
+                coeffPx[i + 2] = static_cast<uint8_t>(std::lround((1.0f - a) * 76.0f));
+                coeffPx[i + 3] = 140;
+            }
+        }
+        const TextureId srcTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, srcPx.data());
+        const TextureId coeffTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, coeffPx.data());
+        // hiM = 0 on eye-socket / nose-wing / beard contour, faceM = 255, exclM = 0, nonHair = 255
+        const TextureId semTex = makeSolidTex(dev, kW, kH, 255, 0, 0, 255);
+        const TextureId lutTex = makeSolidTex(dev, kW, kH, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex);
+        tb.bind(1, coeffTex);
+        tb.bind(2, semTex);
+        tb.bind(3, lutTex);
+
+        UniformBlock ub{};
+        ub.push(1.0f / kW, 1.0f / kH, 1.0f, 5.0f);     // poly skin mask active (pres = 1.0)
+        ub.push(16.0f, 0.70f, 0.0f, 0.45f);            // skinOnly=true, smoothing=0.70, skinTexture=0.45
+        ub.push(0.35f, 0.32f, 1.0f, 0.0f);             // radiance=0.35, sharpness=0.32, sat=1.0
+        ub.push(0.75f, 0.18f, 0.0f, 0.35f);            // whiten=0.75, rosy=0.18, relight=0.35
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.35f, 0.45f);
+        ub.push(0.5f, 0.25f, 0.18f, 0.10f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.012f, 0.35f, 0.0f);
+
+        dev.beginPass(rt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        const int creaseIdx = (16 * kW + 16) * 4;
+        const float yIn = 0.2126f * 58.0f + 0.7152f * 44.0f + 0.0722f * 37.0f;
+        const float yOut = 0.2126f * out[creaseIdx + 0] + 0.7152f * out[creaseIdx + 1] + 0.0722f * out[creaseIdx + 2];
+        EXPECT_TRUE((yOut - yIn) >= 18.0f);
+        EXPECT_TRUE(int(out[creaseIdx + 0]) > int(out[creaseIdx + 2]) + 10);
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(lutTex);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(coeffTex);
+        dev.destroyTexture(srcTex);
+    }
+
+    // 2. Upper eye-socket / brow-bone (lm 65, 52) & nasal-root glabella (lm 55) skin mask continuity + contour dark-beard guard
+    {
+        constexpr int kW = 360, kH = 640;
+        std::vector<uint8_t> dimFacePx(kW * kH * 4, 255);
+        for (int i = 0; i < kW * kH; ++i) {
+            dimFacePx[i * 4 + 0] = 72;
+            dimFacePx[i * 4 + 1] = 56;
+            dimFacePx[i * 4 + 2] = 48;
+            dimFacePx[i * 4 + 3] = 255;
+        }
+        const TextureId inTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, dimFacePx.data());
+        const TextureId solidContour = makeSolidTex(dev, 16, 16, 255, 0, 0, 255);
+
+        LiveBeautyEngine engine(dev);
+        PipelineAssets assets{};
+        assets.contourHighlightAtlas = solidContour;
+        engine.setAssets(assets);
+
+        BeautyConfig cfg{};
+        cfg.enabled = true;
+        cfg.skinOnly = true;
+        cfg.smoothing = 0.65f;
+        cfg.whiten = 0.75f;
+        cfg.rosy = 0.15f;
+        cfg.radiance = 0.30f;
+        cfg.relight = 0.30f;
+        engine.setConfig(cfg);
+
+        std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+        const float aspect = static_cast<float>(kW) / static_cast<float>(kH);
+        const float scale = 0.48f / FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+            const float mx = 0.5f + xyz[i * 3] * scale;
+            const float my = (0.5f / aspect) + xyz[i * 3 + 1] * scale;
+            mpXy[i * 2] = mx;
+            mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mpXy[i * 2] = 0.5f;
+            mpXy[i * 2 + 1] = 0.45f;
+        }
+
+        TextureId outTex = kInvalidTexture;
+        for (int f = 0; f < 5; ++f) {
+            const int64_t ts = 2000 + f * 33;
+            EXPECT_TRUE(engine.submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts));
+            outTex = engine.processFrame(inTex, kW, kH, ts, ts);
+        }
+        std::vector<uint8_t> outPx(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(outTex, outPx.data(), kW, kH));
+
+        auto lumaAtLm = [&](int lmIdx) {
+            const int px = std::clamp(static_cast<int>(std::lround(mpXy[lmIdx * 2] * (kW - 1))), 0, kW - 1);
+            const int py = std::clamp(static_cast<int>(std::lround(mpXy[lmIdx * 2 + 1] * (kH - 1))), 0, kH - 1);
+            const int off = (py * kW + px) * 4;
+            return 0.2126f * outPx[off] + 0.7152f * outPx[off + 1] + 0.0722f * outPx[off + 2];
+        };
+        const float yIn0 = 0.2126f * 72.0f + 0.7152f * 56.0f + 0.0722f * 48.0f;
+        // Orbital brow-bone (lm 65, 52) & glabella nasal-root (lm 55) must lift smoothly in parity with cheek (lm 205), no dark goggles!
+        EXPECT_TRUE((lumaAtLm(65) - yIn0) >= 16.0f && std::fabs(lumaAtLm(65) - lumaAtLm(205)) <= 7.0f);
+        EXPECT_TRUE((lumaAtLm(52) - yIn0) >= 16.0f && (lumaAtLm(55) - yIn0) >= 16.0f);
+
+        // Contour makeup on dark jawline beard / deep nasal shadow (46, 38, 35) must NOT darken into muddy black streaks,
+        // while lit jawline/nose-side skin (195, 152, 132) still receives 3D contour sculpting!
+        BeautyConfig contourOnly{};
+        contourOnly.enabled = true;
+        contourOnly.contour = 0.85f;
+        engine.setConfig(contourOnly);
+        const TextureId darkBeardTex = makeSolidTex(dev, kW, kH, 46, 38, 35, 255);
+        const TextureId litJawTex = makeSolidTex(dev, kW, kH, 195, 152, 132, 255);
+
+        EXPECT_TRUE(engine.submitFaceLandmarks(2200, mpXy.data(), 478, kW, kH, 2200));
+        const TextureId darkOutTex = engine.processFrame(darkBeardTex, kW, kH, 2200, 2200);
+        std::vector<uint8_t> darkOutPx(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(darkOutTex, darkOutPx.data(), kW, kH));
+        const int jawPxX = std::clamp(static_cast<int>(std::lround(mpXy[172 * 2] * (kW - 1))), 0, kW - 1);
+        const int jawPxY = std::clamp(static_cast<int>(std::lround(mpXy[172 * 2 + 1] * (kH - 1))), 0, kH - 1);
+        const int jawOff = (jawPxY * kW + jawPxX) * 4;
+        EXPECT_TRUE(darkOutPx[jawOff + 0] >= 45 && darkOutPx[jawOff + 1] >= 37);
+
+        EXPECT_TRUE(engine.submitFaceLandmarks(2233, mpXy.data(), 478, kW, kH, 2233));
+        const TextureId litOutTex = engine.processFrame(litJawTex, kW, kH, 2233, 2233);
+        std::vector<uint8_t> litOutPx(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(litOutTex, litOutPx.data(), kW, kH));
+        EXPECT_TRUE(litOutPx[jawOff + 0] <= 186);
+
+        engine.releaseGpuResources();
+        dev.destroyTexture(litJawTex);
+        dev.destroyTexture(darkBeardTex);
+        dev.destroyTexture(solidContour);
+        dev.destroyTexture(inTex);
+    }
+
+    // 3. kHairAlpha lower-face beard/mustache shield: when HairSegmenter misclassifies beard/mustache as hair (255),
+    //    lower central face keeps nonHair >= 245 while forehead bangs still get nonHair <= 15!
+    {
+        constexpr int kSz = 32;
+        std::vector<uint8_t> fullHair(kSz * kSz, 255);
+        const TextureId hairTex = dev.createTexture2D(kSz, kSz, TextureFormat::kR8, fullHair.data());
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, hairTex);
+        tb.bind(1, hairTex);
+        UniformBlock ub{};
+        ub.push(1.0f, 0.0f, 0.0f, 1.0f);       // identity affine + hairShown=1.0
+        ub.push(0.0f, 1.0f, 0.0f, 0.0f);       // occShown=0.0
+        ub.push(0.5f, 0.5f, 0.25f, 0.32f);     // face oval centered at (0.5, 0.5)
+        ub.push(1.0f, 0.0f, 1.0f, 1.0f);       // axis=(1,0), aspect=1.0, hasFace=1.0
+        dev.beginPass(rt, kSz, kSz, true, {0.0f, 0.0f, 0.0f, 1.0f});
+        dev.drawFullScreenQuad(ShaderId::kHairAlpha, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        // Top-down y=8 -> GL bottom-up v=0.73 (forehead bangs: b = +0.72) -> nonHair <= 15
+        const int bangsIdx = (8 * kSz + 16) * 4;
+        // Top-down y=21 -> GL bottom-up v=0.33 (mustache / chin beard: b = -0.53) -> nonHair >= 245
+        const int beardIdx = (21 * kSz + 16) * 4;
+        EXPECT_TRUE(out[bangsIdx + 3] <= 15);
+        EXPECT_TRUE(out[beardIdx + 3] >= 245);
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(hairTex);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1342,6 +1542,7 @@ int main() {
         testMetalIntraFrameMultiSlotVboZeroCopyBgraAndTransientEviction(dev);
         testV36MetalChromaKeyParticleSdfAndHandShieldProbes(dev);
         testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(dev);
+        testV367EyeSocketNoseAndBeardContourNoDarkTrenches(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

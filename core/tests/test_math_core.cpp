@@ -1096,6 +1096,46 @@ void testV366FastReacquireAndZeroLagLipNoseEye() {
     }
 }
 
+void testV367BeardAndNasalShadowNotMisclassifiedAsForeignOccluder() {
+    const int w = 128, h = 128;
+    std::vector<uint8_t> rgba(w * h * 4, 255);
+    CropRect bounds{0.15f, 0.15f, 0.70f, 0.70f};
+    for (int y = 0; y < h; ++y) {
+        const float relY = ((static_cast<float>(y) + 0.5f) / h - bounds.top) / bounds.height;
+        for (int x = 0; x < w; ++x) {
+            const float relX = ((static_cast<float>(x) + 0.5f) / w - bounds.left) / bounds.width;
+            const int off = (y * w + x) * 4;
+            if (relX >= 0.62f && relX <= 0.86f && relY >= 0.42f && relY <= 0.68f) {
+                // Foreign cyan teacup -> must be occluded (<= 80)
+                rgba[off] = 22; rgba[off + 1] = 140; rgba[off + 2] = 180;
+            } else if (relX >= 0.42f && relX <= 0.58f && relY >= 0.52f && relY <= 0.62f) {
+                // Dark nostril / nose-wing shadow outside eyes & mouth -> must stay visible (>= 240)
+                rgba[off] = 34; rgba[off + 1] = 28; rgba[off + 2] = 26;
+            } else if (relX >= 0.30f && relX <= 0.70f && relY >= 0.85f && relY <= 0.96f) {
+                // Dark chin / jawline beard outside mouth -> must stay visible (>= 240)
+                rgba[off] = 30; rgba[off + 1] = 27; rgba[off + 2] = 26;
+            } else {
+                // Indoor warm skin
+                rgba[off] = 185; rgba[off + 1] = 148; rgba[off + 2] = 128;
+            }
+        }
+    }
+    FaceOcclusionSolver occ;
+    std::array<uint8_t, FaceOcclusionSolver::kMaskPixels> mask{};
+    occ.compute(rgba.data(), w, h, &bounds, mask.data());
+
+    const int noseMx = static_cast<int>((bounds.left + 0.50f * bounds.width) * 64.0f);
+    const int noseMy = static_cast<int>((bounds.top + 0.57f * bounds.height) * 64.0f);
+    const int beardMx = static_cast<int>((bounds.left + 0.50f * bounds.width) * 64.0f);
+    const int beardMy = static_cast<int>((bounds.top + 0.90f * bounds.height) * 64.0f);
+    const int cupMx = static_cast<int>((bounds.left + 0.74f * bounds.width) * 64.0f);
+    const int cupMy = static_cast<int>((bounds.top + 0.55f * bounds.height) * 64.0f);
+
+    EXPECT_TRUE(mask[noseMy * 64 + noseMx] >= 240);
+    EXPECT_TRUE(mask[beardMy * 64 + beardMx] >= 240);
+    EXPECT_TRUE(mask[cupMy * 64 + cupMx] <= 80);
+}
+
 }  // namespace
 
 int main() {
@@ -1116,6 +1156,7 @@ int main() {
     testCodeReviewRegressionGuards();
     testV36MulticlassParsingParticlesAndBundleGestureTriggers();
     testV366FastReacquireAndZeroLagLipNoseEye();
+    testV367BeardAndNasalShadowNotMisclassifiedAsForeignOccluder();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

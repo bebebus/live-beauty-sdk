@@ -222,7 +222,7 @@ void FaceOcclusionSolver::compute(
     const float sinR = std::sin(-headRollRad);
 
     // 1. Sample adaptive skin YCbCr baseline from forehead & cheeks (roll-compensated)
-    float sumY = 0.0f, sumCb = 0.0f, sumCr = 0.0f;
+    float sumCb = 0.0f, sumCr = 0.0f;
     int skinSamples = 0;
     for (int i = 0; i < 16; i += 2) {
         const float dx = kSkinProbeUvs[i] - 0.5f;
@@ -237,19 +237,16 @@ void FaceOcclusionSolver::compute(
         float y, cb, cr;
         rgbToYCbCr(p[0], p[1], p[2], y, cb, cr);
         if (y >= 38.0f && y <= 242.0f && cb >= 72.0f && cb <= 132.0f && cr >= 130.0f && cr <= 182.0f) {
-            sumY += y;
             sumCb += cb;
             sumCr += cr;
             ++skinSamples;
         }
     }
     if (skinSamples < 3) {
-        sumY = 135.0f * 3.0f;
         sumCb = 108.0f * 3.0f;
         sumCr = 150.0f * 3.0f;
         skinSamples = 3;
     }
-    const float refY = sumY / static_cast<float>(skinSamples);
     const float refCb = sumCb / static_cast<float>(skinSamples);
     const float refCr = sumCr / static_cast<float>(skinSamples);
 
@@ -285,16 +282,12 @@ void FaceOcclusionSolver::compute(
             rgbToYCbCr(p[0], p[1], p[2], y, cb, cr);
 
             const float chromaDist = std::fabs(cb - refCb) + std::fabs(cr - refCr);
-            const float lumaDrop = refY - y;
-            const float chromaThr = (inEyesBrow || inMouth) ? 42.0f : 24.0f;
-            const bool nonSkinChroma = (cb > 134.0f || cr < 126.0f) && chromaDist > chromaThr;
-            const bool darkObject = !inEyesBrow && !inMouth && y < 44.0f && lumaDrop > 68.0f && (cr < 142.0f || cb > 116.0f);
+            const float chromaThr = (inEyesBrow || inMouth) ? 44.0f : 28.0f;
+            const bool nonSkinChroma = (cb > 138.0f || cr < 118.0f) && chromaDist > chromaThr;
 
             float foreignScore = 0.0f;
             if (nonSkinChroma) {
                 foreignScore = detail::clampf((chromaDist - chromaThr) / 20.0f, 0.0f, 1.0f);
-            } else if (darkObject) {
-                foreignScore = detail::clampf((lumaDrop - 68.0f) / 30.0f, 0.0f, 1.0f);
             }
             if (foreignScore > 0.25f) {
                 rawOcc_[rowOff + mx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(foreignScore * 255.0f)), 0, 255));

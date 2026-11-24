@@ -432,7 +432,14 @@ fragment float4 fs_makeup_layer(MakeupOut in [[stage_in]],
     if (alpha <= 0.001f) discard_fragment();
     float3 base = tex0.sample(kLinearClamp, toMtlUv(suv)).rgb;
     float baseY = luma601(base);
-    if (uMode.z > 0.5f) {
+    if (uMode.z > 1.5f) {
+        float darkGate = smoothstep(0.28f, 0.52f, baseY);
+        float relRB = (base.r - base.b) / max(baseY, 0.10f);
+        float relRG = (base.r - base.g) / max(baseY, 0.10f);
+        float skinGate = smoothstep(0.065f, 0.165f, relRB) * smoothstep(0.015f, 0.075f, relRG);
+        alpha *= darkGate * skinGate;
+        if (alpha <= 0.001f) discard_fragment();
+    } else if (uMode.z > 0.5f) {
         float darkGate = smoothstep(0.14f, 0.30f, baseY);
         float skinGate = smoothstep(0.025f, 0.095f, base.r - base.b) * smoothstep(0.015f, 0.065f, base.r - base.g);
         alpha *= darkGate * skinGate;
@@ -693,19 +700,24 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     }
     float skinOnly = step(15.5f, uParams.x);
     float style = uParams.x - skinOnly * 16.0f;
+    float yFine = max(luma709(fineLow), 0.0001f);
     float gate = skinWeight(fineLow);
     float chromaGate = smoothstep(0.045f, 0.10f, fineLow.r - fineLow.b);
-    float warmPoly = smoothstep(0.018f, 0.055f, fineLow.r - fineLow.b) *
-        smoothstep(0.0f, 0.025f, fineLow.r - fineLow.g + 0.010f);
-    float polyGate = smoothstep(0.06f, 0.18f, luma709(fineLow)) *
-        mix(0.30f * smoothstep(0.42f, 0.72f, faceM) * warmPoly, 1.0f, smoothstep(0.0f, 0.25f, gate));
+    float relRB = (fineLow.r - fineLow.b) / max(yFine, 0.08f);
+    float relRG = (fineLow.r - fineLow.g) / max(yFine, 0.08f);
+    float warmPoly = smoothstep(0.065f, 0.165f, relRB) *
+        smoothstep(0.010f, 0.065f, relRG + 0.015f);
+    float polyGate = smoothstep(0.05f, 0.14f, yFine) *
+        mix(0.90f * smoothstep(0.04f, 0.22f, faceM) * warmPoly, 1.0f, smoothstep(0.0f, 0.25f, gate));
     float skin = clamp(faceM * polyGate + (1.0f - faceM) * gate * chromaGate * (1.0f - 0.70f * exclM), 0.0f, 1.0f) * nonHair;
     float3 guided = clamp(original.rgb * guidedA + guidedB, 0.0f, 1.0f);
-    float bleedGuard = 1.0f - (1.0f - smoothstep(0.22f, 0.31f, luma709(fineLow))) *
-        max(smoothstep(0.020f, 0.055f, luma709(guided) - luma709(fineLow)),
-            smoothstep(0.24f, 0.48f, guidedA) * smoothstep(0.003f, 0.018f, luma709(guided) - luma709(fineLow)));
-    float fineDark = (1.0f - smoothstep(0.02f, 0.06f, luma709(fineLow) - luma709(original.rgb)) * smoothstep(0.25f, 0.55f, guidedA)) * bleedGuard;
+    float yOrig = luma709(original.rgb);
+    float hairStrand = smoothstep(0.022f, 0.065f, luma709(wideLow) - yOrig) * (1.0f - smoothstep(0.18f, 0.34f, yOrig));
+    float bleedGuard = (1.0f - (1.0f - smoothstep(0.10f, 0.18f, yFine)) *
+        smoothstep(0.045f, 0.105f, luma709(guided) - yFine)) * (1.0f - 0.82f * hairStrand);
+    float fineDark = (1.0f - smoothstep(0.025f, 0.070f, yFine - yOrig) * smoothstep(0.28f, 0.58f, guidedA)) * bleedGuard;
     float featureKeep = clamp(1.0f - exclM, 0.0f, 1.0f);
+    float toneKeep = 1.0f - smoothstep(0.58f, 0.88f, exclM);
     float core = max(uGrade.y, 0.005f);
     float band = luma709(fineLow - wideLow);
     float micro = luma709(original.rgb - fineLow);
@@ -726,11 +738,12 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     if (uDetails.y > 0.0f) {
         float edge = smoothstep(1.5f * core, 4.0f * core, abs(band));
         float region = mix(0.35f, 1.0f, exclM) * (1.0f - 0.85f * skin * featureKeep * faceM);
-        float sharpDelta = clamp(band, mix(-0.06f, -0.01f, mouthZone), 0.06f);
+        float negCap = mix(-0.05f, -0.010f, max(mouthZone, smoothstep(0.10f, 0.45f, faceM)));
+        float sharpDelta = clamp(band, negCap, 0.06f);
         color += float3(sharpDelta * edge * uDetails.y * 1.6f * region);
     }
     color = clamp(color, 0.0f, 1.0f);
-    float w = skin * featureKeep * fineDark;
+    float w = skin * toneKeep;
     if (uTone.z > 0.0f && w > 0.0f) {
         float yCur = luma709(color);
         float chCur = max(max(color.r, color.g), color.b) - min(min(color.r, color.g), color.b);
@@ -749,7 +762,8 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     float relightFill = 0.22f * uTone.w * w * faceM * (1.0f - smoothstep(0.20f, 0.55f, yPre));
     float liftA = (1.12f * uTone.x + 0.48f * uParams.z) * w + relightFill;
     float rosyA = 0.25f * uTone.y * w;
-    float sculpt = (0.30f * uDetails.x + 0.42f * uTone.w) * (hiM - 0.30f * faceM) * w * faceM;
+    float sculptPlane = max(hiM - 0.18f * faceM, -0.05f * smoothstep(0.45f, 0.70f, yPre) * faceM);
+    float sculpt = (0.30f * uDetails.x + 0.42f * uTone.w) * sculptPlane * w * faceM;
     if (liftA > 0.0f || rosyA > 0.0f || sculpt != 0.0f) {
         float y0 = luma709(color);
         if (uTone.x > 0.0f) {
@@ -759,7 +773,7 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
             color.g -= min(max(color.g - target, 0.0f) * excess * 0.75f * uTone.x, 0.035f) * w;
         }
         float y1 = max(luma709(color), 0.0001f);
-        float shadowGate = smoothstep(0.07f, 0.20f, y0) * mix(0.68f, 1.0f, smoothstep(0.14f, 0.38f, y0));
+        float shadowGate = smoothstep(0.04f, 0.13f, y0) * mix(0.80f, 1.0f, smoothstep(0.10f, 0.30f, y0));
         float hiRoll = 1.0f - 0.55f * smoothstep(0.78f, 0.96f, y0);
         float a = liftA * shadowGate * hiRoll;
         float y2 = y0 * (1.0f + a) / (1.0f + a * y0);
@@ -769,7 +783,7 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         }
         color *= y2 / y1;
         if (uTone.x > 0.0f) {
-            float coolW = clamp(uTone.x * w, 0.0f, 1.0f);
+            float coolW = clamp(uTone.x * w, 0.0f, 1.0f) * mix(0.32f, 1.0f, smoothstep(0.18f, 0.42f, y2));
             float3 ivory = float3(min(y2 * 1.04f, 1.0f), y2 * 0.99f, min(y2 * 1.03f, 1.0f));
             color = mix(color, ivory, 0.32f * coolW);
             y2 = luma709(color);
@@ -877,11 +891,19 @@ fragment float4 fs_hair_alpha(SemanticOut in [[stage_in]],
                             uni.u[1].x * in.src.x + uni.u[1].y * in.src.y + uni.u[1].z);
         float inBounds = step(0.0f, muv.x) * step(muv.x, 1.0f) * step(0.0f, muv.y) * step(muv.y, 1.0f);
         float hair = tex0.sample(kLinearClamp, toMtlUv(muv)).r * inBounds;
-        float inFace = uni.u[3].w > 0.5f
-            ? (1.0f - smoothstep(0.50f, 1.0f, ellipseE(in.dst, uni.u[2], uni.u[3].xy, max(uni.u[3].z, 0.0001f))))
-            : 0.0f;
+        float inFace = 0.0f;
+        float beardShield = 0.0f;
+        if (uni.u[3].w > 0.5f) {
+            float asp = max(uni.u[3].z, 0.0001f);
+            float2 df = float2(in.dst.x - uni.u[2].x, (in.dst.y - uni.u[2].y) / asp);
+            float fa = clamp(dot(df, uni.u[3].xy) / max(uni.u[2].z, 0.0001f), -4.0f, 4.0f);
+            float fb = clamp(dot(df, float2(-uni.u[3].y, uni.u[3].x)) / max(uni.u[2].w, 0.0001f), -4.0f, 4.0f);
+            inFace = 1.0f - smoothstep(0.50f, 1.0f, fa * fa + fb * fb);
+            beardShield = (1.0f - smoothstep(0.62f, 0.90f, abs(fa))) *
+                          (1.0f - smoothstep(0.05f, 0.34f, fb));
+        }
         float bias = 0.15f * inFace;
-        float h = smoothstep(0.35f + bias, 0.65f + bias, hair);
+        float h = smoothstep(0.35f + bias, 0.65f + bias, hair) * (1.0f - beardShield);
         nonHair = clamp(1.0f - uni.u[0].w * h, 0.0f, 1.0f);
     }
     if (uni.u[1].w > 0.001f) {

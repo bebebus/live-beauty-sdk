@@ -43,12 +43,16 @@ void buildSkinMaskWeights(float* out504x3) {
         const float u = uv[i * 2];
         const float v = uv[i * 2 + 1];
         float skin = 1.0f, excl = 0.0f;
-        if (kEyeCore.count(i) || kBrowCore.count(i) || lipInnerAndMid.count(i)) {
+        if (kEyeCore.count(i) || lipInnerAndMid.count(i)) {
             skin = 0.0f; excl = 1.0f;
-        } else if (kBrowBorder.count(i) || kLipOuter.count(i)) {
+        } else if (kLipOuter.count(i)) {
             skin = 0.22f; excl = 0.78f;
+        } else if (kBrowCore.count(i)) {
+            skin = 0.88f; excl = 0.52f;
+        } else if (kBrowBorder.count(i)) {
+            skin = 0.95f; excl = 0.20f;
         } else if (ovalSet.count(i)) {
-            skin = (v < 0.32f) ? 0.80f : 0.68f;
+            skin = 0.84f;
             excl = 0.0f;
         }
         const float bridge = gauss2d(u, v, 0.50f, 0.44f, 0.032f, 0.11f);
@@ -656,11 +660,11 @@ void RenderPipeline::renderMakeup(
                       cfg.blush * 0.72f * faceGain, math::FaceMakeupUv::blushChannel(cfg.blushStyle),
                       {0.0f, 0.0f, 0.0f, 0.0f}, 0.55f, 0.0f);
     }
-    // 2. Contour & Highlight (contour_highlight R=contour, G=highlight)
+    // 2. Contour & Highlight (contour_highlight R=contour, G=highlight; mode.z=2 guards dark eye-socket/nose/beard shadows)
     if (cfg.contour > 0.0f) {
         drawSkinLayer(assets_.contourHighlightAtlas, {0.42f, 0.30f, 0.24f},
                       cfg.contour * 0.55f * faceGain, {1.0f, 0.0f, 0.0f, 0.0f},
-                      {1.0f, 0.0f, 0.0f, 0.0f}, 0.50f, 0.0f);
+                      {1.0f, 0.0f, 2.0f, 0.0f}, 0.50f, 0.0f);
     }
     if (cfg.highlight > 0.0f) {
         drawSkinLayer(assets_.contourHighlightAtlas, {1.0f, 0.97f, 0.92f},
