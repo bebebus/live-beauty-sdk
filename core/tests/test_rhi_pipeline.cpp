@@ -868,6 +868,26 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     EXPECT_TRUE(!dev.feedbackLoopDetected);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) != 0);
+
+    // 3. v3.6.2 Camera Shake Anti-Ghosting Gate:
+    //    - IMU setCameraShaking(true) immediately flushes temporal denoise/matte and suppresses stale async hair/occlusion masks;
+    //    - Large >10% face displacement since mask capture (exceeding HairMaskTuning::kAffineMaxShift) suppresses stale mask instead of snapping to identity!
+    cfg.smoothing = 0.65f;
+    cfg.matteTemporal = 0.70f;
+    engine.setConfig(cfg);
+    engine.setCameraShaking(true);
+    engine.processFrame(inputTex, 720, 1280, 1283, 1283, kInvalidTexture, 0.05f, 1.0f);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassDenoise) == 0);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) == 0);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
+    engine.setCameraShaking(false);
+
+    // Shift face by +0.25 X (> kAffineMaxShift = 0.10) while multiclass mask stays at t=1200ms (x=0.50):
+    // stale hair mask must NOT render uncompensated ghost at old position!
+    for (int i = 0; i < 478; ++i) mpXy[i * 2] += 0.25f;
+    engine.submitFaceLandmarks(1350, mpXy.data(), 478, 720, 1280, 1350);
+    engine.processFrame(inputTex, 720, 1280, 1350, 1350);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
 }
 
 }  // namespace

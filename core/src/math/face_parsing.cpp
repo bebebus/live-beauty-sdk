@@ -14,7 +14,7 @@ namespace livebeauty::math {
 
 namespace {
 
-constexpr float kParseEmaAlpha = 0.55f;
+constexpr float kParseEmaAlpha = 0.82f;
 constexpr float kInv255 = 1.0f / 255.0f;
 
 inline bool isOccluderClass(uint8_t cls) {
@@ -57,7 +57,8 @@ void boxBlur3x3AndEma(
             }
             const float cur = static_cast<float>(sum) / static_cast<float>(cnt);
             const int idx = y * size + x;
-            const float sm = ema[idx] * (1.0f - alpha) + cur * alpha;
+            const float effAlpha = (std::fabs(cur - ema[idx]) > 56.0f) ? 1.0f : alpha;
+            const float sm = ema[idx] * (1.0f - effAlpha) + cur * effAlpha;
             ema[idx] = sm;
             outR8[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(sm)), 0, 255));
         }

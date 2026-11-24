@@ -232,10 +232,11 @@ void FaceTimeline::update(int64_t nowMs) {
         sampleMotion_ = 0.0f;
     }
     speed_ = sampleSpeed_;
-    denoiseKeep_ = approach(
-        denoiseKeep_,
-        1.0f - detail::smoothstep(kDenoiseFade[0], kDenoiseFade[1], std::max(speed_, sampleMotion_)),
-        dt);
+    const bool inMissRun = (count_ > 0 && missSince() != kTimeInvalid);
+    const float denoiseTarget = inMissRun
+        ? 0.0f
+        : (1.0f - detail::smoothstep(kDenoiseFade[0], kDenoiseFade[1], std::max(speed_, sampleMotion_)));
+    denoiseKeep_ = approach(denoiseKeep_, denoiseTarget, dt, 16.0f, 240.0f);
     steadyEyeTarget_ = 1.0f;
     steadyFaceTarget_ = 1.0f;
     eyeMakeupTarget_ = 1.0f;
@@ -301,9 +302,11 @@ const float* FaceTimeline::at(int64_t t) {
     const float distance = std::hypot(holdX_, holdY_);
     const float eye = std::max({output_[kEyeRadiusIndex], output_[kEyeRadiusIndex + 3], kRadiusFloor});
     const float face = std::max(output_[kRxIndex], kRadiusFloor);
-    steadyEyeTarget_ = 1.0f - detail::smoothstep(kEyeFade[0], kEyeFade[1], distance / eye);
-    steadyFaceTarget_ = 1.0f - detail::smoothstep(kFaceFade[0], kFaceFade[1], distance / face);
     const float motion = std::max(speed_, sampleMotion_);
+    const float shakeEyeKeep = 1.0f - detail::smoothstep(0.32f, 0.78f, motion);
+    const float shakeFaceKeep = 1.0f - detail::smoothstep(0.42f, 0.95f, motion);
+    steadyEyeTarget_ = (1.0f - detail::smoothstep(kEyeFade[0], kEyeFade[1], distance / eye)) * shakeEyeKeep;
+    steadyFaceTarget_ = (1.0f - detail::smoothstep(kFaceFade[0], kFaceFade[1], distance / face)) * shakeFaceKeep;
     const float motionKeep = 1.0f - 0.85f * detail::smoothstep(kEyeMakeupMotion[0], kEyeMakeupMotion[1], motion);
     const float extrapKeep = 1.0f - detail::smoothstep(kEyeMakeupExtrap[0], kEyeMakeupExtrap[1], distance / eye);
     eyeMakeupTarget_ = motionKeep * extrapKeep;
@@ -414,16 +417,20 @@ float FaceTimeline::presenceAt(int64_t t) {
     }
     if (e < 0) return fadeIn;
     const int idx = (eventHead_ - 1 - e + kEvents) % kEvents;
+    const float fastMotion = detail::smoothstep(0.28f, 0.70f, std::max(speed_, sampleMotion_));
+    const float effExitRamp = std::max(kExitRampMs * (1.0f - 0.55f * fastMotion), 12.0f);
     float exitVal = 1.0f;
     if (eventFace_[idx]) {
         if (e == 0) {
-            const float over = detail::clampf(static_cast<float>(t - eventTimes_[idx]) - busyHoldMs(), 0.0f, kExitRampMs);
-            exitVal = 1.0f - over / kExitRampMs;
+            const float effBusyHold = busyHoldMs() * (1.0f - 0.70f * fastMotion);
+            const float over = detail::clampf(static_cast<float>(t - eventTimes_[idx]) - effBusyHold, 0.0f, effExitRamp);
+            exitVal = 1.0f - over / effExitRamp;
         }
     } else {
         const int64_t ms = missRunStart(e);
-        const float over = detail::clampf(static_cast<float>(t - ms) - missDebounceMs(), 0.0f, kExitRampMs);
-        exitVal = 1.0f - over / kExitRampMs;
+        const float effMissDebounce = missDebounceMs() * (1.0f - 0.85f * fastMotion);
+        const float over = detail::clampf(static_cast<float>(t - ms) - effMissDebounce, 0.0f, effExitRamp);
+        exitVal = 1.0f - over / effExitRamp;
     }
     return fadeIn * exitVal;
 }
@@ -510,8 +517,8 @@ void FaceTimeline::updateVelocity(int64_t sampleTs, int slot) {
 }
 
 void FaceTimeline::settle() {
-    steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_);
-    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_);
+    steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_, 28.0f, 220.0f);
+    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 28.0f, 220.0f);
     eyeMakeupKeep_ = approach(eyeMakeupKeep_, eyeMakeupTarget_, pendingDt_, kEyeMakeupOutMs, kEyeMakeupInMs);
     pendingDt_ = 0.0f;
 }

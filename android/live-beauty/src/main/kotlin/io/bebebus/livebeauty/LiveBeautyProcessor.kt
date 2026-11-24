@@ -106,6 +106,11 @@ class LiveBeautyProcessor(
         activeCppEngine?.setPipelineOptions(maxFaces, frameDelayFrames)
     }
 
+    /** v3.6.2: 上报陀螺仪/加速度计快速晃动状态，消除镜头摇晃残影。 */
+    fun setCameraShaking(shaking: Boolean) {
+        activeCppEngine?.setCameraShaking(shaking)
+    }
+
     /** 读取 C++17 内核实时性能遥测快照。 */
     fun perfStats(): BeautyPerfStats = activeCppEngine?.perfStats() ?: BeautyPerfStats()
 

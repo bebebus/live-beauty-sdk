@@ -92,6 +92,7 @@ struct FrameInputs {
     TextureId occlusionMaskTex = kInvalidTexture;  // P2: R8 (255 = visible face/skin, 0 = occluded by hand/mic/bangs/glasses)
     float hairShown = 0.0f;     // Semantic alpha strength [0..1] (post neck-lift attenuation)
     float hairBgShown = 0.0f;   // Background hair-merge strength [0..1] (pre-warp coordinates)
+    float occlusionShown = 1.0f; // Semantic occlusion strength [0..1] (motion & freshness gated)
     std::array<float, math::HairMaskTuning::kAffineSize> hairAffine = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
 
     // P1: Ambient illuminant RGB white-balance estimate [0.6..1.4] for natural makeup color adaptation
@@ -182,7 +183,7 @@ private:
                         bool clearFirst = true);
     void blurSkinMask();
     void renderHairAlpha(TextureId hairMaskTex, float hairShown, const float* hairAffine8,
-                         TextureId occlusionMaskTex,
+                         TextureId occlusionMaskTex, float occlusionShown,
                          const float* ovalState41, float aspect, bool clearRgbToZero,
                          bool meshWarped, bool frontFaceCw);
     TextureId renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, float matteTemporal);

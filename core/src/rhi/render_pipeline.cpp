@@ -749,14 +749,17 @@ void RenderPipeline::renderMakeup(
 
 void RenderPipeline::renderHairAlpha(
     TextureId hairMaskTex, float hairShown, const float* hairAffine8,
-    TextureId occlusionMaskTex,
+    TextureId occlusionMaskTex, float occlusionShown,
     const float* ovalState41, float aspect, bool clearRgbToZero,
     bool meshWarped, bool frontFaceCw) {
     const TextureId fallbackTex = (assets_.whiteAlphaFallbackTex != kInvalidTexture)
         ? assets_.whiteAlphaFallbackTex
         : ownedFallbackTex_;
     const bool hasHair = (hairMaskTex != kInvalidTexture && hairShown > 1e-4f);
-    const bool hasOcc = (occlusionMaskTex != kInvalidTexture);
+    const float occStrength = (occlusionMaskTex != kInvalidTexture)
+        ? detail::clampf(occlusionShown, 0.0f, 1.0f)
+        : 0.0f;
+    const bool hasOcc = (occStrength > 1e-4f);
 
     RenderState st{};
     st.colorMaskAlphaOnly = !clearRgbToZero;
@@ -765,7 +768,7 @@ void RenderPipeline::renderHairAlpha(
     tb.bind(0, hasHair ? hairMaskTex : fallbackTex);
     tb.bind(1, hasOcc ? occlusionMaskTex : fallbackTex);
     ub.push(hairAffine8[0], hairAffine8[1], hairAffine8[2], hasHair ? hairShown : 0.0f);
-    ub.push(hairAffine8[4], hairAffine8[5], hairAffine8[6], hasOcc ? 1.0f : 0.0f);
+    ub.push(hairAffine8[4], hairAffine8[5], hairAffine8[6], occStrength);
     if (ovalState41) {
         ub.push(ovalState41[22], ovalState41[23], ovalState41[24], ovalState41[25]);
         ub.push(ovalState41[26], ovalState41[27], aspect, 1.0f);
@@ -775,7 +778,7 @@ void RenderPipeline::renderHairAlpha(
     }
     device_.beginPass(rtSkinMask_, skinW_, skinH_, clearRgbToZero, {0.0f, 0.0f, 0.0f, 1.0f});
     device_.drawFullScreenQuad(ShaderId::kHairAlpha, st, tb, ub);
-    if (meshWarped && hasHair) {
+    if (meshWarped && (hasHair || hasOcc)) {
         // Follow primary face mesh deformation in alpha channel (matching SemanticAlphaPass.kt).
         RenderState outerSt = st;
         outerSt.colorMaskAlphaOnly = true;
@@ -1044,7 +1047,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         UniformBlock ub{};
         tb.bind(0, currentTex);
         tb.bind(1, device_.textureOf(rtDenoise_[denoiseParity_]));
-        ub.push(denoiseWeight, 0.010f, 0.032f, 0.0f);
+        ub.push(denoiseWeight, 0.010f, 0.032f, 1.0f / static_cast<float>(in.width));
         device_.beginPass(rtDenoise_[dstIdx], in.width, in.height, false);
         device_.drawFullScreenQuad(ShaderId::kTemporalDenoise, st, tb, ub);
         device_.endPass();
@@ -1134,8 +1137,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         }
 
         // 1b. P2: RGB-Guided Joint Bilateral + Motion-Adaptive Temporal Portrait Matting Refinement
-        if (in.tierCaps.enableMatteRefine && config.matteTemporal > 1e-4f) {
-            effectiveMaskTex = renderTemporalMatte(effectiveMaskTex, currentTex, config.matteTemporal);
+        const float effMatteTemporal = config.matteTemporal * in.denoiseKeep;
+        if (in.tierCaps.enableMatteRefine && effMatteTemporal > 1e-4f) {
+            effectiveMaskTex = renderTemporalMatte(effectiveMaskTex, currentTex, effMatteTemporal);
             lastActivePassesMask_ |= kPassMatteRefine;
         } else {
             matteHistoryValid_ = false;
@@ -1521,7 +1525,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     const float effRelight = in.tierCaps.enableRelight3d
         ? detail::clampf(config.relight * in.loadFadeFace, 0.0f, 1.0f) : 0.0f;
     const float effNeckTone = in.tierCaps.enableNeckTone
-        ? detail::clampf(std::max(config.neckTone, config.whiten * 0.45f) * in.loadFadeSmooth, 0.0f, 1.0f) : 0.0f;
+        ? detail::clampf(std::max(config.neckTone, config.whiten * 0.45f * in.steadyFace) * in.loadFadeSmooth, 0.0f, 1.0f) : 0.0f;
     if (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) {
         renderSkinMask(postWarpLandmarks,
                        in.faceMeta15[math::FaceMeshFrame::kMetaAxisX],
@@ -1553,7 +1557,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     }
     TextureId hairWeightTex = kInvalidTexture;
     const bool wantHairOrOcc = (in.tierCaps.enableHairAlpha && in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) ||
-                               (in.occlusionMaskTex != kInvalidTexture);
+                               (in.occlusionMaskTex != kInvalidTexture && in.occlusionShown > 1e-4f);
     if (wantHairOrOcc) {
         // Re-upload primary mesh VBO if secondary face overwrote vbMeshWarp_ so hair alpha follows primary face warp.
         if (meshWarped && secWarped) {
@@ -1563,7 +1567,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         }
         renderHairAlpha(
             in.hairMaskTex, in.hairShown, in.hairAffine.data(),
-            in.occlusionMaskTex,
+            in.occlusionMaskTex, in.occlusionShown,
             activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
         hasSemanticTex = true;
         hairWeightTex = device_.textureOf(rtSkinMask_);

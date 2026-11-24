@@ -281,6 +281,13 @@ internal class LiveBeautyCppEngine(
         pipelineOptionsDirty = true
     }
 
+    fun setCameraShaking(shaking: Boolean) {
+        val h = handle
+        if (h != 0L) {
+            try { NativeBeautyBridge.nativeSetCameraShaking(h, shaking) } catch (_: Throwable) {}
+        }
+    }
+
     fun perfStats(): BeautyPerfStats = cachedStats
 
     override fun resetTracking() {

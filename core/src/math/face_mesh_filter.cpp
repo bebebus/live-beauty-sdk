@@ -373,10 +373,12 @@ void FaceMeshFilter::step(float teMs) {
     const float floorVal = (noisePower_ < 0.0f) ? 0.0f : std::sqrt(noiseMin_);
     noiseFloor_ = floorVal;
     const float dead = kKPose * kCPose * floorVal;
-    const float a = detail::oneEuroAlpha(kPoseFcMin * comp + kPoseBeta * std::max(0.0f, vp_ - dead), teMs);
+    const float posLag = std::hypot(qRaw_[0] - q_[0], qRaw_[1] - q_[1]) / std::max(s, 1e-4f);
+    const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.04f, 0.14f, posLag));
+    const float a = detail::oneEuroAlpha(kPoseFcMin * comp + kPoseBeta * std::max(0.0f, effVp - dead), teMs);
     for (int k = 0; k < kPoseSize; ++k) q_[k] += a * (qRaw_[k] - q_[k]);
     qRawPrev_ = qRaw_;
-    poseSpeed_ = vp_;
+    poseSpeed_ = effVp;
     poseDead_ = dead;
 
     float resExcess = 0.0f;
@@ -414,7 +416,7 @@ void FaceMeshFilter::step(float teMs) {
         rPrevX_ = rRawX_;
         rPrevY_ = rRawY_;
     }
-    motionSpeed_ = s * std::max(std::max(0.0f, vp_ - dead), resExcess);
+    motionSpeed_ = s * std::max(std::max(0.0f, effVp - dead), resExcess);
 }
 
 void FaceMeshFilter::residual(const float* pose8, float* outRx, float* outRy) const {

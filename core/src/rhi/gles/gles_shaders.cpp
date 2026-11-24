@@ -646,8 +646,10 @@ void main() {
     float style = uU1.x - skinOnly * 16.0;
     float gate = skinWeight(fineLow);
     float chromaGate = smoothstep(0.045, 0.10, fineLow.r - fineLow.b);
+    float warmPoly = smoothstep(0.018, 0.055, fineLow.r - fineLow.b) *
+        smoothstep(0.0, 0.025, fineLow.r - fineLow.g + 0.010);
     float polyGate = smoothstep(0.06, 0.18, luma(fineLow)) *
-        mix(0.30 * smoothstep(0.42, 0.72, faceM), 1.0, smoothstep(0.0, 0.25, gate));
+        mix(0.30 * smoothstep(0.42, 0.72, faceM) * warmPoly, 1.0, smoothstep(0.0, 0.25, gate));
     float skin = clamp(faceM * polyGate + (1.0 - faceM) * gate * chromaGate * (1.0 - 0.70 * exclM), 0.0, 1.0) * nonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
     float bleedGuard = 1.0 - (1.0 - smoothstep(0.22, 0.31, luma(fineLow))) *
@@ -761,6 +763,19 @@ void main() {
     vec3 previous = texture2D(uTex1, vTextureCoord).rgb;
     vec3 delta = abs(current.rgb - previous);
     float diff = max(max(delta.r, delta.g), delta.b);
+    if (uU0.w > 0.0) {
+        vec2 stepUv = vec2(uU0.w * 2.5, uU0.w * 2.5);
+        vec3 d0 = abs(texture2D(uTex0, clamp(vTextureCoord + stepUv, 0.0, 1.0)).rgb -
+                      texture2D(uTex1, clamp(vTextureCoord + stepUv, 0.0, 1.0)).rgb);
+        vec3 d1 = abs(texture2D(uTex0, clamp(vTextureCoord - stepUv, 0.0, 1.0)).rgb -
+                      texture2D(uTex1, clamp(vTextureCoord - stepUv, 0.0, 1.0)).rgb);
+        vec3 d2 = abs(texture2D(uTex0, clamp(vTextureCoord + vec2(stepUv.x, -stepUv.y), 0.0, 1.0)).rgb -
+                      texture2D(uTex1, clamp(vTextureCoord + vec2(stepUv.x, -stepUv.y), 0.0, 1.0)).rgb);
+        vec3 d3 = abs(texture2D(uTex0, clamp(vTextureCoord + vec2(-stepUv.x, stepUv.y), 0.0, 1.0)).rgb -
+                      texture2D(uTex1, clamp(vTextureCoord + vec2(-stepUv.x, stepUv.y), 0.0, 1.0)).rgb);
+        vec3 dMax = max(max(d0, d1), max(d2, d3));
+        diff = max(diff, max(max(dMax.r, dMax.g), dMax.b));
+    }
     float weight = uU0.x * (1.0 - smoothstep(uU0.y, uU0.z, diff));
     gl_FragColor = vec4(mix(current.rgb, previous, weight), current.a);
 }
@@ -846,9 +861,12 @@ void main() {
         float h = smoothstep(0.35 + bias, 0.65 + bias, hair);
         nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
     }
-    if (uU1.w > 0.5) {
-        float occ = texture2D(uTex1, vec2(vDst.x, 1.0 - vDst.y)).r;
-        nonHair *= smoothstep(0.25, 0.70, occ);
+    if (uU1.w > 0.001) {
+        vec2 ouv = vec2(uU0.x * vSrc.x + uU0.y * vSrc.y + uU0.z,
+                        uU1.x * vSrc.x + uU1.y * vSrc.y + uU1.z);
+        float occIn = step(0.0, ouv.x) * step(ouv.x, 1.0) * step(0.0, ouv.y) * step(ouv.y, 1.0);
+        float occ = mix(1.0, texture2D(uTex1, vec2(ouv.x, 1.0 - ouv.y)).r, occIn);
+        nonHair *= mix(1.0, smoothstep(0.25, 0.70, occ), clamp(uU1.w, 0.0, 1.0));
     }
     gl_FragColor = vec4(0.0, 0.0, 0.0, nonHair);
 }
@@ -984,7 +1002,7 @@ void main() {
         vec3 pRgb = texture2D(uTex3, ruv).rgb;
         vec3 dRgb = abs(cRgb - pRgb);
         float rgbDiff = max(max(dRgb.r, dRgb.g), dRgb.b);
-        float motion = max(rgbDiff, abs(guidedMask - pMask) * 0.45);
+        float motion = max(rgbDiff, abs(guidedMask - pMask) * 0.85);
         float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion));
         outMask = mix(guidedMask, pMask, keep);
     }

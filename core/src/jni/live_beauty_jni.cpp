@@ -764,4 +764,12 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHandShield(
     handle->engine.setHandShieldCoords(hand0X, hand0Y, hand1X, hand1Y);
 }
 
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetCameraShaking(
+    JNIEnv*, jclass, jlong ptr, jboolean shaking) {
+    auto* handle = fromHandle(ptr);
+    if (!handle) return;
+    handle->engine.setCameraShaking(shaking == JNI_TRUE);
+}
+
 }  // extern "C"

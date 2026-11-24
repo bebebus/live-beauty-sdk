@@ -15,7 +15,7 @@ namespace livebeauty::math {
 
 namespace {
 
-constexpr float kTemporalAlpha = 0.45f;
+constexpr float kTemporalAlpha = 0.80f;
 constexpr float kExprAlpha = 0.35f;
 constexpr float kInv255 = 1.0f / 255.0f;
 
@@ -353,11 +353,14 @@ void FaceOcclusionSolver::compute(
 #if LB_HAS_NEON
     const float32x4_t vOneMinusA = vdupq_n_f32(1.0f - alpha);
     const float32x4_t vAlpha = vdupq_n_f32(alpha);
+    const float32x4_t vSnapThr = vdupq_n_f32(56.0f);
     const float32x4_t vHalf = vdupq_n_f32(0.5f);
     for (int i = 0; i < kMaskPixels; i += 4) {
         float32x4_t prev = vld1q_f32(&emaMask_[i]);
         float32x4_t cur  = vld1q_f32(&targetVis[i]);
-        float32x4_t sm   = vmlaq_f32(vmulq_f32(prev, vOneMinusA), cur, vAlpha);
+        float32x4_t blended = vmlaq_f32(vmulq_f32(prev, vOneMinusA), cur, vAlpha);
+        uint32x4_t snapMask = vcgtq_f32(vabdq_f32(cur, prev), vSnapThr);
+        float32x4_t sm   = vbslq_f32(snapMask, cur, blended);
         vst1q_f32(&emaMask_[i], sm);
         uint32x4_t u32 = vcvtq_u32_f32(vaddq_f32(sm, vHalf));
         uint16x4_t u16 = vqmovn_u32(u32);
@@ -369,7 +372,8 @@ void FaceOcclusionSolver::compute(
     }
 #else
     for (int i = 0; i < kMaskPixels; ++i) {
-        const float sm = emaMask_[i] * (1.0f - alpha) + targetVis[i] * alpha;
+        const float effAlpha = (std::fabs(targetVis[i] - emaMask_[i]) > 56.0f) ? 1.0f : alpha;
+        const float sm = emaMask_[i] * (1.0f - effAlpha) + targetVis[i] * effAlpha;
         emaMask_[i] = sm;
         outMaskR8[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(sm)), 0, 255));
     }

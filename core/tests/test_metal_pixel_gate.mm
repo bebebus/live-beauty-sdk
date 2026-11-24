@@ -1100,6 +1100,13 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
 
         const Rgba protectedTeeth = evalComp({222, 216, 206, 255}, 0, 255, 0.55f, 0.20f);
         EXPECT_TRUE(std::abs(int(protectedTeeth.r) - 222) <= 2 && std::abs(int(protectedTeeth.g) - 216) <= 2);
+
+        // v3.6.2 Anti-Ghosting: non-skin neutral wall (185, 185, 187) & black hair (28, 26, 27) overlapped by lagging faceM=255
+        // must receive exact 0/255 porcelain whitening bleed!
+        const Rgba laggedWall = evalComp({185, 185, 187, 255}, 255, 0, 0.70f, 0.20f);
+        EXPECT_TRUE(std::abs(int(laggedWall.r) - 185) <= 1 && std::abs(int(laggedWall.b) - 187) <= 1);
+        const Rgba laggedHair = evalComp({28, 26, 27, 255}, 255, 0, 0.70f, 0.20f);
+        EXPECT_TRUE(std::abs(int(laggedHair.r) - 28) <= 1 && std::abs(int(laggedHair.b) - 27) <= 1);
     }
 }
 

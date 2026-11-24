@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -137,6 +138,14 @@ public:
     void setHandShieldCoords(float hand0X, float hand0Y, float hand1X, float hand1Y);
 
     /**
+     * v3.6.2: Notify engine from host IMU / gyroscope monitor when rapid camera shake is occurring
+     * (thread-safe). Immediately suppresses temporal frame/matte history and stale async ROI masks
+     * to prevent motion trails ("ghosting") during device shaking.
+     */
+    void setCameraShaking(bool shaking) { cameraShaking_.store(shaking, std::memory_order_relaxed); }
+    bool isCameraShaking() const { return cameraShaking_.load(std::memory_order_relaxed); }
+
+    /**
      * v3.3: Submit external Face-ROI neural skin retouching tensor (`3xHxW` or `4xHxW` float NCHW in `[-0.24, +0.24]`)
      * from any ONNX/CoreML/TFLite worker thread.
      */
@@ -224,6 +233,7 @@ private:
     bool semanticOccActive_ = false;
     bool stagedOccDirty_ = false;
     int stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
+    int64_t stagedOccTsMs_ = kTimeInvalid;
     std::array<uint8_t, math::FaceParsingMapper::kOutPixels> stagedOccMask_{};
     bool stagedParseHairDirty_ = false;
     int64_t stagedParseHairTsMs_ = kTimeInvalid;
@@ -235,6 +245,8 @@ private:
     std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> stagedResidualRgba_{};
     rhi::TextureId autoOccTex_ = rhi::kInvalidTexture;
     int autoOccTexSize_ = 0;
+    int64_t autoOccTsMs_ = kTimeInvalid;
+    std::atomic<bool> cameraShaking_{false};
     rhi::TextureId autoParseHairTex_ = rhi::kInvalidTexture;
     bool autoParseHairValid_ = false;
     int64_t autoParseHairTsMs_ = kTimeInvalid;

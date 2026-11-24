@@ -297,6 +297,8 @@ object NativeBeautyBridge {
         hand1X: Float,
         hand1Y: Float,
     )
+    /** v3.6.2: 上报宿主陀螺仪/加速度计快速晃动状态，瞬时清空时域帧/人像遮罩历史并抑制过期异步掩码拖影。 */
+    @JvmStatic external fun nativeSetCameraShaking(handle: Long, shaking: Boolean)
 
     /** 将 [VideoEffectsConfig] 的 51 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
     fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(51)): FloatArray {
