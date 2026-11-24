@@ -898,6 +898,20 @@ void testV36MulticlassParsingParticlesAndBundleGestureTriggers() {
     // Background (outY = 116, outX = 64) -> person < 20
     EXPECT_TRUE(person[116 * 128 + 64] < 20);
 
+    // v3.6.5: Ambiguous dynamic-INT8 forehead/temple boundary (c[1]=1.6 hair spill vs c[3]=1.2 face_skin)
+    // must NOT misclassify forehead skin as hair or occluder!
+    {
+        std::vector<float> ambig(16 * 16 * 6, -3.0f);
+        for (int i = 0; i < 16 * 16; ++i) {
+            ambig[static_cast<size_t>(i * 6 + 1)] = 1.6f;
+            ambig[static_cast<size_t>(i * 6 + 3)] = 1.2f;
+        }
+        FaceParsingMapper ambigMapper;
+        std::array<uint8_t, FaceParsingMapper::kOutPixels> aOcc{}, aHair{}, aPerson{};
+        EXPECT_TRUE(ambigMapper.mapMulticlass6LogitsNhwc(ambig.data(), 16, 16, aOcc.data(), aHair.data(), aPerson.data()));
+        EXPECT_TRUE(aHair[64 * 128 + 64] < 10 && aOcc[64 * 128 + 64] > 240 && aPerson[64 * 128 + 64] > 230);
+    }
+
     // 2. ParticleBurstSolver physics, packing & expiration
     ParticleBurstSolver solver;
     EXPECT_TRUE(!solver.hasActiveParticles(1000));

@@ -14,7 +14,7 @@ namespace livebeauty::math {
 
 namespace {
 
-constexpr float kParseEmaAlpha = 0.82f;
+constexpr float kParseEmaAlpha = 0.46f;
 constexpr float kInv255 = 1.0f / 255.0f;
 
 inline bool isOccluderClass(uint8_t cls) {
@@ -57,7 +57,7 @@ void boxBlur3x3AndEma(
             }
             const float cur = static_cast<float>(sum) / static_cast<float>(cnt);
             const int idx = y * size + x;
-            const float effAlpha = (std::fabs(cur - ema[idx]) > 56.0f) ? 1.0f : alpha;
+            const float effAlpha = (std::fabs(cur - ema[idx]) > 140.0f) ? std::max(alpha, 0.85f) : alpha;
             const float sm = ema[idx] * (1.0f - effAlpha) + cur * effAlpha;
             ema[idx] = sm;
             outR8[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(sm)), 0, 255));
@@ -201,11 +201,12 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
             for (int c = 0; c < 6; ++c) p[c] *= invSum;
 
             // Hair wisps (1), clothes (4), and accessories/glasses/hands/hats (5) occlude bare face makeup & skin retouch,
-            // gated with conservative margin against skin probability (p[2] + p[3]) so uncertain INT8 pixels never dim bare skin/lips!
+            // gated with strict margin against skin probability (p[2] + p[3]) so dynamic-INT8 hairline/temple spill
+            // never punches dark nonHair shadow holes across the forehead or face contour!
             const float pSkin = p[2] + p[3];
             const float rawOccluder = p[1] + p[4] + p[5];
-            const float pOcc = detail::smoothstep(0.45f, 0.80f, rawOccluder - 0.55f * pSkin);
-            const float pHair = detail::clampf(p[1], 0.0f, 1.0f);
+            const float pOcc = detail::smoothstep(0.62f, 0.90f, rawOccluder - 0.90f * pSkin);
+            const float pHair = detail::smoothstep(0.55f, 0.88f, p[1] - 0.85f * pSkin);
             const float pPerson = detail::clampf(1.0f - p[0], 0.0f, 1.0f);
 
             rawOcc_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround((1.0f - pOcc) * 255.0f)), 0, 255));

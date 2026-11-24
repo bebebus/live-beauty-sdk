@@ -889,6 +889,16 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) != 0);
 
+    // v3.6.5: When hairDye == 0 and hasMakeup() == false (e.g. cold-porcelain whiten + virtual background),
+    // internal 11Hz multiclass hair/occlusion masks MUST NOT inject jumping nonHair holes via kHairAlpha!
+    cfg.hairDye = 0.0f;
+    cfg.whiten = 0.65f;
+    engine.setConfig(cfg);
+    engine.processFrame(inputTex, 720, 1280, 1266, 1266);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairAlpha) == 0);
+    cfg.hairDye = 0.75f;
+    engine.setConfig(cfg);
+
     // 3. v3.6.2 Camera Shake Anti-Ghosting Gate:
     //    - IMU setCameraShaking(true) immediately flushes temporal denoise/matte and suppresses stale async hair/occlusion masks;
     //    - Large >10% face displacement since mask capture (exceeding HairMaskTuning::kAffineMaxShift) suppresses stale mask instead of snapping to identity!

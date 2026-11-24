@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.5] - 2026-11-25
+
+### Fixed
+- **Forehead & Face-Contour Shadow Jumping Elimination (`FaceParsingMapper`, `LiveBeautyEngine`, `kBgVirtualMix`, `kMatteRefine`)**:
+  - Gated internal asynchronous `11Hz` dynamic-INT8 multiclass hair/occlusion & `10Hz` ROI residual textures strictly to `hairDye`/`hairShine`, `hasMakeup()`, and `blemishRemove` (without virtual background), and tightened `FaceParsingMapper::mapMulticlass6LogitsNhwc` skin-vs-hair/occluder margins (`p[1] - 0.85 * pSkin`, `rawOccluder - 0.90 * pSkin`, `kParseEmaAlpha = 0.46`), eliminating `11Hz` dark unwhitened shadow patches jumping across the forehead and temples.
+  - Replaced the oversized `1.12x * 1.15x` bounding ellipse in `personAnchorShield` with an anatomically tapered inner face-core (`jawT` + `browT` taper) and narrow center-throat shield (`|a| <= 0.28..0.42`), reducing real-room background bleed outside the jawline/cheek contour from `698` pixels to `0`.
+  - Upgraded `kMatteRefine` / `fs_matte_refine` to an 8-tap dual-scale (`1.6` + `4.2` texel) RGB-guided joint bilateral + contrast-gated dark-halo snap + spatial-gradient-normalized temporal filter (`effRgbDiff = max(rgbDiff - 0.36 * spatialGrad, 0)`), plus translucent boundary dark-halo despill in `kBgVirtualMix`, snapping bloated `256x256` segmentation halos cleanly to the real forehead and face contour without sub-pixel tremor drop-outs.
+
 ## [3.6.4] - 2026-11-24
 
 ### Fixed

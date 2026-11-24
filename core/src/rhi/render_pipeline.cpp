@@ -822,11 +822,11 @@ TextureId RenderPipeline::renderTemporalMatte(TextureId rawMaskTex, TextureId cu
         tb.bind(2, prevMask);
         tb.bind(3, prevRgb);
         const float temporalWeight = matteTemporal > 1e-4f
-            ? detail::clampf(0.30f + matteTemporal * 0.52f, 0.0f, 0.82f)
+            ? detail::clampf(0.36f + matteTemporal * 0.48f, 0.0f, 0.84f)
             : 0.0f;
         ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_),
                 temporalWeight, matteHistoryValid_ ? 1.0f : 0.0f);
-        ub.push(0.075f, 0.020f, 0.070f, 0.0f);
+        ub.push(0.055f, 0.022f, 0.080f, 0.0f);
         device_.beginPass(rtMatte_[nextParity], bgW_, bgH_, false);
         device_.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
         device_.endPass();

@@ -1161,18 +1161,89 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
         const int facePx = (24 * kW + 32) * 4;
         const int neckPx = (37 * kW + 32) * 4;
         const int clothPx = (50 * kW + 10) * 4;
+        const int jawContourBgPx = (29 * kW + 39) * 4;  // a~0.79, b~-0.46: just outside tapered jawline!
         const int noisyHeadWallPx = (24 * kW + 50) * 4;
         const int noisyShoulderWallPx = (42 * kW + 40) * 4;
 
         EXPECT_TRUE(out[facePx + 0] >= 210 && out[facePx + 2] <= 145);
         EXPECT_TRUE(out[neckPx + 0] >= 200 && out[neckPx + 2] <= 155);
         EXPECT_TRUE(std::abs(int(out[clothPx + 0]) - 215) <= 2 && std::abs(int(out[clothPx + 2]) - 140) <= 2);
+        // Tapered inner shield MUST NOT bleed camera room pixels outside jawline contour!
+        EXPECT_TRUE(std::abs(int(out[jawContourBgPx + 0]) - 20) <= 1 && std::abs(int(out[jawContourBgPx + 2]) - 240) <= 1);
         // Sub-threshold noise (0.376) right next to head and shoulder MUST yield exact 0/255 camera bleed!
         EXPECT_TRUE(std::abs(int(out[noisyHeadWallPx + 0]) - 20) <= 1 && std::abs(int(out[noisyHeadWallPx + 2]) - 240) <= 1);
         EXPECT_TRUE(std::abs(int(out[noisyShoulderWallPx + 0]) - 20) <= 1 && std::abs(int(out[noisyShoulderWallPx + 2]) - 240) <= 1);
 
         dev.destroyRenderTarget(outRt);
         dev.destroyTexture(maskTex);
+        dev.destroyTexture(vbgTex);
+        dev.destroyTexture(camTex);
+    }
+
+    // 5. v3.6.5 Forehead & Face-Contour Bloated Dark-Room Halo Snap Gate (kMatteRefine -> kBgVirtualMix):
+    //    When 256x256 segmentation bloats 3 texels (mask=168/255=0.659 > 0.42!) into a dark room (32, 30, 28)
+    //    right outside bright forehead/cheek skin (215, 165, 140), dual-scale contrast-snapping kMatteRefine
+    //    MUST collapse the dark-room halo to 0/255 shadow bleed while keeping inner skin 100% solid!
+    {
+        constexpr int kW = 32, kH = 32;
+        std::vector<uint8_t> camPx(kW * kH * 4, 0);
+        std::vector<uint8_t> rawMaskPx(kW * kH, 0);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int i = (y * kW + x) * 4;
+                if (x < 16) {
+                    camPx[i + 0] = 215; camPx[i + 1] = 165; camPx[i + 2] = 140; camPx[i + 3] = 255;
+                    rawMaskPx[y * kW + x] = 250;
+                } else {
+                    camPx[i + 0] = 32; camPx[i + 1] = 30; camPx[i + 2] = 28; camPx[i + 3] = 255;
+                    rawMaskPx[y * kW + x] = (x < 19) ? 168 : 6;  // 3-texel bloated dark-room halo!
+                }
+            }
+        }
+        const TextureId camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camPx.data());
+        const TextureId vbgTex = makeSolidTex(dev, kW, kH, 20, 110, 240, 255);
+        const TextureId rawMaskTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, rawMaskPx.data());
+        const RenderTargetId matteRt = dev.createRenderTarget(kW, kH, TextureFormat::kR8);
+        const RenderTargetId mixRt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, rawMaskTex);
+        tb.bind(1, camTex);
+        tb.bind(2, rawMaskTex);
+        tb.bind(3, camTex);
+        UniformBlock ub{};
+        ub.push(1.0f / kW, 1.0f / kH, 0.0f, 0.0f);  // single-frame spatial snap (even before temporal damping!)
+        ub.push(0.055f, 0.022f, 0.080f, 0.0f);
+        dev.beginPass(matteRt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
+        dev.endPass();
+
+        tb.clear(); ub.clear();
+        tb.bind(0, camTex);
+        tb.bind(1, vbgTex);
+        tb.bind(2, dev.textureOf(matteRt));
+        ub.push(1.0f, 0.42f, 0.72f, 0.0f);
+        ub.push(1.0f, 1.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.1f, 0.1f);
+        ub.push(1.0f, 0.0f, 1.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.1f, 0.1f);
+        ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+        dev.beginPass(mixRt, kW, kH, false, {});
+        dev.drawFullScreenQuad(ShaderId::kBgVirtualMix, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(mixRt), out.data(), kW, kH));
+        const int innerSkinPx = (16 * kW + 13) * 4;
+        const int bloatedHaloPx = (16 * kW + 17) * 4;  // had rawMask=168 over dark room!
+        EXPECT_TRUE(out[innerSkinPx + 0] >= 210 && out[innerSkinPx + 2] <= 145);
+        EXPECT_TRUE(std::abs(int(out[bloatedHaloPx + 0]) - 20) <= 2 &&
+                    std::abs(int(out[bloatedHaloPx + 2]) - 240) <= 2);
+
+        dev.destroyRenderTarget(mixRt);
+        dev.destroyRenderTarget(matteRt);
+        dev.destroyTexture(rawMaskTex);
         dev.destroyTexture(vbgTex);
         dev.destroyTexture(camTex);
     }

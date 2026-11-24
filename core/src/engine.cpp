@@ -611,10 +611,14 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const float* bodyState = bodySmoother_.update(
         hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
 
-    // Hair semantic temporal gate & rigid head-motion compensation affine (using aligned displayTsMs)
+    // Hair semantic temporal gate & rigid head-motion compensation affine (using aligned displayTsMs).
+    // Internal 11Hz multiclass hair mask only binds when hairDye / hairShine is active so dynamic-INT8
+    // hairline fluctuations never punch jumping nonHair holes into forehead/face-contour whitening.
+    const bool wantAutoHair = config_.enabled && !config_.compareOriginal &&
+                              (config_.hairDye > 1e-4f || config_.hairShine > 1e-4f);
     const rhi::TextureId resolvedHairTex = (hairMaskTex != rhi::kInvalidTexture)
         ? hairMaskTex
-        : (autoParseHairValid_ ? autoParseHairTex_ : rhi::kInvalidTexture);
+        : ((autoParseHairValid_ && wantAutoHair) ? autoParseHairTex_ : rhi::kInvalidTexture);
     const int64_t resolvedHairStampArg = (hairMaskTex != rhi::kInvalidTexture) ? hairMaskStampMs : autoParseHairTsMs_;
     const bool hasHairTex = (resolvedHairTex != rhi::kInvalidTexture);
     const int64_t effHairStamp = (resolvedHairStampArg != kTimeInvalid) ? resolvedHairStampArg : displayTsMs;
@@ -719,10 +723,11 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         std::lock_guard<std::mutex> lock(auxMutex_);
         semanticOccAlive = semanticOccActive_;
     }
+    const bool wantAutoOcc = config_.enabled && !config_.compareOriginal && config_.hasMakeup();
     if (occlusionMaskTex_ != rhi::kInvalidTexture) {
         in.occlusionMaskTex = occlusionMaskTex_;
         in.occlusionShown = 1.0f;
-    } else if ((faceBoundsAlive || semanticOccAlive) && hasMesh && autoOccTex_ != rhi::kInvalidTexture) {
+    } else if (wantAutoOcc && (faceBoundsAlive || semanticOccAlive) && hasMesh && autoOccTex_ != rhi::kInvalidTexture) {
         const float occFresh = (autoOccTsMs_ != kTimeInvalid)
             ? math::HairMaskTuning::fresh(static_cast<float>(autoOccTsMs_ - displayTsMs))
             : 1.0f;
@@ -733,11 +738,14 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.hairBgShown = effHairBgShown;
     in.hairAffine = hairAffine;
     in.ambientRgb = ambientRgb_;
+    const bool wantAutoResidual = config_.enabled && !config_.compareOriginal &&
+                                  config_.blemishRemove > 0.05f &&
+                                  config_.backgroundMode == BackgroundMode::kNone;
     if (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f) {
         in.aiResidualTex = aiResidualTex_;
         in.aiResidualRect = aiResidualRect_;
         in.aiResidualStrength = aiResidualStrength_;
-    } else if (faceBoundsAlive && hasMesh && autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f) {
+    } else if (wantAutoResidual && faceBoundsAlive && hasMesh && autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f) {
         const float rcx = autoResidualRect_.left + 0.5f * autoResidualRect_.width;
         const float rcy = autoResidualRect_.top + 0.5f * autoResidualRect_.height;
         const float curCx = meshView.centerX();

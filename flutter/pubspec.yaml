@@ -3,7 +3,7 @@ description: >-
   Real-time GPU live beauty SDK featuring 478-pt C-infinity diffeomorphic face
   reshape, 1080p guided skin smoothing, 6-layer makeup, 64^3 3D LUT color
   grading, body reshape, and portrait bokeh for Android, iOS, and Flutter.
-version: 3.6.4
+version: 3.6.5
 homepage: https://dh.video
 repository: https://github.com/bebebus/live-beauty-sdk
 documentation: https://github.com/bebebus/live-beauty-sdk#readme

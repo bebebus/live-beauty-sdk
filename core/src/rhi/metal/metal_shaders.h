@@ -916,11 +916,15 @@ inline float personAnchorShieldMtl(float2 uv, float4 o, float2 u, float aspect, 
     float2 d = float2(uv.x - o.x, (uv.y - o.y) / aspect);
     float a = clamp(dot(d, u) / max(o.z, 0.0001f), -6.0f, 6.0f);
     float b = clamp(dot(d, float2(-u.y, u.x)) / max(o.w, 0.0001f), -6.0f, 6.0f);
-    float rFace = sqrt(a * a + b * b);
-    float faceCore = (1.0f - smoothstep(0.80f, 1.00f, rFace)) * 0.99f;
+    float jawT = clamp((-b - 0.05f) / 0.75f, 0.0f, 1.0f);
+    float browT = clamp((b - 0.25f) / 0.55f, 0.0f, 1.0f);
+    float halfW = mix(0.66f, 0.34f, jawT) * (1.0f - 0.25f * browT);
+    float2 q = float2(a / max(halfW, 0.15f), (b + 0.04f) / 0.68f);
+    float rShield = sqrt(dot(q, q));
+    float faceCore = (1.0f - smoothstep(0.72f, 0.92f, rShield)) * 0.98f;
     float down = -b;
-    float neckBand = smoothstep(0.60f, 0.85f, down) * (1.0f - smoothstep(1.35f, 1.62f, down));
-    float neckCore = neckBand * (1.0f - smoothstep(0.46f, 0.68f, abs(a))) * 0.94f;
+    float neckBand = smoothstep(0.65f, 0.88f, down) * (1.0f - smoothstep(1.32f, 1.54f, down));
+    float neckCore = neckBand * (1.0f - smoothstep(0.28f, 0.42f, abs(a))) * 0.97f;
     return clamp(max(faceCore, neckCore) * presence, 0.0f, 1.0f);
 }
 
@@ -946,9 +950,13 @@ fragment float4 fs_bg_virtual_mix(QuadOut in [[stage_in]],
         tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f,  wrapD.y), 0.0f, 1.0f)).rgb +
         tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f, -wrapD.y), 0.0f, 1.0f)).rgb
     );
-    float edgeBand = smoothstep(0.15f, 0.48f, keep) * (1.0f - smoothstep(0.55f, 0.88f, keep));
-    float3 rimGlow = max(color.rgb, vbgAmb * 0.90f);
-    float3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.14f), edgeBand * 0.14f);
+    float edgeBand = smoothstep(0.05f, 0.45f, keep) * (1.0f - smoothstep(0.55f, 0.92f, keep));
+    float darkBgSpill = clamp((dot(vbgAmb, float3(0.299f, 0.587f, 0.114f)) -
+                               dot(color.rgb, float3(0.299f, 0.587f, 0.114f))) * 1.6f, 0.0f, 1.0f);
+    float3 despilled = mix(color.rgb, max(color.rgb, mix(color.rgb, vbgAmb, 0.65f)),
+                           edgeBand * (1.0f - keep) * darkBgSpill * 0.85f);
+    float3 rimGlow = max(despilled, vbgAmb * 0.90f);
+    float3 fgWrapped = mix(despilled, mix(rimGlow, vbgAmb, 0.14f), edgeBand * 0.14f);
     return float4(mix(color.rgb, mix(vbg, fgWrapped, keep), uni.u[0].x), color.a);
 }
 
@@ -968,29 +976,44 @@ fragment float4 fs_matte_refine(QuadOut in [[stage_in]],
     float2 muv = toMtlUv(in.uv);
     float cMask = tex0.sample(kLinearClamp, muv).r;
     float3 cRgb = tex1.sample(kLinearClamp, muv).rgb;
-    float inv2Sig2 = 0.5f / max(uni.u[1].x * uni.u[1].x, 0.001f);
-    float2 d = uni.u[0].xy * 1.25f;
-    float sumW = 1.4f;
-    float sumM = cMask * 1.4f;
+    float inv2Sig2 = 0.5f / max(uni.u[1].x * uni.u[1].x, 0.0005f);
+    float2 dIn = uni.u[0].xy * 1.6f;
+    float2 dOut = uni.u[0].xy * 4.2f;
+    float sumW = 0.85f;
+    float sumM = cMask * 0.85f;
+    float minSameBg = 1.0f;
+    float contrastFg = 0.0f;
+    float spatialGrad = 0.0f;
 
-    float2 offs[4] = {
-        float2(-d.x, -d.y), float2(d.x, -d.y),
-        float2(-d.x,  d.y), float2(d.x,  d.y)
+    float2 offs[8] = {
+        float2(-dIn.x, -dIn.y), float2(dIn.x, -dIn.y),
+        float2(-dIn.x,  dIn.y), float2(dIn.x,  dIn.y),
+        float2(-dOut.x, 0.0f),  float2(dOut.x, 0.0f),
+        float2(0.0f, -dOut.y),  float2(0.0f,  dOut.y)
     };
     float3 cRgb0 = cRgb;
     float3 cRgb3 = cRgb;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 8; ++i) {
         float2 nuv = clamp(muv + offs[i], 0.0f, 1.0f);
         float3 nRgb = tex1.sample(kLinearClamp, nuv).rgb;
+        float nM = tex0.sample(kLinearClamp, nuv).r;
         if (i == 0) cRgb0 = nRgb;
         if (i == 3) cRgb3 = nRgb;
         float3 dc = nRgb - cRgb;
         float w = exp(-dot(dc, dc) * inv2Sig2);
         sumW += w;
-        sumM += w * tex0.sample(kLinearClamp, nuv).r;
+        sumM += w * nM;
+        minSameBg = min(minSameBg, mix(1.0f, nM, w));
+        contrastFg = max(contrastFg, smoothstep(0.72f, 0.92f, nM) * smoothstep(0.10f, 0.22f, length(dc)));
+        if (i < 4) {
+            float3 ad = abs(dc);
+            spatialGrad = max(spatialGrad, max(ad.x, max(ad.y, ad.z)));
+        }
     }
 
-    float guidedMask = clamp(sumM / sumW, 0.0f, 1.0f);
+    float bilat = clamp(sumM / sumW, 0.0f, 1.0f);
+    float haloZone = 1.0f - smoothstep(0.86f, 0.96f, bilat);
+    float guidedMask = mix(bilat, min(bilat, minSameBg), contrastFg * haloZone);
     float outMask = guidedMask;
     if (uni.u[0].w > 0.5f && uni.u[0].z > 0.001f) {
         float pMask = tex2.sample(kLinearClamp, muv).r;
@@ -1002,8 +1025,9 @@ fragment float4 fs_matte_refine(QuadOut in [[stage_in]],
         float3 d3 = abs(cRgb3 - pRgb3);
         float rgbDiff = max(max(dC.r, max(dC.g, dC.b)),
                         0.75f * max(max(d0.r, max(d0.g, d0.b)), max(d3.r, max(d3.g, d3.b))));
-        float shrinkClear = max((pMask - guidedMask) - 0.45f, 0.0f) * 0.12f;
-        float motion = max(rgbDiff, shrinkClear);
+        float effRgbDiff = max(rgbDiff - 0.36f * spatialGrad, 0.0f);
+        float shrinkClear = max((pMask - guidedMask) - 0.48f, 0.0f) * 0.12f;
+        float motion = max(effRgbDiff, shrinkClear);
         float keep = uni.u[0].z * (1.0f - smoothstep(uni.u[1].y, uni.u[1].z, motion));
         outMask = mix(guidedMask, pMask, keep);
     }
