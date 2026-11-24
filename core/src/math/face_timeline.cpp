@@ -20,12 +20,12 @@ constexpr float kCores[4] = {0.50f, 0.65f, 0.55f, 0.55f};
 constexpr float kRadiusMin = 1e-3f;
 constexpr float kRadiusFloor = 0.01f;
 constexpr float kMinShift = 1e-3f;
-constexpr float kFcMinHz = 1.0f;
-constexpr float kBeta = 10.0f;
+constexpr float kFcMinHz = 2.8f;
+constexpr float kBeta = 35.0f;
 constexpr float kSpeedDead = 0.25f;
-constexpr float kDCutoffHz = 4.0f;
+constexpr float kDCutoffHz = 6.0f;
 constexpr int64_t kSpeedBaselineMs = 100;
-constexpr float kHoldDecayMs = 200.0f;
+constexpr float kHoldDecayMs = 45.0f;
 constexpr int64_t kBaselineMs = 200;
 constexpr float kStepJitter = 0.015f;
 constexpr float kIntervalTauMs = 500.0f;
@@ -37,7 +37,7 @@ constexpr float kFaceFade[2] = {0.15f, 0.35f};
 constexpr float kEyeMakeupMotion[2] = {0.14f, 0.42f};
 constexpr float kEyeMakeupExtrap[2] = {0.12f, 0.35f};
 constexpr float kEyeMakeupOutMs = 35.0f;
-constexpr float kEyeMakeupInMs = 160.0f;
+constexpr float kEyeMakeupInMs = 65.0f;
 constexpr float kDenoiseFade[2] = {0.05f, 0.12f};
 
 }  // namespace
@@ -106,6 +106,14 @@ void FaceTimeline::clearHistory() {
     velocityY_ = 0.0f;
     sampleSpeed_ = 0.0f;
     sampleMotion_ = 0.0f;
+    holdX_ = 0.0f;
+    holdY_ = 0.0f;
+    steadyEye_ = 1.0f;
+    steadyFace_ = 1.0f;
+    eyeMakeupKeep_ = 1.0f;
+    steadyEyeTarget_ = 1.0f;
+    steadyFaceTarget_ = 1.0f;
+    eyeMakeupTarget_ = 1.0f;
     poseVelValid_ = false;
     poseMoving_ = false;
     meshPresent_.fill(false);
@@ -125,6 +133,16 @@ void FaceTimeline::dropSamples() {
     edxY_ = 0.0f;
     velocityX_ = 0.0f;
     velocityY_ = 0.0f;
+    sampleSpeed_ = 0.0f;
+    sampleMotion_ = 0.0f;
+    holdX_ = 0.0f;
+    holdY_ = 0.0f;
+    steadyEye_ = 1.0f;
+    steadyFace_ = 1.0f;
+    eyeMakeupKeep_ = 1.0f;
+    steadyEyeTarget_ = 1.0f;
+    steadyFaceTarget_ = 1.0f;
+    eyeMakeupTarget_ = 1.0f;
     poseVelValid_ = false;
     poseMoving_ = false;
     meshPresent_.fill(false);
@@ -134,7 +152,13 @@ void FaceTimeline::dropSamples() {
 void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceMeshFrame* mesh) {
     if (!targetState41) return;
     if (count_ > 0 && sampleTs <= latest()) return;
-    if (count_ > 0 && sampleTs - latest() > kMaxGapMs) dropSamples();
+    const int64_t ms = (count_ > 0) ? missSince() : kTimeInvalid;
+    const bool exitedDuringMiss = (ms != kTimeInvalid) &&
+        (static_cast<float>(sampleTs - ms) >= missDebounceMs() + kExitRampMs);
+    if (count_ > 0 && (sampleTs - latest() > kMaxGapMs || exitedDuringMiss)) {
+        dropSamples();
+        presence_ = 0.0f;
+    }
     const int slot = head_;
     if (mesh != nullptr) {
         if (count_ == 0) meshFilter_.reset(true);
@@ -156,7 +180,15 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
     const float x = targetState41[kOvalIndex];
     const float y = targetState41[kOvalIndex + 1] / aspect_;
     const int prevSlot = (head_ - 1 + kHistory) % kHistory;
-    if (count_ == 0) {
+    if (mesh != nullptr && FaceMeshFrame::fillGeometryState(
+            meshCoords_[slot].data(), FaceMeshFrame::kCoordCount,
+            meshMeta_[slot][FaceMeshFrame::kMetaAxisX], meshMeta_[slot][FaceMeshFrame::kMetaAxisY],
+            aspect_, targetState41[kStateSize - 1], states_[slot].data())) {
+        if (count_ == 0) {
+            edxX_ = 0.0f;
+            edxY_ = 0.0f;
+        }
+    } else if (count_ == 0) {
         edxX_ = 0.0f;
         edxY_ = 0.0f;
         std::memcpy(states_[slot].data(), targetState41, sizeof(float) * kStateSize);
@@ -197,7 +229,7 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
     times_[slot] = sampleTs;
     head_ = (head_ + 1) % kHistory;
     count_ = std::min(count_ + 1, kHistory);
-    if (restart) startRun(sampleTs, 0.0f, true);
+    if (restart) startRun(sampleTs, std::max(presence_, 0.50f), true);
     else redetect(sampleTs);
     pushEvent(sampleTs, true);
     updateVelocity(sampleTs, slot);
@@ -303,8 +335,8 @@ const float* FaceTimeline::at(int64_t t) {
     const float eye = std::max({output_[kEyeRadiusIndex], output_[kEyeRadiusIndex + 3], kRadiusFloor});
     const float face = std::max(output_[kRxIndex], kRadiusFloor);
     const float motion = std::max(speed_, sampleMotion_);
-    const float shakeEyeKeep = 1.0f - detail::smoothstep(0.32f, 0.78f, motion);
-    const float shakeFaceKeep = 1.0f - detail::smoothstep(0.42f, 0.95f, motion);
+    const float shakeEyeKeep = 1.0f - 0.75f * detail::smoothstep(0.55f, 1.35f, motion);
+    const float shakeFaceKeep = 1.0f - 0.70f * detail::smoothstep(0.65f, 1.50f, motion);
     steadyEyeTarget_ = (1.0f - detail::smoothstep(kEyeFade[0], kEyeFade[1], distance / eye)) * shakeEyeKeep;
     steadyFaceTarget_ = (1.0f - detail::smoothstep(kFaceFade[0], kFaceFade[1], distance / face)) * shakeFaceKeep;
     const float motionKeep = 1.0f - 0.85f * detail::smoothstep(kEyeMakeupMotion[0], kEyeMakeupMotion[1], motion);
@@ -471,7 +503,7 @@ void FaceTimeline::redetect(int64_t sampleTs) {
     const float missed = static_cast<float>(sampleTs - ms) - missDebounceMs();
     if (missed <= 0.0f) return;
     const float level = 1.0f - detail::clampf(missed, 0.0f, kExitRampMs) / kExitRampMs;
-    startRun(sampleTs, level, false);
+    startRun(sampleTs, std::max(level, 0.50f), false);
 }
 
 void FaceTimeline::pushEvent(int64_t ts, bool face) {
@@ -517,8 +549,8 @@ void FaceTimeline::updateVelocity(int64_t sampleTs, int slot) {
 }
 
 void FaceTimeline::settle() {
-    steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_, 28.0f, 220.0f);
-    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 28.0f, 220.0f);
+    steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_, 28.0f, 50.0f);
+    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 28.0f, 50.0f);
     eyeMakeupKeep_ = approach(eyeMakeupKeep_, eyeMakeupTarget_, pendingDt_, kEyeMakeupOutMs, kEyeMakeupInMs);
     pendingDt_ = 0.0f;
 }

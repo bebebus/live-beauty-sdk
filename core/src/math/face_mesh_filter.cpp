@@ -22,8 +22,8 @@ constexpr int kLipRing[40] = {
 constexpr int kRightLids[6] = {160, 144, 159, 145, 158, 153};
 constexpr int kLeftLids[6] = {387, 373, 386, 374, 385, 380};
 constexpr int kCenterPoints[4] = {234, 454, 10, 152};
-constexpr float kResFcMin[3] = {0.9f, 1.6f, 1.6f};
-constexpr float kResBeta[3] = {30.0f, 75.0f, 80.0f};
+constexpr float kResFcMin[3] = {2.4f, 3.2f, 3.4f};
+constexpr float kResBeta[3] = {70.0f, 105.0f, 110.0f};
 
 struct FilterStaticData {
     float canonicalFaceWidth = 1.0f;
@@ -341,6 +341,7 @@ void FaceMeshFilter::step(float teMs) {
     const float s = scaleOf(q_.data());
 
     float acc = 0.0f;
+    float lagAcc = 0.0f;
     for (size_t j = 0; j < sd.basis.size(); ++j) {
         const int b = sd.basis[j];
         const float mx = (qRaw_[0] - qRawPrev_[0]) + (qRaw_[2] - qRawPrev_[2]) * sd.lx[b] +
@@ -348,9 +349,16 @@ void FaceMeshFilter::step(float teMs) {
         const float my = (qRaw_[1] - qRawPrev_[1]) + (qRaw_[4] - qRawPrev_[4]) * sd.lx[b] +
                          (qRaw_[5] - qRawPrev_[5]) * sd.ly[b] + (qRaw_[7] - qRawPrev_[7]) * sd.z[b];
         acc += sd.basisW[j] * (mx * mx + my * my);
+
+        const float lx = (qRaw_[0] - q_[0]) + (qRaw_[2] - q_[2]) * sd.lx[b] +
+                         (qRaw_[3] - q_[3]) * sd.ly[b] + (qRaw_[6] - q_[6]) * sd.z[b];
+        const float ly = (qRaw_[1] - q_[1]) + (qRaw_[4] - q_[4]) * sd.lx[b] +
+                         (qRaw_[5] - q_[5]) * sd.ly[b] + (qRaw_[7] - q_[7]) * sd.z[b];
+        lagAcc += sd.basisW[j] * (lx * lx + ly * ly);
     }
     const float spRaw = std::sqrt(acc * 0.5f) / s / teSec;
-    vp_ += detail::oneEuroAlpha(kPoseDcut, teMs) * (spRaw - vp_);
+    const float poseDcut = (spRaw < vp_) ? kPoseDcutDown : kPoseDcut;
+    vp_ += detail::oneEuroAlpha(poseDcut, teMs) * (spRaw - vp_);
 
     const bool illPosed = (std::fabs(detOf(qRaw_.data())) < kDetMin * s * s);
     if (!illPosed) {
@@ -373,9 +381,11 @@ void FaceMeshFilter::step(float teMs) {
     const float floorVal = (noisePower_ < 0.0f) ? 0.0f : std::sqrt(noiseMin_);
     noiseFloor_ = floorVal;
     const float dead = kKPose * kCPose * floorVal;
-    const float posLag = std::hypot(qRaw_[0] - q_[0], qRaw_[1] - q_[1]) / std::max(s, 1e-4f);
-    const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.04f, 0.14f, posLag));
-    const float a = detail::oneEuroAlpha(kPoseFcMin * comp + kPoseBeta * std::max(0.0f, effVp - dead), teMs);
+    const float basisLag = std::sqrt(lagAcc * 0.5f) / std::max(s, 1e-4f);
+    const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.025f, 0.095f, basisLag));
+    const float lagCatchup = 18.0f * std::max(0.0f, basisLag - std::max(0.012f, 2.2f * dead));
+    const float a = detail::oneEuroAlpha(
+        kPoseFcMin * comp + kPoseBeta * (std::max(0.0f, effVp - dead) + lagCatchup), teMs);
     for (int k = 0; k < kPoseSize; ++k) q_[k] += a * (qRaw_[k] - q_[k]);
     qRawPrev_ = qRaw_;
     poseSpeed_ = effVp;
@@ -383,29 +393,58 @@ void FaceMeshFilter::step(float teMs) {
 
     float resExcess = 0.0f;
     if (!illPosed) {
-        const float ad = detail::oneEuroAlpha(kResDcut, teMs);
+        const float adUp = detail::oneEuroAlpha(kResDcut, teMs);
+        const float adDown = detail::oneEuroAlpha(kResDcutDown, teMs);
+        std::array<float, kRegions> regionLagSq{};
+        regionLagSq.fill(0.0f);
         for (int i = 0; i < kFace; ++i) {
-            drX_[i] += ad * ((rRawX_[i] - rPrevX_[i]) / teSec - drX_[i]);
-            drY_[i] += ad * ((rRawY_[i] - rPrevY_[i]) / teSec - drY_[i]);
+            const float instVx = (rRawX_[i] - rPrevX_[i]) / teSec;
+            const float instVy = (rRawY_[i] - rPrevY_[i]) / teSec;
+            const float instMag2 = instVx * instVx + instVy * instVy;
+            const float curMag2 = drX_[i] * drX_[i] + drY_[i] * drY_[i];
+            const float ad = (instMag2 < curMag2) ? adDown : adUp;
+            drX_[i] += ad * (instVx - drX_[i]);
+            drY_[i] += ad * (instVy - drY_[i]);
+            const float lx = rRawX_[i] - rX_[i];
+            const float ly = rRawY_[i] - rY_[i];
+            const float lp = lx * lx + ly * ly;
+            for (int g = 0; g < kRegions; ++g) regionLagSq[g] += sd.reg[i * kRegions + g] * lp;
         }
         regionRms_.fill(0.0f);
         for (int i = 0; i < kFace; ++i) {
             const float p = drX_[i] * drX_[i] + drY_[i] * drY_[i];
             for (int g = 0; g < kRegions; ++g) regionRms_[g] += sd.reg[i * kRegions + g] * p;
         }
-        float lidPower = 0.0f;
-        for (int idx : kLidRing) lidPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
-        float lipPower = 0.0f;
-        for (int idx : kLipRing) lipPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+        float lidPower = 0.0f, lidLagSq = 0.0f;
+        for (int idx : kLidRing) {
+            lidPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+            const float lx = rRawX_[idx] - rX_[idx], ly = rRawY_[idx] - rY_[idx];
+            lidLagSq += lx * lx + ly * ly;
+        }
+        float lipPower = 0.0f, lipLagSq = 0.0f;
+        for (int idx : kLipRing) {
+            lipPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+            const float lx = rRawX_[idx] - rX_[idx], ly = rRawY_[idx] - rY_[idx];
+            lipLagSq += lx * lx + ly * ly;
+        }
 
         const float resDead = kKRes * kCRes * std::pow(teMs / kTeRefMs, kResTeExp) * floorVal;
         for (int g = 0; g < kRegions; ++g) {
             regionRms_[g] = std::sqrt(regionRms_[g] / sd.regSum[g]);
-            if (g == kEyeRegion) regionRms_[g] = std::max(regionRms_[g], std::sqrt(lidPower / 32.0f));
-            if (g == kLowRegion) regionRms_[g] = std::max(regionRms_[g], std::sqrt(lipPower / 40.0f));
+            float regLag = std::sqrt(regionLagSq[g] / sd.regSum[g]);
+            if (g == kEyeRegion) {
+                regionRms_[g] = std::max(regionRms_[g], std::sqrt(lidPower / 32.0f));
+                regLag = std::max(regLag, std::sqrt(lidLagSq / 32.0f));
+            }
+            if (g == kLowRegion) {
+                regionRms_[g] = std::max(regionRms_[g], std::sqrt(lipPower / 40.0f));
+                regLag = std::max(regLag, std::sqrt(lipLagSq / 40.0f));
+            }
             const float excess = std::max(0.0f, regionRms_[g] - resDead);
             resExcess = std::max(resExcess, excess);
-            regionAlpha_[g] = detail::oneEuroAlpha(kResFcMin[g] * comp + kResBeta[g] * excess, teMs);
+            const float resLagBoost = 22.0f * std::max(0.0f, regLag - std::max(0.012f, 2.2f * resDead));
+            regionAlpha_[g] = detail::oneEuroAlpha(
+                kResFcMin[g] * comp + kResBeta[g] * (excess + resLagBoost), teMs);
         }
         for (int i = 0; i < kFace; ++i) {
             float ai = 0.0f;

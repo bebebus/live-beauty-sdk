@@ -474,6 +474,10 @@ void LiveBeautyEngine::submitBodyMiss(int64_t /*sampleTsMs*/) {
 
 CropRect LiveBeautyEngine::selectFaceRoi(int frameWidth, int frameHeight, int64_t nowMs) {
     if (config_.maxFaces >= 2) return CropRect::full();
+    if (cameraShaking_.load(std::memory_order_relaxed) || faces_.slot(0).speed() > 0.35f) {
+        roiSelector_.onMiss();
+        return CropRect::full();
+    }
     return roiSelector_.select(frameWidth, frameHeight, nowMs);
 }
 
@@ -684,9 +688,9 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.faceMeta15 = hasMesh ? meshView.meta : nullptr;
     in.hasIris = hasMesh && meshView.hasIris;
     in.facePresence = primaryTl.presence();
-    in.steadyFace = primaryTl.steadyFace() * (0.15f + 0.85f * shakeGate);
-    in.steadyEye = primaryTl.steadyEye() * shakeGate;
-    in.eyeMakeupKeep = primaryTl.eyeMakeupKeep() * shakeGate;
+    in.steadyFace = primaryTl.steadyFace();
+    in.steadyEye = primaryTl.steadyEye();
+    in.eyeMakeupKeep = primaryTl.eyeMakeupKeep();
     in.denoiseKeep = primaryTl.denoiseKeep() * shakeGate;
 
     const float asyncMaskKeep = affineValid ? (in.denoiseKeep * shakeGate) : 0.0f;
@@ -700,13 +704,13 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.secondaryFace.meta15 = hasSecMesh ? secMeshView.meta : nullptr;
     in.secondaryFace.hasIris = hasSecMesh && secMeshView.hasIris;
     in.secondaryFace.presence = (config_.maxFaces >= 2) ? secondaryTl.presence() : 0.0f;
-    in.secondaryFace.steadyFace = secondaryTl.steadyFace() * (0.15f + 0.85f * shakeGate);
-    in.secondaryFace.steadyEye = secondaryTl.steadyEye() * shakeGate;
-    in.secondaryFace.eyeMakeupKeep = secondaryTl.eyeMakeupKeep() * shakeGate;
+    in.secondaryFace.steadyFace = secondaryTl.steadyFace();
+    in.secondaryFace.steadyEye = secondaryTl.steadyEye();
+    in.secondaryFace.eyeMakeupKeep = secondaryTl.eyeMakeupKeep();
 
     in.hasBody = (bodyState != nullptr);
     in.bodyState7 = bodyState;
-    in.bodyPresence = bodySmoother_.presence() * (0.25f + 0.75f * shakeGate);
+    in.bodyPresence = bodySmoother_.presence();
     in.handShieldCoords = handShield;
     const bool bgMaskNeeded = config_.enabled && !config_.compareOriginal &&
         ((config_.backgroundMode == BackgroundMode::kVirtualImage ||

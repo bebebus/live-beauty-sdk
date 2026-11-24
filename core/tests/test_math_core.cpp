@@ -957,6 +957,145 @@ void testV36MulticlassParsingParticlesAndBundleGestureTriggers() {
         bundle::BundleTriggerRule::kGestureHeart, neutralRx, GestureType::kHeart) == 1.0f);
 }
 
+void testV366FastReacquireAndZeroLagLipNoseEye() {
+    constexpr float kAspect = 9.0f / 16.0f;
+    FaceTimeline tl;
+    tl.setAspect(kAspect);
+
+    std::array<float, FaceMeshFrame::kCoordCount> lmCenter{};
+    makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.40f, 0.0f, 0.0f, 0.0f, lmCenter);
+
+    auto feedAt = [&](int64_t ts, float cx, float cy, float yawRad) {
+        std::array<float, FaceMeshFrame::kCoordCount> lm{};
+        std::array<float, FaceGeometryConstants::kStateSize> st{};
+        FaceMeshFrame frame{};
+        makeCanonicalFace(kAspect, cx, cy, 0.40f, yawRad, 0.0f, 0.0f, lm);
+        frame.landmarks = lm;
+        frame.hasIris = true;
+        EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, frame.meta.data()));
+        EXPECT_TRUE(FaceMeshFrame::fillGeometryState(
+            lm.data(), FaceMeshFrame::kCoordCount, frame.axisX(), frame.axisY(), kAspect, 1.0f, st.data()));
+        tl.add(ts, st.data(), &frame);
+        tl.update(ts);
+        return tl.at(ts);
+    };
+
+    // 1. Move face rapidly toward frame edge, exit for 140ms (< old 300ms gap), then re-center at (0.50, 0.50):
+    //    Frame 0 & Frame 1 of re-entry must snap nose/lips/eye-sockets immediately with zero stale pre-exit drag.
+    for (int f = 0; f < 5; ++f) feedAt(1000 + f * 33, 0.50f, 0.50f, 0.0f);
+    for (int f = 1; f <= 4; ++f) {
+        const int64_t ts = 1132 + f * 33;
+        feedAt(ts, 0.50f + 0.045f * static_cast<float>(f), 0.50f, 0.0f);
+        // Simulate extrapolation offset before leaving frame
+        tl.update(ts + 25);
+        (void)tl.at(ts + 25);
+    }
+    tl.addMiss(1300);
+    tl.update(1300);
+    (void)tl.at(1300);
+    tl.addMiss(1350);
+    tl.update(1350);
+    (void)tl.at(1350);
+    tl.addMiss(1400);
+    tl.update(1400);
+    (void)tl.at(1400);
+
+    // Re-enter centered at t = 1433ms (169ms since last face at 1264ms)
+    const float* stRe0 = feedAt(1433, 0.50f, 0.50f, 0.0f);
+    EXPECT_TRUE(stRe0 != nullptr);
+    FaceTimeline::SmoothedMeshView mvRe0{};
+    EXPECT_TRUE(tl.meshAt(1433, mvRe0));
+    EXPECT_TRUE(tl.presence() >= 0.45f);
+    EXPECT_TRUE(tl.steadyEye() > 0.95f);
+    EXPECT_TRUE(tl.eyeMakeupKeep() > 0.95f);
+    for (int idx : {1, 13, 14, 61, 291, 33, 133, 263, 362}) {
+        EXPECT_NEAR(mvRe0.landmarks[idx * 2], lmCenter[idx * 2], 0.002f);
+        EXPECT_NEAR(mvRe0.landmarks[idx * 2 + 1], lmCenter[idx * 2 + 1], 0.002f);
+    }
+    // uMouth center (state[36..37]) must match canonical mouth center with zero secondary 1Hz One-Euro lag
+    std::array<float, FaceGeometryConstants::kStateSize> stCanon{};
+    FaceMeshFrame canonFrame{};
+    canonFrame.landmarks = lmCenter;
+    EXPECT_TRUE(FaceMeshFrame::fillMeta(lmCenter.data(), FaceMeshFrame::kCoordCount, kAspect, canonFrame.meta.data()));
+    EXPECT_TRUE(FaceMeshFrame::fillGeometryState(
+        lmCenter.data(), FaceMeshFrame::kCoordCount, canonFrame.axisX(), canonFrame.axisY(), kAspect, 1.0f, stCanon.data()));
+    EXPECT_NEAR(stRe0[36], stCanon[36], 0.002f);
+    EXPECT_NEAR(stRe0[37], stCanon[37], 0.002f);
+
+    // Next frame (t = 1466ms, +33ms): full presence recovered
+    (void)feedAt(1466, 0.50f, 0.50f, 0.0f);
+    EXPECT_TRUE(tl.presence() > 0.98f);
+
+    // 2. Continuous in-frame shake / pan & snap-back without missing:
+    //    Within 2 still frames (66ms), nose/lips/eye-sockets & steadyEye/eyeMakeupKeep must catch up cleanly.
+    feedAt(1500, 0.34f, 0.48f, 0.0f);
+    feedAt(1533, 0.28f, 0.46f, 0.0f);
+    feedAt(1566, 0.42f, 0.49f, 0.0f);
+    feedAt(1599, 0.50f, 0.50f, 0.0f);  // stopped at center
+    feedAt(1632, 0.50f, 0.50f, 0.0f);  // +33ms still
+    const float* stStill = feedAt(1665, 0.50f, 0.50f, 0.0f);  // +66ms still
+    EXPECT_TRUE(stStill != nullptr);
+    FaceTimeline::SmoothedMeshView mvStill{};
+    EXPECT_TRUE(tl.meshAt(1665, mvStill));
+    EXPECT_TRUE(tl.steadyEye() > 0.88f);
+    EXPECT_TRUE(tl.eyeMakeupKeep() > 0.85f);
+    for (int idx : {1, 13, 14, 61, 291, 33, 133, 263, 362}) {
+        EXPECT_NEAR(mvStill.landmarks[idx * 2], lmCenter[idx * 2], 0.004f);
+        EXPECT_NEAR(mvStill.landmarks[idx * 2 + 1], lmCenter[idx * 2 + 1], 0.004f);
+    }
+    EXPECT_NEAR(stStill[36], stCanon[36], 0.003f);
+    EXPECT_NEAR(stStill[37], stCanon[37], 0.003f);
+
+    // 3. 3D Head Yaw turn (0.40 rad) -> frontal snap-back (0.0 rad):
+    //    Procrustes 8-DoF basisLag + residual lag catch-up + fast FaceMeshDeformer vis/relax recovery in <= 2 frames.
+    FaceMeshDeformer def;
+    FaceMeshDeformer::Params params{};
+    params.eyeEnlarge = 0.70f;
+    params.noseSlim = 0.75f;
+    params.mouthSize = -0.50f;
+    params.mouthSmile = 0.65f;
+
+    FaceMeshDeformer defRef;
+    EXPECT_TRUE(defRef.deform(
+        lmCenter.data(), kAspect, canonFrame.axisX(), canonFrame.axisY(),
+        canonFrame.faceWidth(), canonFrame.faceHeight(),
+        canonFrame.leftWeight(), canonFrame.rightWeight(), canonFrame.yawWeight(),
+        1.0f, 1.0f, 1.0f, params, 1000));
+    const float refNoseSlimDx = std::fabs(defRef.warpedLandmarks()[48 * 2] - defRef.warpedLandmarks()[278 * 2]);
+
+    for (int f = 1; f <= 4; ++f) {
+        const int64_t ts = 1700 + f * 33;
+        feedAt(ts, 0.50f, 0.50f, 0.42f);
+        FaceTimeline::SmoothedMeshView mvYaw{};
+        EXPECT_TRUE(tl.meshAt(ts, mvYaw));
+        EXPECT_TRUE(def.deform(
+            mvYaw.landmarks, kAspect, mvYaw.axisX(), mvYaw.axisY(),
+            mvYaw.faceWidth(), mvYaw.faceHeight(),
+            mvYaw.leftWeight(), mvYaw.rightWeight(), mvYaw.yawWeight(),
+            tl.presence(), tl.steadyFace(), tl.steadyEye(), params, ts));
+    }
+    // Snap back to frontal and hold for 2 frames (66ms)
+    for (int f = 1; f <= 3; ++f) {
+        const int64_t ts = 1832 + f * 33;
+        feedAt(ts, 0.50f, 0.50f, 0.0f);
+        FaceTimeline::SmoothedMeshView mvFront{};
+        EXPECT_TRUE(tl.meshAt(ts, mvFront));
+        EXPECT_TRUE(def.deform(
+            mvFront.landmarks, kAspect, mvFront.axisX(), mvFront.axisY(),
+            mvFront.faceWidth(), mvFront.faceHeight(),
+            mvFront.leftWeight(), mvFront.rightWeight(), mvFront.yawWeight(),
+            tl.presence(), tl.steadyFace(), tl.steadyEye(), params, ts));
+        if (f == 3) {
+            for (int idx : {1, 13, 14, 61, 291, 33, 133, 263, 362}) {
+                EXPECT_NEAR(mvFront.landmarks[idx * 2], lmCenter[idx * 2], 0.004f);
+                EXPECT_NEAR(mvFront.landmarks[idx * 2 + 1], lmCenter[idx * 2 + 1], 0.004f);
+            }
+            const float gotNoseSlimDx = std::fabs(def.warpedLandmarks()[48 * 2] - def.warpedLandmarks()[278 * 2]);
+            EXPECT_NEAR(gotNoseSlimDx, refNoseSlimDx, 0.003f);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -976,6 +1115,7 @@ int main() {
     testV35Curved3dMeshesAndEffectBundleParser();
     testCodeReviewRegressionGuards();
     testV36MulticlassParsingParticlesAndBundleGestureTriggers();
+    testV366FastReacquireAndZeroLagLipNoseEye();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

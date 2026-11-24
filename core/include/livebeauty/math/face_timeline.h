@@ -12,12 +12,12 @@ class FaceTimeline {
 public:
     static constexpr int kPose6Size = 6;
     static constexpr int kStateSize = FaceGeometryConstants::kStateSize;
-    static constexpr int64_t kMaxGapMs = 300;
+    static constexpr int64_t kMaxGapMs = 220;
     static constexpr float kExtrapolateIntervals = 1.25f;
     static constexpr float kExtrapolateMinMs = 40.0f;
     static constexpr float kExtrapolateMaxMs = 100.0f;
     static constexpr float kExtrapolateDamp = 0.85f;
-    static constexpr float kTInMs = 150.0f;
+    static constexpr float kTInMs = 50.0f;
     static constexpr float kMissDebounceMinMs = 33.0f;
     static constexpr float kMissDebounceIntervals = 1.2f;
     static constexpr float kExitRampMs = 40.0f;

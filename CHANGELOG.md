@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.6] - 2026-11-25
+
+### Fixed
+- **Post-Shake & Face Re-Centering Lip, Nose & Eye-Socket Zero-Lag Recovery (`FaceTimeline`, `FaceMeshFilter`, `FaceMeshDeformer`, `LiveBeautyEngine`)**:
+  - Reset stale pre-exit extrapolation holds (`holdX_`, `holdY_`) and motion suppression states (`steadyEye_`, `steadyFace_`, `eyeMakeupKeep_`) across `clearHistory()`, `dropSamples()`, and post-exit re-entry (`exitedDuringMiss`), derived 41-D `states_` (`uMouth` bare-lip lift & `uEyeMask` socket shield) directly from filtered 478-pt `meshCoords_` with zero secondary One-Euro lag, and reduced fade-in/settle ramps (`kTInMs = 50ms`, `steadyEye` `inMs = 50ms`, `kEyeMakeupInMs = 65ms`).
+  - Added full 8-DoF Procrustes `basisLag` + per-region (`nose`, `eye sockets`, `lips`) non-rigid residual lag catch-up and asymmetric deceleration cutoffs (`kPoseDcutDown = 16Hz`, `kResDcutDown = 16Hz`, `kJumpT = 0.28`) in `FaceMeshFilter`, plus faster `FaceMeshDeformer` visibility/relaxation recovery (`kVisTauUpMs = 38ms`, `kRelaxTauUpMs = 38ms`), snapping lip, nose, and eye-socket landmarks within `< 66ms` (`1–2` frames) after camera shake, head yaw turns, or face re-centering.
+  - Decoupled live landmark-tracked `in.steadyEye`, `in.steadyFace`, and `in.eyeMakeupKeep` from IMU gyroscope `setCameraShaking(true)` while preserving full temporal anti-ghosting (`kPassDenoise`, `kPassMatteRefine`, `asyncMaskKeep`), and forced immediate full-frame `selectFaceRoi` fallback during camera shake or rapid face motion.
+
 ## [3.6.5] - 2026-11-25
 
 ### Fixed

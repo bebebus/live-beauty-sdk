@@ -904,14 +904,51 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     //    - Large >10% face displacement since mask capture (exceeding HairMaskTuning::kAffineMaxShift) suppresses stale mask instead of snapping to identity!
     cfg.smoothing = 0.65f;
     cfg.matteTemporal = 0.70f;
+    cfg.lipstick = 0.70f;
+    cfg.noseSlim = 0.60f;
+    cfg.eyeEnlarge = 0.60f;
+    PipelineAssets lipAssets = assets;
+    lipAssets.contourHighlightAtlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+    engine.setAssets(lipAssets);
     engine.setConfig(cfg);
+    // Activate far-field ROI crop first, then verify setCameraShaking(true) forces full-frame ROI immediately
+    std::array<float, FaceMeshFrame::kCoordCount> farMp{};
+    {
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = 0.22f / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            farMp[i * 2] = 0.50f + xyz[i * 3] * scale;
+            farMp[i * 2 + 1] = 1.0f - ((0.50f / aspect) + xyz[i * 3 + 1] * scale) * aspect;
+        }
+        for (int i = 468; i < 478; ++i) {
+            farMp[i * 2] = 0.50f;
+            farMp[i * 2 + 1] = 0.50f;
+        }
+    }
+    for (int k = 0; k < 4; ++k) {
+        engine.submitFaceLandmarks(1215 + k * 20, farMp.data(), 478, 720, 1280, 1215 + k * 20);
+    }
+    EXPECT_TRUE(!engine.selectFaceRoi(720, 1280, 1278).isFullFrame());
+
     engine.setCameraShaking(true);
+    EXPECT_TRUE(engine.selectFaceRoi(720, 1280, 1280).isFullFrame());
+    dev.calls.clear();
     engine.processFrame(inputTex, 720, 1280, 1283, 1283, kInvalidTexture, 0.05f, 1.0f);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassDenoise) == 0);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) == 0);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
     // v3.6.3: Fallback autoParsePersonTex_ MUST remain bound during camera shake so virtual background never flashes off!
     EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);
+    // v3.6.6: Gyro shake alone must NOT black out live-tracked lip/nose/eye beauty (kMakeupLip & kMeshWarp stay active)!
+    bool sawShakeLip = false;
+    bool sawShakeWarp = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kMakeupLip) sawShakeLip = true;
+        if (c.shader == ShaderId::kMeshWarp) sawShakeWarp = true;
+    }
+    EXPECT_TRUE(sawShakeLip);
+    EXPECT_TRUE(sawShakeWarp);
     engine.setCameraShaking(false);
 
     // Shift face by +0.25 X (> kAffineMaxShift = 0.10) while multiclass mask stays at t=1200ms (x=0.50):

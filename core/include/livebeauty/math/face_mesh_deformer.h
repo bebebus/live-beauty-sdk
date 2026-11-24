@@ -53,7 +53,7 @@ public:
     static constexpr float kCranialOuterPad = 0.185f;
     static constexpr float kCanonFhOverFw = 1.153f;
     static constexpr float kVisTauDownMs = 40.0f;
-    static constexpr float kVisTauUpMs = 120.0f;
+    static constexpr float kVisTauUpMs = 38.0f;
     static constexpr int kRelaxIter = 8;
     static constexpr float kRelaxHFloor = 0.65f;
     static constexpr float kRelaxR0 = 0.08f;
@@ -64,8 +64,8 @@ public:
     static constexpr float kSafetyR0 = 0.0f;
     static constexpr float kSafetyR1 = 0.04f;
     static constexpr float kSafetyDepth = 0.5f;
-    static constexpr float kRelaxTauUpMs = 120.0f;
-    static constexpr int64_t kTemporalResetMs = 200;
+    static constexpr float kRelaxTauUpMs = 38.0f;
+    static constexpr int64_t kTemporalResetMs = 150;
 
     FaceMeshDeformer() = default;
 
