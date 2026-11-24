@@ -249,14 +249,22 @@ void testHairProtectionVirtualBgStickersAndTelemetry() {
     bool sawVirtualMix = false;
     bool sawHairAlpha = false;
     bool sawSticker = false;
+    float vbgLo = 0.0f, vbgHi = 0.0f;
     for (const auto& c : dev.calls) {
         if (c.shader == ShaderId::kBgHairMerge) sawHairMerge = true;
-        if (c.shader == ShaderId::kBgVirtualMix) sawVirtualMix = true;
+        if (c.shader == ShaderId::kBgVirtualMix) {
+            sawVirtualMix = true;
+            vbgLo = c.uniforms.v[0].y;
+            vbgHi = c.uniforms.v[0].z;
+        }
         if (c.shader == ShaderId::kHairAlpha) sawHairAlpha = true;
         if (c.shader == ShaderId::kStickerQuad) sawSticker = true;
     }
-    EXPECT_TRUE(sawHairMerge);
+    // v3.6.4: kVirtualImage skips async kBgHairMerge so 5-12Hz hair masks never cast lagging dark shadows,
+    // while kHairAlpha still protects hair from skin whitening/smoothing and kBgVirtualMix uses [0.42, 0.72].
+    EXPECT_TRUE(!sawHairMerge);
     EXPECT_TRUE(sawVirtualMix);
+    EXPECT_TRUE(std::fabs(vbgLo - 0.42f) < 1e-4f && std::fabs(vbgHi - 0.72f) < 1e-4f);
     EXPECT_TRUE(sawHairAlpha);
     EXPECT_TRUE(sawSticker);
 
@@ -267,6 +275,18 @@ void testHairProtectionVirtualBgStickersAndTelemetry() {
     EXPECT_TRUE((st.activePassesMask & kPassBg) != 0);
     EXPECT_TRUE((st.activePassesMask & kPassHairAlpha) != 0);
     EXPECT_TRUE((st.activePassesMask & kPassSticker) != 0);
+
+    // Switching to BackgroundMode::kBlur still activates kBgHairMerge for soft bokeh flyaway preservation
+    cfg.backgroundMode = BackgroundMode::kBlur;
+    cfg.backgroundBlur = 0.75f;
+    engine.setConfig(cfg);
+    dev.calls.clear();
+    engine.processFrame(inputTex, 720, 1280, 2430, 2430, personMask, 0.75f, 1.0f, hairMask, 2430);
+    bool sawBlurHairMerge = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kBgHairMerge) sawBlurHairMerge = true;
+    }
+    EXPECT_TRUE(sawBlurHairMerge);
 }
 
 void testHairWeightedGuidedDualFaceAndFrameDelayRing() {

@@ -821,10 +821,12 @@ TextureId RenderPipeline::renderTemporalMatte(TextureId rawMaskTex, TextureId cu
         tb.bind(1, curRgbSmall);
         tb.bind(2, prevMask);
         tb.bind(3, prevRgb);
-        const float temporalWeight = detail::clampf(matteTemporal * 0.68f, 0.0f, 0.68f);
+        const float temporalWeight = matteTemporal > 1e-4f
+            ? detail::clampf(0.30f + matteTemporal * 0.52f, 0.0f, 0.82f)
+            : 0.0f;
         ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_),
                 temporalWeight, matteHistoryValid_ ? 1.0f : 0.0f);
-        ub.push(0.10f, 0.015f, 0.065f, 0.0f);
+        ub.push(0.075f, 0.020f, 0.070f, 0.0f);
         device_.beginPass(rtMatte_[nextParity], bgW_, bgH_, false);
         device_.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
         device_.endPass();
@@ -1134,9 +1136,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     } else if ((wantVirtualImage || wantBgBlur) && in.personMaskTex != kInvalidTexture) {
         lastActivePassesMask_ |= kPassBg;
 
-        // 1a. Optional Hair-Person Mask Merge (protects fine flyaway hair strands during bokeh/virtual replacement)
+        // 1a. Optional Hair-Person Mask Merge (soft bokeh only; skipped during crisp virtual bg replacement
+        //     so asynchronous 5-12Hz hair masks never cast lagging dark shadow blobs onto the virtual scene)
         TextureId effectiveMaskTex = in.personMaskTex;
-        if (in.hairMaskTex != kInvalidTexture && in.hairBgShown > 1e-4f) {
+        if (!wantVirtualImage && in.hairMaskTex != kInvalidTexture && in.hairBgShown > 1e-4f) {
             RenderState st{};
             TextureBindings tb{};
             UniformBlock ub{};
@@ -1206,9 +1209,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(0, currentTex);
             tb.bind(1, bgSource);
             tb.bind(2, effectiveMaskTex);
-            // Solid foreground threshold 0.56 ensures interior clothes/shoulders/arms never turn semi-transparent,
-            // while anatomical primary + secondary face/neck shields prevent virtual bg from ever occluding people.
-            ub.push(vbgStrength, 0.14f, 0.56f, bgFacePresence);
+            // Calibrated sigmoid mask gate [0.42, 0.72] suppresses sub-threshold room/shadow ripples to 0%,
+            // while tight face-oval + throat shields prevent virtual bg from ever occluding tracked faces.
+            ub.push(vbgStrength, 0.42f, 0.72f, bgFacePresence);
             ub.push(uvScaleX, uvScaleY, uvOffX, uvOffY);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, bgSecPresence);
@@ -1224,7 +1227,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             UniformBlock ub{};
             tb.bind(0, currentTex);
             tb.bind(1, effectiveMaskTex);
-            ub.push(bgBlur, 0.14f, 0.62f, 0.0f);
+            ub.push(bgBlur, 0.38f, 0.68f, 0.0f);
             device_.beginPass(rtBg_[0], bgW_, bgH_, false);
             device_.drawFullScreenQuad(ShaderId::kBgPremask, st, tb, ub);
             device_.endPass();
@@ -1251,7 +1254,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(0, currentTex);
             tb.bind(1, device_.textureOf(rtBg_[0]));
             tb.bind(2, effectiveMaskTex);
-            ub.push(bgBlur, 0.14f, 0.62f, in.hasFaceState ? 0.65f : 0.0f);
+            ub.push(bgBlur, 0.38f, 0.68f, in.hasFaceState ? 0.65f : 0.0f);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, bgFacePresence);
             device_.beginPass(rtBgOut_, in.width, in.height, false);

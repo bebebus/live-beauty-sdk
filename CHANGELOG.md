@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.4] - 2026-11-24
+
+### Fixed
+- **Virtual Background Shadow-Flash Elimination & RGB-Verified Temporal Matting (`RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Restored calibrated sigmoid foreground thresholds (`[0.42, 0.72]` in `kBgVirtualMix` and `[0.38, 0.68]` in `kBgPremask`/`kBgMix`) and removed wide-area `headHalo`/`torsoHalo` `weakPerson` probability boosters from `personAnchorShield`, eliminating dark real-room shadow patches flashing across walls/curtains while preserving tight interior face-oval (`rFace <= 1.0`) + throat anti-occlusion shields.
+  - Replaced asymmetric peak-holding `expand * 0.90` temporal matting in `kMatteRefine` / `fs_matte_refine` with 3-point neighborhood RGB-change-verified temporal damping (`temporalWeight = 0.30 + 0.52 * matteTemporal`), suppressing 1-frame neural confidence spikes on static backgrounds to `0/255` shadow bleed while snapping moving silhouettes in 1 frame.
+  - Restricted `kBgHairMerge` to soft bokeh (`BackgroundMode::kBlur`) so asynchronous `5–12Hz` hair masks never inject lagging dark shadow silhouettes onto crisp virtual background images.
+
 ## [3.6.3] - 2026-11-24
 
 ### Fixed

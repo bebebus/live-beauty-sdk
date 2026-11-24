@@ -1109,19 +1109,31 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
         EXPECT_TRUE(std::abs(int(laggedHair.r) - 28) <= 1 && std::abs(int(laggedHair.b) - 27) <= 1);
     }
 
-    // 3. v3.6.3 Virtual Background Anti-Occlusion Shield:
-    //    Even when personMask == 0 (complete segmentation hole!) across tracked primary/secondary face & neck,
-    //    fs_bg_virtual_mix MUST keep the person solid while still cleanly replacing adjacent background!
+    // 3. v3.6.4 Virtual Background Anti-Occlusion Shield + Zero Shadow Bleed on Sub-Threshold Room Noise:
+    //    - Tracked face & throat remain solid even when personMask == 0;
+    //    - Sub-threshold sigmoid ripples (96/255 = 0.376) right next to head/torso produce EXACT 0/255 room shadow bleed!
     {
         constexpr int kW = 64, kH = 64;
-        // Camera: warm person foreground (215, 165, 140), Virtual BG: vivid cyan-blue (20, 110, 240)
+        // Camera: dark room/person foreground (35, 30, 28) vs warm person test? Use distinct camera RGB (215, 165, 140)
+        // and vivid cyan-blue Virtual BG (20, 110, 240) so any bleed immediately shifts R up and B down.
         const TextureId camTex = makeSolidTex(dev, kW, kH, 215, 165, 140, 255);
         const TextureId vbgTex = makeSolidTex(dev, kW, kH, 20, 110, 240, 255);
-        // Zero personMask everywhere EXCEPT bottom-left shoulder patch with moderate confidence 150 (~0.59)
         std::vector<uint8_t> maskPx(kW * kH, 0);
+        // Bottom-left clothing patch with solid confidence 190 (~0.745 > 0.72)
         for (int y = 44; y < 60; ++y) {
             for (int x = 4; x < 20; ++x) {
-                maskPx[y * kW + x] = 150;
+                maskPx[y * kW + x] = 190;
+            }
+        }
+        // Sub-threshold room/shadow ripple 96/255 (~0.376 < 0.42) right next to ear/head and beside neck/shoulder!
+        for (int y = 18; y < 54; ++y) {
+            for (int x = 44; x < 62; ++x) {
+                maskPx[y * kW + x] = 96;
+            }
+        }
+        for (int y = 36; y < 54; ++y) {
+            for (int x = 38; x < 44; ++x) {
+                maskPx[y * kW + x] = 96;
             }
         }
         const TextureId maskTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, maskPx.data());
@@ -1134,7 +1146,7 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
         tb.bind(2, maskTex);
         UniformBlock ub{};
         // Primary face centered at (0.50, 0.62) in bottom-up UV (top-down row ~24), rx=0.14, ry=0.16
-        ub.push(1.0f, 0.14f, 0.56f, 1.0f);  // strength=1, lo=0.14, hi=0.56, primaryPresence=1
+        ub.push(1.0f, 0.42f, 0.72f, 1.0f);  // strength=1, lo=0.42, hi=0.72, primaryPresence=1
         ub.push(1.0f, 1.0f, 0.0f, 0.0f);
         ub.push(0.50f, 0.62f, 0.14f, 0.16f);
         ub.push(1.0f, 0.0f, 1.0f, 0.0f);    // axis=(1,0), aspect=1, secPresence=0
@@ -1146,24 +1158,95 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
 
         std::vector<uint8_t> out(kW * kH * 4, 0);
         EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(outRt), out.data(), kW, kH));
-        // Face center (x=32, top-down y=24 -> gl y = 1 - 24/64 = 0.625): protected even with mask=0!
         const int facePx = (24 * kW + 32) * 4;
-        // Anatomical neck directly below chin (x=32, top-down y=37 -> gl y = 0.42, down ~ 1.25*ry): protected!
         const int neckPx = (37 * kW + 32) * 4;
-        // Moderate-confidence clothing patch (x=10, y=50, mask=150/255=0.588 > 0.56): 100% solid foreground!
         const int clothPx = (50 * kW + 10) * 4;
-        // Background next to ear/neck (x=56, y=24, mask=0): 100% replaced by cyan-blue virtual background!
-        const int wallPx = (24 * kW + 56) * 4;
+        const int noisyHeadWallPx = (24 * kW + 50) * 4;
+        const int noisyShoulderWallPx = (42 * kW + 40) * 4;
 
         EXPECT_TRUE(out[facePx + 0] >= 210 && out[facePx + 2] <= 145);
         EXPECT_TRUE(out[neckPx + 0] >= 200 && out[neckPx + 2] <= 155);
         EXPECT_TRUE(std::abs(int(out[clothPx + 0]) - 215) <= 2 && std::abs(int(out[clothPx + 2]) - 140) <= 2);
-        EXPECT_TRUE(out[wallPx + 2] >= 235 && out[wallPx + 0] <= 25);
+        // Sub-threshold noise (0.376) right next to head and shoulder MUST yield exact 0/255 camera bleed!
+        EXPECT_TRUE(std::abs(int(out[noisyHeadWallPx + 0]) - 20) <= 1 && std::abs(int(out[noisyHeadWallPx + 2]) - 240) <= 1);
+        EXPECT_TRUE(std::abs(int(out[noisyShoulderWallPx + 0]) - 20) <= 1 && std::abs(int(out[noisyShoulderWallPx + 2]) - 240) <= 1);
 
         dev.destroyRenderTarget(outRt);
         dev.destroyTexture(maskTex);
         dev.destroyTexture(vbgTex);
         dev.destroyTexture(camTex);
+    }
+
+    // 4. v3.6.4 Temporal Matte Anti-Shadow-Flash Gate (kMatteRefine -> kBgVirtualMix):
+    //    - Static dark wall RGB (32, 30, 28) suffering a 1-frame neural spike (10 -> 155/255 = 0.608)
+    //      MUST be damped below 0.42 so virtual background (20, 110, 240) receives exact 0/255 dark shadow flash;
+    //    - Real moving foreground RGB (215, 165, 140) with mask 220 snaps to 100% solid foreground in 1 frame!
+    {
+        constexpr int kSz = 16;
+        const TextureId darkWallRgb = makeSolidTex(dev, kSz, kSz, 32, 30, 28, 255);
+        const TextureId movingPersonRgb = makeSolidTex(dev, kSz, kSz, 215, 165, 140, 255);
+        const TextureId vbgTex = makeSolidTex(dev, kSz, kSz, 20, 110, 240, 255);
+        std::vector<uint8_t> prevMaskPx(kSz * kSz, 10);
+        std::vector<uint8_t> spikeMaskPx(kSz * kSz, 155);
+        std::vector<uint8_t> solidMaskPx(kSz * kSz, 220);
+        const TextureId prevMaskTex = dev.createTexture2D(kSz, kSz, TextureFormat::kR8, prevMaskPx.data());
+        const TextureId spikeMaskTex = dev.createTexture2D(kSz, kSz, TextureFormat::kR8, spikeMaskPx.data());
+        const TextureId solidMaskTex = dev.createTexture2D(kSz, kSz, TextureFormat::kR8, solidMaskPx.data());
+        const RenderTargetId matteRt = dev.createRenderTarget(kSz, kSz, TextureFormat::kR8);
+        const RenderTargetId mixRt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+
+        auto evalMatteThenMix = [&](TextureId curMask, TextureId curRgb, TextureId prevRgb) -> Rgba {
+            RenderState st{};
+            TextureBindings tb{};
+            tb.bind(0, curMask);
+            tb.bind(1, curRgb);
+            tb.bind(2, prevMaskTex);
+            tb.bind(3, prevRgb);
+            UniformBlock ub{};
+            ub.push(1.0f / kSz, 1.0f / kSz, 0.612f, 1.0f);  // default matteTemporal=0.60 -> 0.612
+            ub.push(0.075f, 0.020f, 0.070f, 0.0f);
+            dev.beginPass(matteRt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
+            dev.endPass();
+
+            tb.clear(); ub.clear();
+            tb.bind(0, curRgb);
+            tb.bind(1, vbgTex);
+            tb.bind(2, dev.textureOf(matteRt));
+            ub.push(1.0f, 0.42f, 0.72f, 0.0f);
+            ub.push(1.0f, 1.0f, 0.0f, 0.0f);
+            ub.push(0.5f, 0.5f, 0.1f, 0.1f);
+            ub.push(1.0f, 0.0f, 1.0f, 0.0f);
+            ub.push(0.5f, 0.5f, 0.1f, 0.1f);
+            ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+            dev.beginPass(mixRt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kBgVirtualMix, st, tb, ub);
+            dev.endPass();
+
+            std::vector<uint8_t> out(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(mixRt), out.data(), kSz, kSz));
+            const int c = ((kSz / 2) * kSz + (kSz / 2)) * 4;
+            return {out[c], out[c + 1], out[c + 2], out[c + 3]};
+        };
+
+        const Rgba staticWallSpikeOut = evalMatteThenMix(spikeMaskTex, darkWallRgb, darkWallRgb);
+        EXPECT_TRUE(std::abs(int(staticWallSpikeOut.r) - 20) <= 1 &&
+                    std::abs(int(staticWallSpikeOut.g) - 110) <= 1 &&
+                    std::abs(int(staticWallSpikeOut.b) - 240) <= 1);
+
+        const Rgba movingPersonOut = evalMatteThenMix(solidMaskTex, movingPersonRgb, darkWallRgb);
+        EXPECT_TRUE(std::abs(int(movingPersonOut.r) - 215) <= 2 &&
+                    std::abs(int(movingPersonOut.g) - 165) <= 2 &&
+                    std::abs(int(movingPersonOut.b) - 140) <= 2);
+
+        dev.destroyRenderTarget(mixRt);
+        dev.destroyRenderTarget(matteRt);
+        dev.destroyTexture(solidMaskTex);
+        dev.destroyTexture(spikeMaskTex);
+        dev.destroyTexture(prevMaskTex);
+        dev.destroyTexture(vbgTex);
+        dev.destroyTexture(movingPersonRgb);
+        dev.destroyTexture(darkWallRgb);
     }
 }
 

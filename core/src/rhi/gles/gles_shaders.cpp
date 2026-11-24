@@ -916,23 +916,17 @@ uniform vec4 uU2;
 uniform vec4 uU3;
 uniform vec4 uU4;
 uniform vec4 uU5;
-float personAnchorShield(vec2 uv, vec4 o, vec2 u, float aspect, float presence, float person) {
+float personAnchorShield(vec2 uv, vec4 o, vec2 u, float aspect, float presence) {
     if (presence <= 0.001) return 0.0;
     vec2 d = vec2(uv.x - o.x, (uv.y - o.y) / aspect);
     float a = clamp(dot(d, u) / max(o.z, 0.0001), -6.0, 6.0);
     float b = clamp(dot(d, vec2(-u.y, u.x)) / max(o.w, 0.0001), -6.0, 6.0);
     float rFace = sqrt(a * a + b * b);
-    float faceCore = (1.0 - smoothstep(0.84, 1.08, rFace)) * 0.99;
+    float faceCore = (1.0 - smoothstep(0.80, 1.00, rFace)) * 0.99;
     float down = -b;
-    float neckT = clamp((down - 0.68) / 1.25, 0.0, 1.0);
-    float neckHalfW = mix(0.54, 1.06, neckT);
-    float neckBand = smoothstep(0.58, 0.88, down) * (1.0 - smoothstep(1.55, 2.08, down));
-    float neckCore = neckBand * (1.0 - smoothstep(0.70, 1.02, abs(a) / neckHalfW)) * 0.94;
-    float headHalo = 1.0 - smoothstep(1.65, 2.55, rFace);
-    float torsoHalo = smoothstep(0.75, 1.20, down) * (1.0 - smoothstep(3.20, 4.30, down)) *
-                      (1.0 - smoothstep(1.65, 2.45, abs(a)));
-    float weakPerson = smoothstep(0.06, 0.32, person) * max(headHalo, torsoHalo) * 0.90;
-    return clamp(max(max(faceCore, neckCore), weakPerson) * presence, 0.0, 1.0);
+    float neckBand = smoothstep(0.60, 0.85, down) * (1.0 - smoothstep(1.35, 1.62, down));
+    float neckCore = neckBand * (1.0 - smoothstep(0.46, 0.68, abs(a))) * 0.94;
+    return clamp(max(faceCore, neckCore) * presence, 0.0, 1.0);
 }
 void main() {
     vec4 color = texture2D(uTex0, vTextureCoord);
@@ -940,11 +934,11 @@ void main() {
     vec3 vbg = texture2D(uTex1, bgUv).rgb;
     float person = texture2D(uTex2, vec2(vTextureCoord.x, 1.0 - vTextureCoord.y)).r;
     float asp = max(uU3.z, 0.0001);
-    float shield0 = personAnchorShield(vTextureCoord, uU2, uU3.xy, asp, clamp(uU0.w, 0.0, 1.0), person);
-    float shield1 = personAnchorShield(vTextureCoord, uU4, uU5.xy, asp, clamp(uU3.w, 0.0, 1.0), person);
+    float shield0 = personAnchorShield(vTextureCoord, uU2, uU3.xy, asp, clamp(uU0.w, 0.0, 1.0));
+    float shield1 = personAnchorShield(vTextureCoord, uU4, uU5.xy, asp, clamp(uU3.w, 0.0, 1.0));
     float keep = clamp(max(smoothstep(uU0.y, uU0.z, person), max(shield0, shield1)), 0.0, 1.0);
-    // Subtle Light Wrap strictly on outer translucent boundary (keep in 0.06..0.90; 0% tint on solid foreground)
-    vec2 wrapD = vec2(0.024, 0.024);
+    // Subtle Light Wrap strictly on outer translucent boundary (keep in 0.15..0.88; 0% tint on bg or solid fg)
+    vec2 wrapD = vec2(0.020, 0.020);
     vec3 vbgAmb = 0.20 * (
         vbg +
         texture2D(uTex1, clamp(bgUv + vec2( wrapD.x, 0.0), 0.0, 1.0)).rgb +
@@ -952,9 +946,9 @@ void main() {
         texture2D(uTex1, clamp(bgUv + vec2(0.0,  wrapD.y), 0.0, 1.0)).rgb +
         texture2D(uTex1, clamp(bgUv + vec2(0.0, -wrapD.y), 0.0, 1.0)).rgb
     );
-    float edgeBand = smoothstep(0.06, 0.42, keep) * (1.0 - smoothstep(0.54, 0.90, keep));
+    float edgeBand = smoothstep(0.15, 0.48, keep) * (1.0 - smoothstep(0.55, 0.88, keep));
     vec3 rimGlow = max(color.rgb, vbgAmb * 0.90);
-    vec3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.16), edgeBand * 0.20);
+    vec3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.14), edgeBand * 0.14);
     gl_FragColor = vec4(mix(color.rgb, mix(vbg, fgWrapped, keep), uU0.x), color.a);
 }
 )";
@@ -1017,11 +1011,15 @@ void main() {
     if (uU0.w > 0.5 && uU0.z > 0.001) {
         float pMask = texture2D(uTex2, muv).r;
         vec3 pRgb = texture2D(uTex3, ruv).rgb;
-        vec3 dRgb = abs(cRgb - pRgb);
-        float rgbDiff = max(max(dRgb.r, dRgb.g), dRgb.b);
-        float expand = max(guidedMask - pMask, 0.0);
-        float shrink = max(pMask - guidedMask, 0.0);
-        float motion = max(rgbDiff, max(expand * 0.90, shrink * 0.14));
+        vec3 pRgb0 = texture2D(uTex3, clamp(ruv + vec2(o0.x, -o0.y), 0.0, 1.0)).rgb;
+        vec3 pRgb3 = texture2D(uTex3, clamp(ruv + vec2(o3.x, -o3.y), 0.0, 1.0)).rgb;
+        vec3 dC = abs(cRgb - pRgb);
+        vec3 d0 = abs((dc0 + cRgb) - pRgb0);
+        vec3 d3 = abs((dc3 + cRgb) - pRgb3);
+        float rgbDiff = max(max(dC.r, max(dC.g, dC.b)),
+                        0.75 * max(max(d0.r, max(d0.g, d0.b)), max(d3.r, max(d3.g, d3.b))));
+        float shrinkClear = max((pMask - guidedMask) - 0.45, 0.0) * 0.12;
+        float motion = max(rgbDiff, shrinkClear);
         float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion));
         outMask = mix(guidedMask, pMask, keep);
     }

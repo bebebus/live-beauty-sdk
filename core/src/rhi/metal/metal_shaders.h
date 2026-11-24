@@ -911,23 +911,17 @@ fragment float4 fs_bg_hair_merge(QuadOut in [[stage_in]],
     return float4(merged, merged, merged, 1.0f);
 }
 
-inline float personAnchorShieldMtl(float2 uv, float4 o, float2 u, float aspect, float presence, float person) {
+inline float personAnchorShieldMtl(float2 uv, float4 o, float2 u, float aspect, float presence) {
     if (presence <= 0.001f) return 0.0f;
     float2 d = float2(uv.x - o.x, (uv.y - o.y) / aspect);
     float a = clamp(dot(d, u) / max(o.z, 0.0001f), -6.0f, 6.0f);
     float b = clamp(dot(d, float2(-u.y, u.x)) / max(o.w, 0.0001f), -6.0f, 6.0f);
     float rFace = sqrt(a * a + b * b);
-    float faceCore = (1.0f - smoothstep(0.84f, 1.08f, rFace)) * 0.99f;
+    float faceCore = (1.0f - smoothstep(0.80f, 1.00f, rFace)) * 0.99f;
     float down = -b;
-    float neckT = clamp((down - 0.68f) / 1.25f, 0.0f, 1.0f);
-    float neckHalfW = mix(0.54f, 1.06f, neckT);
-    float neckBand = smoothstep(0.58f, 0.88f, down) * (1.0f - smoothstep(1.55f, 2.08f, down));
-    float neckCore = neckBand * (1.0f - smoothstep(0.70f, 1.02f, abs(a) / neckHalfW)) * 0.94f;
-    float headHalo = 1.0f - smoothstep(1.65f, 2.55f, rFace);
-    float torsoHalo = smoothstep(0.75f, 1.20f, down) * (1.0f - smoothstep(3.20f, 4.30f, down)) *
-                      (1.0f - smoothstep(1.65f, 2.45f, abs(a)));
-    float weakPerson = smoothstep(0.06f, 0.32f, person) * max(headHalo, torsoHalo) * 0.90f;
-    return clamp(max(max(faceCore, neckCore), weakPerson) * presence, 0.0f, 1.0f);
+    float neckBand = smoothstep(0.60f, 0.85f, down) * (1.0f - smoothstep(1.35f, 1.62f, down));
+    float neckCore = neckBand * (1.0f - smoothstep(0.46f, 0.68f, abs(a))) * 0.94f;
+    return clamp(max(faceCore, neckCore) * presence, 0.0f, 1.0f);
 }
 
 fragment float4 fs_bg_virtual_mix(QuadOut in [[stage_in]],
@@ -941,10 +935,10 @@ fragment float4 fs_bg_virtual_mix(QuadOut in [[stage_in]],
     float3 vbg = tex1.sample(kLinearClamp, bgUv).rgb;
     float person = tex2.sample(kLinearClamp, muv).r;
     float asp = max(uni.u[3].z, 0.0001f);
-    float shield0 = personAnchorShieldMtl(in.uv, uni.u[2], uni.u[3].xy, asp, clamp(uni.u[0].w, 0.0f, 1.0f), person);
-    float shield1 = personAnchorShieldMtl(in.uv, uni.u[4], uni.u[5].xy, asp, clamp(uni.u[3].w, 0.0f, 1.0f), person);
+    float shield0 = personAnchorShieldMtl(in.uv, uni.u[2], uni.u[3].xy, asp, clamp(uni.u[0].w, 0.0f, 1.0f));
+    float shield1 = personAnchorShieldMtl(in.uv, uni.u[4], uni.u[5].xy, asp, clamp(uni.u[3].w, 0.0f, 1.0f));
     float keep = clamp(max(smoothstep(uni.u[0].y, uni.u[0].z, person), max(shield0, shield1)), 0.0f, 1.0f);
-    float2 wrapD = float2(0.024f, 0.024f);
+    float2 wrapD = float2(0.020f, 0.020f);
     float3 vbgAmb = 0.20f * (
         vbg +
         tex1.sample(kLinearClamp, clamp(bgUv + float2( wrapD.x, 0.0f), 0.0f, 1.0f)).rgb +
@@ -952,9 +946,9 @@ fragment float4 fs_bg_virtual_mix(QuadOut in [[stage_in]],
         tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f,  wrapD.y), 0.0f, 1.0f)).rgb +
         tex1.sample(kLinearClamp, clamp(bgUv + float2(0.0f, -wrapD.y), 0.0f, 1.0f)).rgb
     );
-    float edgeBand = smoothstep(0.06f, 0.42f, keep) * (1.0f - smoothstep(0.54f, 0.90f, keep));
+    float edgeBand = smoothstep(0.15f, 0.48f, keep) * (1.0f - smoothstep(0.55f, 0.88f, keep));
     float3 rimGlow = max(color.rgb, vbgAmb * 0.90f);
-    float3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.16f), edgeBand * 0.20f);
+    float3 fgWrapped = mix(color.rgb, mix(rimGlow, vbgAmb, 0.14f), edgeBand * 0.14f);
     return float4(mix(color.rgb, mix(vbg, fgWrapped, keep), uni.u[0].x), color.a);
 }
 
@@ -983,9 +977,14 @@ fragment float4 fs_matte_refine(QuadOut in [[stage_in]],
         float2(-d.x, -d.y), float2(d.x, -d.y),
         float2(-d.x,  d.y), float2(d.x,  d.y)
     };
+    float3 cRgb0 = cRgb;
+    float3 cRgb3 = cRgb;
     for (int i = 0; i < 4; ++i) {
         float2 nuv = clamp(muv + offs[i], 0.0f, 1.0f);
-        float3 dc = tex1.sample(kLinearClamp, nuv).rgb - cRgb;
+        float3 nRgb = tex1.sample(kLinearClamp, nuv).rgb;
+        if (i == 0) cRgb0 = nRgb;
+        if (i == 3) cRgb3 = nRgb;
+        float3 dc = nRgb - cRgb;
         float w = exp(-dot(dc, dc) * inv2Sig2);
         sumW += w;
         sumM += w * tex0.sample(kLinearClamp, nuv).r;
@@ -996,11 +995,15 @@ fragment float4 fs_matte_refine(QuadOut in [[stage_in]],
     if (uni.u[0].w > 0.5f && uni.u[0].z > 0.001f) {
         float pMask = tex2.sample(kLinearClamp, muv).r;
         float3 pRgb = tex3.sample(kLinearClamp, muv).rgb;
-        float3 dRgb = abs(cRgb - pRgb);
-        float rgbDiff = max(max(dRgb.r, dRgb.g), dRgb.b);
-        float expand = max(guidedMask - pMask, 0.0f);
-        float shrink = max(pMask - guidedMask, 0.0f);
-        float motion = max(rgbDiff, max(expand * 0.90f, shrink * 0.14f));
+        float3 pRgb0 = tex3.sample(kLinearClamp, clamp(muv + offs[0], 0.0f, 1.0f)).rgb;
+        float3 pRgb3 = tex3.sample(kLinearClamp, clamp(muv + offs[3], 0.0f, 1.0f)).rgb;
+        float3 dC = abs(cRgb - pRgb);
+        float3 d0 = abs(cRgb0 - pRgb0);
+        float3 d3 = abs(cRgb3 - pRgb3);
+        float rgbDiff = max(max(dC.r, max(dC.g, dC.b)),
+                        0.75f * max(max(d0.r, max(d0.g, d0.b)), max(d3.r, max(d3.g, d3.b))));
+        float shrinkClear = max((pMask - guidedMask) - 0.45f, 0.0f) * 0.12f;
+        float motion = max(rgbDiff, shrinkClear);
         float keep = uni.u[0].z * (1.0f - smoothstep(uni.u[1].y, uni.u[1].z, motion));
         outMask = mix(guidedMask, pMask, keep);
     }
