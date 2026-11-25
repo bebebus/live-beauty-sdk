@@ -613,7 +613,7 @@ void RenderPipeline::renderMakeup(
     RenderTargetId targetRt, TextureId baseTex, TextureId semanticTex, int width, int height,
     const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,
     const float* landmarks478x2, const float* meta15,
-    bool hasIris, bool frontFaceCw, float presence, float steadyEye, float eyeMakeupKeep,
+    bool hasIris, bool frontFaceCw, float presence, float steadyFace, float steadyEye, float eyeMakeupKeep,
     bool copyBaseFirst) {
     math::FaceMakeupUv::packVertices(landmarks478x2, math::FaceMeshFrame::kCoordCount, makeupVerts_.data());
     device_.updateVertexBuffer(vbMakeup_, makeupVerts_.data(), sizeof(float) * makeupVerts_.size());
@@ -641,7 +641,10 @@ void RenderPipeline::renderMakeup(
     layerState.cullBack = true;
     layerState.frontFaceCw = frontFaceCw;
 
-    const float faceGain = presence * steadyEye;
+    // Broad cheek/face makeup (blush, contour, highlight, eyebrow, lipstick) follows steadyFace so brief
+    // eye-radius extrapolation never pumps cheek beauty; corneal lens/catchlight keeps strict steadyEye.
+    const float faceGain = presence * steadyFace;
+    const float irisGain = presence * steadyEye;
     const float eyeGain = presence * eyeMakeupKeep;
     const int skinIdxCount = static_cast<int>(math::FaceMakeupUv::skinFaceIndices().size());
 
@@ -730,8 +733,8 @@ void RenderPipeline::renderMakeup(
     if ((cfg.contactLens > 0.0f || cfg.catchlight > 0.0f) && hasIris && assets_.irisAtlas != kInvalidTexture) {
         const float aspect = static_cast<float>(width) / static_cast<float>(height);
         const Vec2 tile = math::FaceMakeupUv::irisTile(cfg.contactLensStyle);
-        const float lensS = cfg.contactLens * faceGain;
-        const float clS = cfg.catchlight * faceGain;
+        const float lensS = cfg.contactLens * irisGain;
+        const float clS = cfg.catchlight * irisGain;
 
         auto drawEye = [&](int irisBase, BufferId eyeIb, int eyeCount, float openVal, float gateVal) {
             float circle[4];
@@ -1589,8 +1592,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         blurSkinMask();
     }
     TextureId hairWeightTex = kInvalidTexture;
-    const bool wantHairOrOcc = (in.tierCaps.enableHairAlpha && in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) ||
-                               (in.occlusionMaskTex != kInvalidTexture && in.occlusionShown > 1e-4f);
+    const bool hasHairAlphaInput = in.tierCaps.enableHairAlpha && in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f;
+    const bool hasOccAlphaInput = in.occlusionMaskTex != kInvalidTexture && in.occlusionShown > 1e-4f;
+    const bool wantHairOrOcc = hasHairAlphaInput || hasOccAlphaInput;
     if (wantHairOrOcc) {
         // Re-upload primary mesh VBO if secondary face overwrote vbMeshWarp_ so hair alpha follows primary face warp.
         if (meshWarped && secWarped) {
@@ -1603,7 +1607,11 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             in.occlusionMaskTex, in.occlusionShown,
             activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
         hasSemanticTex = true;
-        hairWeightTex = device_.textureOf(rtSkinMask_);
+        // Only engage hair-weighted guided filter when a real hair mask is active; 64x64 makeup occlusion
+        // must never switch the full-face guided filter shader path on/off on cheeks!
+        if (hasHairAlphaInput) {
+            hairWeightTex = device_.textureOf(rtSkinMask_);
+        }
         lastActivePassesMask_ |= kPassHairAlpha;
     }
 
@@ -1781,7 +1789,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postWarpLandmarks, in.faceMeta15,
-            in.hasIris, frontFaceCw, effFacePresence, in.steadyEye, in.eyeMakeupKeep, /*copyBaseFirst=*/true);
+            in.hasIris, frontFaceCw, effFacePresence, in.steadyFace, in.steadyEye, in.eyeMakeupKeep, /*copyBaseFirst=*/true);
         currentTex = device_.textureOf(rtMakeup_);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
@@ -1791,7 +1799,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postSecLandmarks, sec.meta15,
-            sec.hasIris, secFrontCw, effSecPresence, sec.steadyEye, sec.eyeMakeupKeep, /*copyBaseFirst=*/!makeupRendered);
+            sec.hasIris, secFrontCw, effSecPresence, sec.steadyFace, sec.steadyEye, sec.eyeMakeupKeep, /*copyBaseFirst=*/!makeupRendered);
         currentTex = device_.textureOf(rtMakeup_);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;

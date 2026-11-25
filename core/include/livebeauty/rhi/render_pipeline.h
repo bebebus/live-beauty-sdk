@@ -192,7 +192,7 @@ private:
         RenderTargetId targetRt, TextureId baseTex, TextureId semanticTex, int width, int height,
         const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,
         const float* landmarks478x2, const float* meta15,
-        bool hasIris, bool frontFaceCw, float presence, float steadyEye, float eyeMakeupKeep,
+        bool hasIris, bool frontFaceCw, float presence, float steadyFace, float steadyEye, float eyeMakeupKeep,
         bool copyBaseFirst = true);
     void renderStickers(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
                         int width, int height, const FrameInputs& in,

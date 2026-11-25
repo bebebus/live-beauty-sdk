@@ -39,8 +39,15 @@ void FaceRoiSelector::onFace(
         const float dy = mpCy - smoothCy_;
         const float dw = faceWidth - smoothFaceWidth_;
         const float shift = std::hypot(dx, dy);
-        const float alphaPos = active_ ? (0.22f * detail::smoothstep(0.004f, 0.025f, shift)) : kEmaAlpha;
-        const float alphaW = active_ ? (0.22f * detail::smoothstep(0.005f, 0.028f, std::fabs(dw))) : kEmaAlpha;
+        // Generous deadzone when active (crop covers 2.8x faceWidth): keeps the 256x256 crop rect
+        // bit-exact static during normal handheld sway so MediaPipe VIDEO mode never drifts/re-detects.
+        const float fwRef = std::max(smoothFaceWidth_, 0.12f);
+        const float alphaPos = active_
+            ? (0.28f * detail::smoothstep(0.18f * fwRef, 0.34f * fwRef, shift))
+            : kEmaAlpha;
+        const float alphaW = active_
+            ? (0.28f * detail::smoothstep(0.12f * fwRef, 0.24f * fwRef, std::fabs(dw)))
+            : kEmaAlpha;
         smoothCx_ += dx * alphaPos;
         smoothCy_ += dy * alphaPos;
         smoothFaceWidth_ += dw * alphaW;

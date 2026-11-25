@@ -217,6 +217,14 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
     }
 
     const bool hadVel = poseVelValid_;
+    if (mesh != nullptr) {
+        const float dead = meshFilter_.poseDead();
+        poseVelGain_ = detail::smoothstep(dead * 0.75f, dead * 1.65f + 0.012f, meshFilter_.poseSpeed());
+        poseMoving_ = (poseVelGain_ > 1e-3f);
+    } else {
+        poseVelGain_ = 0.0f;
+        poseMoving_ = false;
+    }
     poseVelValid_ = (mesh != nullptr && count_ > 0 && meshPresent_[prevSlot]);
     if (poseVelValid_) {
         const float dt = static_cast<float>(sampleTs - times_[prevSlot]);
@@ -229,7 +237,8 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
                 float leadVel = v01;
                 if (hasPrev2 && dtPrev <= static_cast<float>(kMaxGapMs)) {
                     const float v12 = (meshPose_[prevSlot][k] - meshPose_[prev2Slot][k]) / dtPrev;
-                    leadVel = v01 + 0.45f * (dt / (0.5f * (dt + dtPrev))) * (v01 - v12);
+                    // Gate 2nd-derivative curvature lead by poseVelGain_ so stationary/jitter noise is never amplified.
+                    leadVel = v01 + 0.45f * poseVelGain_ * (dt / (0.5f * (dt + dtPrev))) * (v01 - v12);
                     if (v01 * leadVel < 0.0f) leadVel = 0.0f;
                 }
                 poseVel_[k] = hadVel ? (poseVel_[k] + 0.85f * (leadVel - poseVel_[k])) : leadVel;
@@ -239,14 +248,6 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
         }
     } else {
         poseVel_.fill(0.0f);
-    }
-    if (mesh != nullptr) {
-        const float dead = meshFilter_.poseDead();
-        poseVelGain_ = detail::smoothstep(dead * 0.75f, dead * 1.65f + 0.012f, meshFilter_.poseSpeed());
-        poseMoving_ = (poseVelGain_ > 1e-3f);
-    } else {
-        poseVelGain_ = 0.0f;
-        poseMoving_ = false;
     }
     const bool restart = (count_ == 0);
     rawX_[slot] = x;
@@ -424,8 +425,7 @@ bool FaceTimeline::meshAt(int64_t t, SmoothedMeshView& outView) {
                 horizon, aspect_, shift);
             meshOutMeta_[FaceMeshFrame::kMetaCenterX] += shift[0];
             meshOutMeta_[FaceMeshFrame::kMetaCenterY] += shift[1] * aspect_;
-            const float s = std::max(FaceMeshFilter::scaleOf(meshPose_[newest].data()), 1e-4f);
-            const float omega = detail::clampf(0.5f * (poseVel_[4] - poseVel_[3]) / s, -0.0040f, 0.0040f);
+            const float omega = FaceMeshFilter::angularVelOf(meshPose_[newest].data(), poseVel_.data());
             const float dTheta = horizon * omega;
             const float c = std::cos(dTheta);
             const float sn = std::sin(dTheta);

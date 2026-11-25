@@ -18,10 +18,10 @@ public:
     static constexpr float kPoseBeta = 95.0f;
     static constexpr float kPoseDcut = 4.5f;
     static constexpr float kPoseDcutDown = 16.0f;
-    static constexpr float kPose3dFcMin = 1.85f;
+    static constexpr float kPose3dFcMin = 0.80f;
     static constexpr float kPose3dBeta = 24.0f;
     static constexpr float kPose3dDcut = 2.4f;
-    static constexpr float kScaleFcMin = 1.25f;
+    static constexpr float kScaleFcMin = 0.90f;
     static constexpr float kScaleBeta = 18.0f;
     static constexpr float kScaleDcut = 2.0f;
     static constexpr float kKPose = 1.0f;
@@ -75,6 +75,7 @@ public:
     static float detOf(const float* pose8);
     static float scaleOf(const float* pose8);
     static float viewScale2(const float* pose8);
+    static float angularVelOf(const float* pose8, const float* poseVel8);
     static void extrapolate(const float* src478x2, const float* pose8, const float* poseVel8,
                             float horizonMs, float aspect, float* out478x2);
     static void centerShift(const float* src478x2, const float* pose8, const float* poseVel8,

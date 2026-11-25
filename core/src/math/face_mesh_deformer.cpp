@@ -117,6 +117,7 @@ const DeformerStaticTables& tables() {
 
 void FaceMeshDeformer::resetTemporal() {
     temporalValid_ = false;
+    dispTemporalValid_ = false;
     lastNowMs_ = kTimeInvalid;
 }
 
@@ -274,14 +275,18 @@ bool FaceMeshDeformer::deform(
     float rEyeH = rawREyeH;
     float lEyeH = rawLEyeH;
     float envAlpha = 1.0f;
+    float yawJump = 0.0f;
+    const float sRef = std::max(std::sqrt(scale2), 0.03f);
     if (temporal) {
-        const float invFw = 1.0f / std::max(fw, 1e-4f);
-        const float rawL = rawWLeft * invFw;
-        const float rawR = rawWRight * invFw;
-        const float rawRew = rawREyeW * invFw;
-        const float rawLew = rawLEyeW * invFw;
-        const float rawReh = rawREyeH * invFw;
-        const float rawLeh = rawLEyeH * invFw;
+        // Normalize contour widths against 31-pt Procrustes sRef (not noisy 2-pt ear-to-ear fw)
+        // so single-landmark ear jitter never modulates mid-cheek slimming innerGate!
+        const float invRef = 1.0f / sRef;
+        const float rawL = rawWLeft * invRef;
+        const float rawR = rawWRight * invRef;
+        const float rawRew = rawREyeW * invRef;
+        const float rawLew = rawLEyeW * invRef;
+        const float rawReh = rawREyeH * invRef;
+        const float rawLeh = rawLEyeH * invRef;
         if (temporalFresh) {
             signedYawState_ = rawSignedYaw;
             wLeftRatioState_ = rawL;
@@ -291,7 +296,7 @@ bool FaceMeshDeformer::deform(
             rEyeHRatioState_ = rawReh;
             lEyeHRatioState_ = rawLeh;
         } else {
-            const float yawJump = std::fabs(rawSignedYaw - signedYawState_);
+            yawJump = std::fabs(rawSignedYaw - signedYawState_);
             const float envTau = (yawJump > 0.11f) ? 26.0f : 150.0f;
             envAlpha = 1.0f - std::exp(-dtMs / envTau);
             signedYawState_ += envAlpha * (rawSignedYaw - signedYawState_);
@@ -303,12 +308,12 @@ bool FaceMeshDeformer::deform(
             lEyeHRatioState_ += envAlpha * (rawLeh - lEyeHRatioState_);
         }
         signedYaw = signedYawState_;
-        wLeft = std::max(wLeftRatioState_ * fw, 0.10f * fw);
-        wRight = std::max(wRightRatioState_ * fw, 0.10f * fw);
-        rEyeW = std::max(rEyeWRatioState_ * fw, 0.01f);
-        lEyeW = std::max(lEyeWRatioState_ * fw, 0.01f);
-        rEyeH = std::max(rEyeHRatioState_ * fw, 0.004f);
-        lEyeH = std::max(lEyeHRatioState_ * fw, 0.004f);
+        wLeft = std::max(wLeftRatioState_ * sRef, 0.10f * fw);
+        wRight = std::max(wRightRatioState_ * sRef, 0.10f * fw);
+        rEyeW = std::max(rEyeWRatioState_ * sRef, 0.01f);
+        lEyeW = std::max(lEyeWRatioState_ * sRef, 0.01f);
+        rEyeH = std::max(rEyeHRatioState_ * sRef, 0.004f);
+        lEyeH = std::max(lEyeHRatioState_ * sRef, 0.004f);
     }
 
     const float smoothYawWeight = 1.0f - detail::smoothstep(0.45f, FaceMeshFrame::kMaxYawRatio, std::fabs(signedYaw));
@@ -712,6 +717,79 @@ bool FaceMeshDeformer::deform(
         temporalValid_ = true;
     }
     applyDisplacement();
+
+    // Rigid-motion-invariant face-local displacement smoothing (zero lag under 2D translation/roll/scale!):
+    // suppresses high-frequency cheek slimming/contour innerGate & grazing-triangle relax jitter while keeping
+    // instant slider response and fast 3D yaw turn adaptation.
+    if (temporal) {
+        const float invRef = 1.0f / sRef;
+        const bool paramsChanged = !dispTemporalValid_ ||
+            std::fabs(params.faceSlim - prevParams_.faceSlim) > 0.004f ||
+            std::fabs(params.vFace - prevParams_.vFace) > 0.004f ||
+            std::fabs(params.faceNarrow - prevParams_.faceNarrow) > 0.004f ||
+            std::fabs(params.faceSmall - prevParams_.faceSmall) > 0.004f ||
+            std::fabs(params.cheekboneSlim - prevParams_.cheekboneSlim) > 0.004f ||
+            std::fabs(params.chinShape - prevParams_.chinShape) > 0.004f ||
+            std::fabs(params.foreheadShape - prevParams_.foreheadShape) > 0.004f ||
+            std::fabs(params.eyeEnlarge - prevParams_.eyeEnlarge) > 0.004f ||
+            std::fabs(params.eyeDistance - prevParams_.eyeDistance) > 0.004f ||
+            std::fabs(params.eyeCorner - prevParams_.eyeCorner) > 0.004f ||
+            std::fabs(params.noseSlim - prevParams_.noseSlim) > 0.004f ||
+            std::fabs(params.noseLength - prevParams_.noseLength) > 0.004f ||
+            std::fabs(params.mouthSize - prevParams_.mouthSize) > 0.004f ||
+            std::fabs(params.mouthSmile - prevParams_.mouthSmile) > 0.004f ||
+            std::fabs(params.cranialTop - prevParams_.cranialTop) > 0.004f;
+        const bool initDisp = temporalFresh || !dispTemporalValid_;
+        const bool yawWeightChanging = !initDisp && (std::fabs(effYawW - prevEffYawW_) > 0.03f);
+        const float dispTau = (paramsChanged || yawJump > 0.08f || yawWeightChanging)
+            ? kDispTauFastMs : kDispTauSteadyMs;
+        const float dispAlpha = initDisp ? 1.0f : (1.0f - std::exp(-dtMs / dispTau));
+
+        std::array<float, FaceMeshTopology::kBufferOffset> rawUBuf{};
+        std::array<float, FaceMeshTopology::kBufferOffset> rawVBuf{};
+        for (int i = 0; i < FaceMeshTopology::kBufferOffset; ++i) {
+            const float effDx = dstMx_[i] - srcMx_[i];
+            const float effDy = dstMy_[i] - srcMy_[i];
+            const float rawU = (effDx * ux + effDy * uy) * invRef;
+            const float rawV = (effDx * vx + effDy * vy) * invRef;
+            rawUBuf[i] = rawU;
+            rawVBuf[i] = rawV;
+            if (initDisp) {
+                dispUState_[i] = rawU;
+                dispVState_[i] = rawV;
+            } else {
+                dispUState_[i] += dispAlpha * (rawU - dispUState_[i]);
+                dispVState_[i] += dispAlpha * (rawV - dispVState_[i]);
+            }
+            const float smU = dispUState_[i] * sRef;
+            const float smV = dispVState_[i] * sRef;
+            dstMx_[i] = srcMx_[i] + smU * ux + smV * vx;
+            dstMy_[i] = srcMy_[i] + smU * uy + smV * vy;
+        }
+        prevParams_ = params;
+        prevEffYawW_ = effYawW;
+        dispTemporalValid_ = true;
+
+        // Post-smoothing fold guard: if a solidly front-facing triangle approaches inversion, blend gently
+        // toward this frame's already fold-safe (rawU, rawV) rather than snapping displacement to zero!
+        for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
+            if (triFront_[t] <= 0.35f) continue;
+            const float r = areaRatio(t);
+            if (r >= 0.04f) continue;
+            const float backToSafe = 1.0f - detail::smoothstep(0.0f, 0.04f, r);
+            for (int k = 0; k < 3; ++k) {
+                const int v = indices[t * 3 + k];
+                if (v < FaceMeshTopology::kBufferOffset) {
+                    dispUState_[v] += backToSafe * (rawUBuf[v] - dispUState_[v]);
+                    dispVState_[v] += backToSafe * (rawVBuf[v] - dispVState_[v]);
+                    const float smU = dispUState_[v] * sRef;
+                    const float smV = dispVState_[v] * sRef;
+                    dstMx_[v] = srcMx_[v] + smU * ux + smV * vx;
+                    dstMy_[v] = srcMy_[v] + smU * uy + smV * vy;
+                }
+            }
+        }
+    }
 
     for (int i = 0; i < FaceMeshTopology::kTotalVertexCount; ++i) {
         const float sx = srcMx_[i];

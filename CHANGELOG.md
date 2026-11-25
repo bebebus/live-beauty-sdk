@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.10] - 2026-11-25
+
+### Fixed
+- **Cheek Beauty Spasmodic Twitching Elimination (`FaceMeshFilter`, `FaceMeshDeformer`, `FaceTimeline`, `FaceRoiSelector`, `FaceOcclusionSolver`, `RenderPipeline`, `LiveBeautyEngine`)**:
+  - Replaced `FaceMeshFilter`'s 31-pt nose-dominated Procrustes basis (where single-vertex nose-tip leverage `+1.39` amplified 3D Z-column `(w1, w2)` jitter into `13px` spikes on deep `z=-0.43` cheek/jaw vertices) with a conditioned ~117-pt strictly rigid craniofacial inverse-variance basis (excluding eyelids, eyebrows/brow-band, mouth, chin, and lower jaw), cutting Z-column noise variance by ~4.6x with exact `1.000` 3D yaw fidelity and fixing `lagCatchup`'s dimensional velocity-vs-displacement mismatch (`2.0 * dead * teSec`) for smooth, zero-snap cheek stability alongside sub-pixel camera-shake tracking.
+  - Added exact mirror- (`det < 0`) and roll-angle-invariant `FaceMeshFilter::angularVelOf` wired into `extrapolate`, `centerShift`, and `FaceTimeline::meshAt` (fixing mirrored front-camera roll cancellation), and gated `FaceTimeline` second-derivative curvature lead velocity by `poseVelGain_` to prevent stationary noise differentiation.
+  - Normalized `FaceMeshDeformer` contour/eye width ratios against Procrustes 3D `sRef` instead of noisy 2-pt `lm[454]-lm[234]` span, raised `kFrontWShape` (`0.002 -> 0.008`), and added rigid-motion-invariant face-local normalized displacement smoothing (`dispUState_`/`dispVState_`, `95ms` steady / `18ms` fast-turn/slider adaptation with fold-safe blending toward current-frame raw displacement), eliminating `v205` mid-cheek slimming threshold jumps and grazing-triangle relaxation snaps.
+  - Decoupled cheek/face makeup (`blush`, `contour`, `highlight`, `eyebrow`, `lipstick`) from eye-blink/shake `steadyEye` onto `steadyFace`, decoupled 10Hz internal `autoOccTex_`/`autoResidualTex_` from binary 16ms `denoiseKeep_` resets and full-face `kGuidedWeight*` guided-filter shader toggling, softened `FaceOcclusionSolver` temporal EMA and cool-indoor cheek shadow chroma thresholds, and added a generous active deadzone (`0.18*fw` pos, `0.12*fw` width) in `FaceRoiSelector` to keep `MediaPipe RunningMode.VIDEO` input crops rock-steady during handheld sway.
+
 ## [3.6.9] - 2026-11-25
 
 ### Fixed

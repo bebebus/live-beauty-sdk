@@ -1684,6 +1684,174 @@ void testV369MetalSlightCameraShakeNoWaterRipple(MetalDevice& dev) {
     dev.destroyTexture(atlas);
 }
 
+void testV3610MetalCheekBeautyZeroTwitch(MetalDevice& dev) {
+    // Real-device stationary mirrored front-camera portrait with realistic MediaPipe eye/nose + contour noise,
+    // heavy cheek slimming + whitening + smoothing + blush/contour + 10Hz autoOcc sample:
+    // cheek silhouette & interior pixels must stay rock-steady (zero spasmodic cheek twitching!).
+    constexpr int kW = 180;
+    constexpr int kH = 320;
+    constexpr float kAspect = static_cast<float>(kW) / static_cast<float>(kH);
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const auto& uv = FaceMeshTopology::kCanonicalUv;
+    const float canonW = FaceMeshFilter::canonicalFaceWidth();
+    float mx0 = 0.0f, my0 = 0.0f, mz0 = 0.0f;
+    for (int i = 0; i < FaceMeshFrame::kFaceCount; ++i) {
+        mx0 += xyz[i * 3 + 0];
+        my0 += xyz[i * 3 + 1];
+        mz0 += xyz[i * 3 + 2];
+    }
+    mx0 /= FaceMeshFrame::kFaceCount;
+    my0 /= FaceMeshFrame::kFaceCount;
+    mz0 /= FaceMeshFrame::kFaceCount;
+
+    // Static high-contrast portrait (bright cheeks against darker indoor room + subtle cheek texture)
+    std::vector<uint8_t> camPx(kW * kH * 4, 255);
+    for (int y = 0; y < kH; ++y) {
+        const float vTop = (y + 0.5f) / kH;
+        for (int x = 0; x < kW; ++x) {
+            const float u = (x + 0.5f) / kW;
+            const float dx = (u - 0.50f) / 0.22f;
+            const float dy = ((vTop - 0.46f) / kAspect) / 0.28f;
+            const float r = std::hypot(dx, dy);
+            const float faceMask = 1.0f - detail::smoothstep(0.92f, 1.02f, r);
+            const float shade = 1.0f - 0.22f * std::min(1.0f, dx * dx);
+            const float R = 48.0f * (1.0f - faceMask) + (212.0f * shade) * faceMask;
+            const float G = 52.0f * (1.0f - faceMask) + (168.0f * shade) * faceMask;
+            const float B = 64.0f * (1.0f - faceMask) + (146.0f * shade) * faceMask;
+            const int off = (y * kW + x) * 4;
+            camPx[off + 0] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(R)), 0, 255));
+            camPx[off + 1] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(G)), 0, 255));
+            camPx[off + 2] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(B)), 0, 255));
+            camPx[off + 3] = 255;
+        }
+    }
+
+    const TextureId camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camPx.data());
+    // Feathered cheek blush/contour/lip atlas matching production makeup assets (smooth falloff, no hard UV cliff)
+    std::vector<uint8_t> atlasPx(64 * 64 * 4, 0);
+    for (int y = 0; y < 64; ++y) {
+        const float v = (y + 0.5f) / 64.0f;
+        for (int x = 0; x < 64; ++x) {
+            const float u = (x + 0.5f) / 64.0f;
+            const float br = std::exp(-0.5f * (std::pow((u - 0.32f) / 0.08f, 2.0f) + std::pow((v - 0.54f) / 0.06f, 2.0f)));
+            const float bl = std::exp(-0.5f * (std::pow((u - 0.68f) / 0.08f, 2.0f) + std::pow((v - 0.54f) / 0.06f, 2.0f)));
+            const float lip = std::exp(-0.5f * (std::pow((u - 0.50f) / 0.08f, 2.0f) + std::pow((v - 0.70f) / 0.035f, 2.0f)));
+            const int off = (y * 64 + x) * 4;
+            atlasPx[off + 0] = static_cast<uint8_t>(std::lround(std::max(br, bl) * 220.0f));
+            atlasPx[off + 1] = 0;
+            atlasPx[off + 2] = static_cast<uint8_t>(std::lround(lip * 220.0f));
+            atlasPx[off + 3] = 255;
+        }
+    }
+    const TextureId atlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, atlasPx.data());
+    LiveBeautyEngine engine(dev);
+    PipelineAssets assets{kInvalidTexture, atlas, atlas, atlas, atlas, atlas};
+    engine.setAssets(assets);
+
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.skinOnly = true;
+    cfg.smoothing = 0.62f;
+    cfg.whiten = 0.45f;
+    cfg.radiance = 0.25f;
+    cfg.faceSlim = 0.65f;
+    cfg.vFace = 0.50f;
+    cfg.cheekboneSlim = 0.45f;
+    cfg.eyeEnlarge = 0.15f;
+    cfg.blush = 0.30f;
+    cfg.contour = 0.24f;
+    cfg.lipstick = 0.35f;
+    engine.setConfig(cfg);
+
+    auto hnoise = [](int a, int b) {
+        const float s = std::sin(static_cast<float>(a) * 12.9898f + static_cast<float>(b) * 78.233f) * 43758.5453f;
+        return (s - std::floor(s)) * 2.0f - 1.0f;
+    };
+
+    std::vector<uint8_t> outPx(kW * kH * 4, 0), prevPx(kW * kH * 4, 0);
+    double cheekEdgeSumSq = 0.0;
+    int cheekEdgeCnt = 0;
+    float maxCheekBandJump = 0.0f;
+
+    for (int f = 0; f < 60; ++f) {
+        const int64_t ts = 1000 + f * 33;
+        const float corrL = hnoise(200 + f, 901) * 0.0055f;
+        const float corrR = hnoise(200 + f, 902) * 0.0055f;
+        const float effYaw = 0.18f + hnoise(200 + f, 903) * 0.012f;
+        const float effS = 0.44f * (1.0f + hnoise(200 + f, 904) * 0.006f);
+        const float cyE = std::cos(effYaw), syE = std::sin(effYaw);
+
+        std::array<float, FaceMeshFrame::kCoordCount> mp{};
+        for (int i = 0; i < FaceMeshFrame::kFaceCount; ++i) {
+            float lx = (xyz[i * 3 + 0] - mx0) / canonW;
+            const float ly = (xyz[i * 3 + 1] - my0) / canonW;
+            const float lz = (xyz[i * 3 + 2] - mz0) / canonW;
+            const float nu = (uv[i * 2] - 0.5f) * 2.0f;
+            const float nv = (0.5f - uv[i * 2 + 1]) * 2.0f;
+            if (nv < 0.15f && nv > -0.85f && std::fabs(nu) > 0.35f) {
+                const float w = std::exp(-0.5f * std::pow((nv + 0.32f) / 0.34f, 2.0f)) *
+                                detail::smoothstep(0.35f, 0.85f, std::fabs(nu));
+                lx *= (1.0f + 0.18f * w);
+            }
+            const float x1 = -(lx * cyE + lz * syE);  // mirrored front camera
+            float u = 0.50f + x1 * effS;
+            float vTop = 0.46f - ly * effS * kAspect;
+            const float rUv = std::hypot((uv[i * 2] - 0.5f) / 0.36f, (uv[i * 2 + 1] - 0.5f) / 0.43f);
+            const float isC = detail::smoothstep(0.62f, 0.90f, rUv);
+            const float sigU = 0.0024f * (1.0f - isC) + 0.0070f * isC;
+            u += hnoise((200 + f) * 503 + i, 1) * sigU;
+            vTop += hnoise((200 + f) * 503 + i, 2) * sigU * kAspect;
+            if (isC > 0.1f) u += isC * ((-nu < 0.0f) ? corrL : corrR);
+            mp[i * 2 + 0] = u;
+            mp[i * 2 + 1] = vTop;
+        }
+        for (int i = 468; i < 478; ++i) { mp[i * 2] = 0.50f; mp[i * 2 + 1] = 0.42f; }
+
+        EXPECT_TRUE(engine.submitFaceLandmarks(ts, mp.data(), 478, kW, kH, ts));
+        if (f % 3 == 0) {
+            EXPECT_TRUE(engine.submitAuxRgbaSample(camPx.data(), kW, kH, 0.45f));
+        }
+        const TextureId outTex = engine.processFrame(camTex, kW, kH, ts, ts);
+        EXPECT_TRUE(dev.readbackTextureRgba8(outTex, outPx.data(), kW, kH));
+
+        if (f >= 15) {
+            // Inspect BOTH left & right cheek bands (including outer cheek slimming contour + blush interior)
+            // y ∈ [0.46*H, 0.58*H], x ∈ [0.22*W..0.44*W] and [0.56*W..0.78*W]
+            const int y0 = static_cast<int>(kH * 0.46f);
+            const int y1 = static_cast<int>(kH * 0.58f);
+            for (int side = 0; side < 2; ++side) {
+                const int x0 = (side == 0) ? static_cast<int>(kW * 0.22f) : static_cast<int>(kW * 0.56f);
+                const int x1 = (side == 0) ? static_cast<int>(kW * 0.44f) : static_cast<int>(kW * 0.78f);
+                for (int y = y0; y <= y1; ++y) {
+                    for (int x = x0; x <= x1; ++x) {
+                        const int off = (y * kW + x) * 4;
+                        const float l0 = 0.2126f * prevPx[off] + 0.7152f * prevPx[off + 1] + 0.0722f * prevPx[off + 2];
+                        const float l1 = 0.2126f * outPx[off] + 0.7152f * outPx[off + 1] + 0.0722f * outPx[off + 2];
+                        const float d = std::fabs(l1 - l0);
+                        cheekEdgeSumSq += static_cast<double>(d) * d;
+                        ++cheekEdgeCnt;
+                        maxCheekBandJump = std::max(maxCheekBandJump, d);
+                    }
+                }
+            }
+        }
+        prevPx = outPx;
+    }
+
+    const double cheekRms = std::sqrt(cheekEdgeSumSq / std::max(1, cheekEdgeCnt));
+    // Stationary portrait cheek band must stay rock-steady: RMS <= 0.45 luma and max single-pixel jump <= 9/255!
+    if (cheekRms > 0.45 || maxCheekBandJump > 9.0f) {
+        std::cerr << "  [v3.6.10 cheek gate] cheekRms=" << cheekRms
+                  << " maxCheekBandJump=" << maxCheekBandJump << "\n";
+    }
+    EXPECT_TRUE(cheekRms <= 0.45);
+    EXPECT_TRUE(maxCheekBandJump <= 9.0f);
+
+    engine.releaseGpuResources();
+    dev.destroyTexture(camTex);
+    dev.destroyTexture(atlas);
+}
+
 }  // namespace
 
 int main() {
@@ -1707,6 +1875,7 @@ int main() {
         testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(dev);
         testV367EyeSocketNoseAndBeardContourNoDarkTrenches(dev);
         testV369MetalSlightCameraShakeNoWaterRipple(dev);
+        testV3610MetalCheekBeautyZeroTwitch(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

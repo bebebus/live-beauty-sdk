@@ -1003,6 +1003,129 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     }
 }
 
+void testV3610CheekMakeupSteadyFaceAndAutoOccDecoupling() {
+    // 1. Cheek blush & contour must follow steadyFace (NOT steadyEye!), so brief eye-radius extrapolation
+    //    never pumps cheek makeup on/off while contact lens still respects steadyEye.
+    {
+        MockRhiDevice dev;
+        RenderPipeline pipe(dev);
+        const TextureId inTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        const TextureId atlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+        PipelineAssets assets{};
+        assets.blushAtlas = atlas;
+        assets.contourHighlightAtlas = atlas;
+        assets.irisAtlas = atlas;
+        pipe.setAssets(assets);
+
+        BeautyConfig cfg{};
+        cfg.enabled = true;
+        cfg.skinOnly = true;
+        cfg.smoothing = 0.55f;
+        cfg.blush = 0.40f;
+        cfg.contour = 0.30f;
+        cfg.contactLens = 0.40f;
+
+        std::array<float, math::FaceMeshFrame::kCoordCount> lm{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = 0.40f / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            lm[i * 2] = 0.50f + xyz[i * 3] * scale;
+            lm[i * 2 + 1] = 0.50f + xyz[i * 3 + 1] * scale * aspect;
+        }
+        math::FaceMeshFrame::synthesizeIris(lm.data(), 468, 33, 133, 159, 145, aspect);
+        math::FaceMeshFrame::synthesizeIris(lm.data(), 473, 362, 263, 386, 374, aspect);
+        float meta[math::FaceMeshFrame::kMetaSize]{};
+        EXPECT_TRUE(math::FaceMeshFrame::fillMeta(lm.data(), math::FaceMeshFrame::kCoordCount, aspect, meta));
+
+        FrameInputs in{};
+        in.inputTexture = inTex;
+        in.width = 720;
+        in.height = 1280;
+        in.nowMs = 1000;
+        in.hasFaceMesh = true;
+        in.landmarks478x2 = lm.data();
+        in.faceMeta15 = meta;
+        in.hasIris = true;
+        in.facePresence = 1.0f;
+        in.steadyFace = 1.0f;
+        in.steadyEye = 0.25f;  // Simulates brief eye-scale extrapolation dip!
+        in.eyeMakeupKeep = 0.25f;
+
+        dev.calls.clear();
+        pipe.render(cfg, in);
+
+        float blushAlpha = 0.0f;
+        float contourAlpha = 0.0f;
+        float irisStrength = 1.0f;
+        int makeupLayerIdx = 0;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kMakeupLayer) {
+                if (makeupLayerIdx == 0) blushAlpha = c.uniforms.v[0].w;
+                else if (makeupLayerIdx == 1) contourAlpha = c.uniforms.v[0].w;
+                ++makeupLayerIdx;
+            } else if (c.shader == ShaderId::kMakeupIris) {
+                irisStrength = c.uniforms.v[2].x;
+            }
+        }
+        // Blush & contour stay at full steadyFace strength (~0.40*0.72=0.288, ~0.30*0.55=0.165), not collapsed to 25%!
+        EXPECT_TRUE(blushAlpha >= 0.27f);
+        EXPECT_TRUE(contourAlpha >= 0.15f);
+        // Contact lens still respects steadyEye (0.40 * 0.25 = 0.10)
+        EXPECT_TRUE(irisStrength <= 0.12f);
+        pipe.releaseGpuResources();
+    }
+
+    // 2. Internal 10Hz autoOccTex_ (from submitAuxRgbaSample under a makeup preset) MUST NOT hijack
+    //    renderGuidedFilter into kGuidedWeightBlur/Diff/Coeff (causing full-cheek smoothing switches when hairMaskTex is absent!).
+    {
+        MockRhiDevice dev;
+        LiveBeautyEngine engine(dev);
+        const TextureId inTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        const TextureId atlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+        PipelineAssets assets{};
+        assets.blushAtlas = atlas;
+        assets.contourHighlightAtlas = atlas;
+        engine.setAssets(assets);
+
+        BeautyConfig cfg{};
+        cfg.enabled = true;
+        cfg.skinOnly = true;
+        cfg.smoothing = 0.60f;
+        cfg.whiten = 0.45f;
+        cfg.blush = 0.28f;
+        cfg.lipstick = 0.35f;
+        engine.setConfig(cfg);
+
+        std::array<float, math::FaceMeshFrame::kCoordCount> mp{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = 0.40f / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            mp[i * 2] = 0.50f + xyz[i * 3] * scale;
+            mp[i * 2 + 1] = 1.0f - (0.50f + xyz[i * 3 + 1] * scale * aspect);
+        }
+        for (int i = 468; i < 478; ++i) { mp[i * 2] = 0.50f; mp[i * 2 + 1] = 0.45f; }
+
+        EXPECT_TRUE(engine.submitFaceLandmarks(1000, mp.data(), 478, 720, 1280, 1000));
+        std::vector<uint8_t> auxRgba(108 * 192 * 4, 180);
+        EXPECT_TRUE(engine.submitAuxRgbaSample(auxRgba.data(), 108, 192, 0.40f));
+
+        dev.calls.clear();
+        engine.processFrame(inTex, 720, 1280, 1033, 1033);
+        bool sawWeightedGuided = false;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kGuidedWeightBlur ||
+                c.shader == ShaderId::kGuidedWeightDiff ||
+                c.shader == ShaderId::kGuidedWeightCoeff) {
+                sawWeightedGuided = true;
+            }
+        }
+        EXPECT_TRUE(!sawWeightedGuided);
+        engine.releaseGpuResources();
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1016,6 +1139,7 @@ int main() {
     testV35EffectBundleTriggersAndWebGl2Backend();
     testCodeReviewEngineLifecycleAndPriorityGuards();
     testV36ChromaKeyParticlesMulticlassAndHandShield();
+    testV3610CheekMakeupSteadyFaceAndAutoOccDecoupling();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

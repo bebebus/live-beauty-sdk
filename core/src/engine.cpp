@@ -738,7 +738,10 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         const float occFresh = (autoOccTsMs_ != kTimeInvalid)
             ? math::HairMaskTuning::fresh(static_cast<float>(autoOccTsMs_ - displayTsMs))
             : 1.0f;
-        in.occlusionShown = detail::clampf(occFresh * asyncMaskKeep * in.steadyFace, 0.0f, 1.0f);
+        // Decouple internal 10Hz makeup occlusion from 16ms denoiseKeep_ binary toggles so slight handheld sway
+        // never pumps cheek whitening/blush on and off; still gate cleanly on shakeGate / affineValid / steadyFace.
+        const float occMotionKeep = (affineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
+        in.occlusionShown = detail::clampf(occFresh * occMotionKeep, 0.0f, 1.0f);
         in.occlusionMaskTex = (in.occlusionShown > 1e-4f) ? autoOccTex_ : rhi::kInvalidTexture;
     }
     in.hairShown = effHairShown;
@@ -761,9 +764,9 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         const float dy = curCy - rcy;
         const float fw = std::max(meshView.faceWidth(), 0.04f);
         const float centerShift = std::hypot(dx, dy / std::max(aspect, 0.1f));
-        const float shiftKeep = (1.0f - detail::smoothstep(0.020f * fw, 0.060f * fw, centerShift)) *
-                                (1.0f - detail::smoothstep(0.03f, 0.10f, primaryTl.speed()));
-        const float effResStrength = autoResidualStrength_ * shiftKeep * asyncMaskKeep * in.steadyFace;
+        const float shiftKeep = (1.0f - detail::smoothstep(0.025f * fw, 0.075f * fw, centerShift)) *
+                                (1.0f - detail::smoothstep(0.12f, 0.30f, primaryTl.speed()));
+        const float effResStrength = autoResidualStrength_ * shiftKeep * shakeGate * in.steadyFace;
         if (effResStrength > 1e-4f) {
             in.aiResidualTex = autoResidualTex_;
             in.aiResidualRect = autoResidualRect_;

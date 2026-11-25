@@ -58,7 +58,7 @@ public:
     static constexpr float kRelaxHFloor = 0.65f;
     static constexpr float kRelaxR0 = 0.08f;
     static constexpr float kRelaxR1 = 0.30f;
-    static constexpr float kFrontWShape = 0.002f;
+    static constexpr float kFrontWShape = 0.008f;
     static constexpr float kSafetyW0 = 0.3f;
     static constexpr float kSafetyW1 = 0.7f;
     static constexpr float kSafetyR0 = 0.0f;
@@ -66,6 +66,8 @@ public:
     static constexpr float kSafetyDepth = 0.5f;
     static constexpr float kRelaxTauUpMs = 120.0f;
     static constexpr float kRelaxTauDownMs = 35.0f;
+    static constexpr float kDispTauSteadyMs = 95.0f;
+    static constexpr float kDispTauFastMs = 18.0f;
     static constexpr int64_t kTemporalResetMs = 150;
 
     FaceMeshDeformer() = default;
@@ -127,6 +129,9 @@ private:
     std::array<float, FaceMeshTopology::kFaceVertexCount> visState_{};
     std::array<float, FaceMeshTopology::kFaceVertexCount> relaxState_{};
     std::array<float, FaceMeshTopology::kOvalVertexCount> silExcessRatioState_{};
+    std::array<float, FaceMeshTopology::kBufferOffset> dispUState_{};
+    std::array<float, FaceMeshTopology::kBufferOffset> dispVState_{};
+    Params prevParams_{};
     float wLeftRatioState_ = 0.0f;
     float wRightRatioState_ = 0.0f;
     float rEyeWRatioState_ = 0.0f;
@@ -134,7 +139,9 @@ private:
     float rEyeHRatioState_ = 0.0f;
     float lEyeHRatioState_ = 0.0f;
     float signedYawState_ = 0.0f;
+    float prevEffYawW_ = 1.0f;
     bool temporalValid_ = false;
+    bool dispTemporalValid_ = false;
     int64_t lastNowMs_ = kTimeInvalid;
 };
 

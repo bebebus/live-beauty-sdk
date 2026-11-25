@@ -1357,6 +1357,204 @@ void testV369SlightCameraShakeZeroWaterRippleAndZeroMeshShear() {
     EXPECT_TRUE(shear33 <= 5.80);
 }
 
+void testV3610CheekBeautyStabilityMirroredNoTwitch() {
+    constexpr int kW = 360;
+    constexpr int kH = 640;
+    constexpr float kAspect = static_cast<float>(kW) / static_cast<float>(kH);
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const auto& uv = FaceMeshTopology::kCanonicalUv;
+    const float canonW = FaceMeshFilter::canonicalFaceWidth();
+    float mx0 = 0.0f, my0 = 0.0f, mz0 = 0.0f;
+    for (int i = 0; i < FaceMeshFrame::kFaceCount; ++i) {
+        mx0 += xyz[i * 3 + 0];
+        my0 += xyz[i * 3 + 1];
+        mz0 += xyz[i * 3 + 2];
+    }
+    mx0 /= FaceMeshFrame::kFaceCount;
+    my0 /= FaceMeshFrame::kFaceCount;
+    mz0 /= FaceMeshFrame::kFaceCount;
+
+    const std::vector<int> cheekIdx = {
+        50, 101, 118, 123, 147, 187, 205, 207, 213, 132, 234, 93, 58, 172,
+        280, 330, 347, 352, 376, 411, 425, 427, 433, 361, 454, 323, 288, 397,
+    };
+
+    auto makeMirroredMp = [&](float cx, float cyTop, float faceW, float yawRad, float rollRad,
+                              int seed, float innerPx, float contourPx) {
+        std::array<float, FaceMeshFrame::kCoordCount> mp{};
+        auto hnoise = [](int a, int b) {
+            const float s = std::sin(static_cast<float>(a) * 12.9898f + static_cast<float>(b) * 78.233f) * 43758.5453f;
+            return (s - std::floor(s)) * 2.0f - 1.0f;
+        };
+        const float corrL = (contourPx > 0.0f) ? hnoise(seed, 901) * contourPx * 0.70f / kW : 0.0f;
+        const float corrR = (contourPx > 0.0f) ? hnoise(seed, 902) * contourPx * 0.70f / kW : 0.0f;
+        const float effYaw = yawRad + ((innerPx > 0.0f) ? hnoise(seed, 903) * 0.012f : 0.0f);
+        const float effS = faceW * (1.0f + ((innerPx > 0.0f) ? hnoise(seed, 904) * 0.006f : 0.0f));
+        const float cyE = std::cos(effYaw), syE = std::sin(effYaw);
+        const float cr = std::cos(rollRad), sr = std::sin(rollRad);
+
+        for (int i = 0; i < FaceMeshFrame::kFaceCount; ++i) {
+            float lx = (xyz[i * 3 + 0] - mx0) / canonW;
+            const float ly = (xyz[i * 3 + 1] - my0) / canonW;
+            const float lz = (xyz[i * 3 + 2] - mz0) / canonW;
+            const float nu = (uv[i * 2] - 0.5f) * 2.0f;
+            const float nv = (0.5f - uv[i * 2 + 1]) * 2.0f;
+            if (nv < 0.15f && nv > -0.85f && std::fabs(nu) > 0.35f) {
+                const float w = std::exp(-0.5f * std::pow((nv + 0.32f) / 0.34f, 2.0f)) *
+                                detail::smoothstep(0.35f, 0.85f, std::fabs(nu));
+                lx *= (1.0f + 0.18f * w);
+            }
+            const float x1 = -(lx * cyE + lz * syE);  // Mirrored front camera (det < 0)
+            const float xr = cr * x1 - sr * ly;
+            const float yr = sr * x1 + cr * ly;
+            float sx = cx + xr * effS;
+            float syTop = 1.0f - ((1.0f - cyTop) + yr * effS * kAspect);
+            if (innerPx > 0.0f || contourPx > 0.0f) {
+                const float rUv = std::hypot((uv[i * 2] - 0.5f) / 0.36f, (uv[i * 2 + 1] - 0.5f) / 0.43f);
+                const float isC = detail::smoothstep(0.62f, 0.90f, rUv);
+                const float sig = innerPx * (1.0f - isC) + contourPx * isC;
+                sx += hnoise(seed * 503 + i, 1) * sig * 1.4f / kW;
+                syTop += hnoise(seed * 503 + i, 2) * sig * 1.4f / kH;
+                if (isC > 0.1f) sx += isC * ((-nu < 0.0f) ? corrL : corrR);
+            }
+            mp[i * 2 + 0] = sx;
+            mp[i * 2 + 1] = syTop;
+        }
+        auto synthIris = [&](int b, int o, int in, int t, int bo) {
+            const float icx = 0.25f * (mp[o * 2] + mp[in * 2] + mp[t * 2] + mp[bo * 2]);
+            const float icy = 0.25f * (mp[o * 2 + 1] + mp[in * 2 + 1] + mp[t * 2 + 1] + mp[bo * 2 + 1]);
+            const float ir = std::hypot(mp[o * 2] - mp[in * 2], (mp[o * 2 + 1] - mp[in * 2 + 1]) / kAspect) * 0.22f;
+            mp[b * 2] = icx; mp[b * 2 + 1] = icy;
+            mp[(b + 1) * 2] = icx + ir; mp[(b + 1) * 2 + 1] = icy;
+            mp[(b + 2) * 2] = icx; mp[(b + 2) * 2 + 1] = icy + ir * kAspect;
+            mp[(b + 3) * 2] = icx - ir; mp[(b + 3) * 2 + 1] = icy;
+            mp[(b + 4) * 2] = icx; mp[(b + 4) * 2 + 1] = icy - ir * kAspect;
+        };
+        synthIris(468, 33, 133, 159, 145);
+        synthIris(473, 362, 263, 386, 374);
+        return mp;
+    };
+
+    // 1. Mirrored front-camera (det < 0) in-plane roll extrapolation must recover true omega (not cancel it!).
+    {
+        const auto mp0 = makeMirroredMp(0.50f, 0.46f, 0.42f, 0.0f, 0.00f, 1, 0.0f, 0.0f);
+        const auto mp1 = makeMirroredMp(0.50f, 0.46f, 0.42f, 0.0f, 0.06f, 2, 0.0f, 0.0f);
+        const auto mp2 = makeMirroredMp(0.50f, 0.46f, 0.42f, 0.0f, 0.12f, 3, 0.0f, 0.0f);
+        FaceMeshFrame f0{}, f1{}, f2{};
+        EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mp0.data(), 478, kAspect, f0));
+        EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mp1.data(), 478, kAspect, f1));
+        EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mp2.data(), 478, kAspect, f2));
+        std::array<float, 478> mx0{}, my0{}, mx1{}, my1{};
+        for (int i = 0; i < 478; ++i) {
+            mx0[i] = f0.landmarks[i * 2]; my0[i] = f0.landmarks[i * 2 + 1] / kAspect;
+            mx1[i] = f1.landmarks[i * 2]; my1[i] = f1.landmarks[i * 2 + 1] / kAspect;
+        }
+        float p0[8], p1[8], vel[8];
+        FaceMeshFilter::fitPose(mx0.data(), my0.data(), p0);
+        FaceMeshFilter::fitPose(mx1.data(), my1.data(), p1);
+        EXPECT_TRUE(FaceMeshFilter::detOf(p1) < 0.0f);
+        for (int k = 0; k < 8; ++k) vel[k] = (p1[k] - p0[k]) / 33.333f;
+        std::array<float, FaceMeshFrame::kCoordCount> ext{};
+        FaceMeshFilter::extrapolate(f1.landmarks.data(), p1, vel, 33.333f, kAspect, ext.data());
+        float errMean = 0.0f;
+        for (int i : cheekIdx) {
+            errMean += std::hypot((ext[i * 2] - f2.landmarks[i * 2]) * kW,
+                                  (ext[i * 2 + 1] - f2.landmarks[i * 2 + 1]) * kH);
+        }
+        errMean /= static_cast<float>(cheekIdx.size());
+        EXPECT_TRUE(errMean <= 0.80f);
+    }
+
+    // 2. Stationary mirrored human face with realistic MediaPipe jitter:
+    //    - FaceMeshFilter 3D Z-column (poseW) must NOT explode into 13px spikes that yank z=-0.43 cheek points;
+    //    - FaceMeshDeformer cheek slimming displacement (v205 mid-cheek + v361/v288/v397 outer cheek) must NOT twitch!
+    {
+        FaceMeshFilter flt;
+        FaceMeshDeformer def;
+        FaceMeshDeformer::Params dp{};
+        dp.faceSlim = 0.65f;
+        dp.vFace = 0.50f;
+        dp.cheekboneSlim = 0.45f;
+        dp.eyeEnlarge = 0.20f;
+
+        std::array<float, FaceMeshFrame::kCoordCount> out{}, prevOut{}, prevDisp{};
+        float pose[8]{}, prevPose[8]{};
+        float maxFiltCheekPx = 0.0f;
+        float maxPoseWPx = 0.0f;
+        float maxDeformDispJumpPx = 0.0f;
+
+        for (int f = 0; f < 140; ++f) {
+            const int64_t ts = 2000 + f * 33;
+            const auto mp = makeMirroredMp(0.50f, 0.46f, 0.44f, 0.20f, 0.0f, 100 + f, 0.85f, 2.5f);
+            FaceMeshFrame mf{};
+            EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mp.data(), 478, kAspect, mf));
+            flt.filter(ts, mf.landmarks.data(), kAspect, out.data(), pose);
+            float meta[FaceMeshFrame::kMetaSize]{};
+            EXPECT_TRUE(FaceMeshFrame::fillMeta(out.data(), FaceMeshFrame::kCoordCount, kAspect, meta));
+            EXPECT_TRUE(def.deform(
+                out.data(), kAspect, meta[2], meta[3], meta[4], meta[5],
+                meta[7], meta[8], meta[9], 1.0f, 1.0f, 1.0f, dp, ts));
+            const float* wl = def.warpedLandmarks();
+            if (f >= 15) {
+                const float dW = std::hypot(pose[6] - prevPose[6], pose[7] - prevPose[7]) * kW;
+                maxPoseWPx = std::max(maxPoseWPx, dW);
+                for (int i : cheekIdx) {
+                    const float fs = std::hypot((out[i * 2] - prevOut[i * 2]) * kW,
+                                                (out[i * 2 + 1] - prevOut[i * 2 + 1]) * kH);
+                    maxFiltCheekPx = std::max(maxFiltCheekPx, fs);
+                    const float cdx = (wl[i * 2] - out[i * 2]) * kW;
+                    const float cdy = (wl[i * 2 + 1] - out[i * 2 + 1]) * kH;
+                    const float dj = std::hypot(cdx - prevDisp[i * 2], cdy - prevDisp[i * 2 + 1]);
+                    maxDeformDispJumpPx = std::max(maxDeformDispJumpPx, dj);
+                }
+            }
+            prevOut = out;
+            for (int i = 0; i < FaceMeshFrame::kFaceCount; ++i) {
+                prevDisp[i * 2] = (wl[i * 2] - out[i * 2]) * kW;
+                prevDisp[i * 2 + 1] = (wl[i * 2 + 1] - out[i * 2 + 1]) * kH;
+            }
+            std::memcpy(prevPose, pose, sizeof(pose));
+        }
+        EXPECT_TRUE(maxPoseWPx <= 2.20f);
+        EXPECT_TRUE(maxFiltCheekPx <= 1.35f);
+        EXPECT_TRUE(maxDeformDispJumpPx <= 0.45f);
+    }
+
+    // 3. FaceRoiSelector deadzone lock: slight handheld sway at mid-distance (fw=0.26) must NOT drift
+    //    the 256x256 crop rect every frame into MediaPipe VIDEO tracker, yet large moves must still recenter.
+    {
+        FaceRoiSelector roi;
+        int cropMoves = 0;
+        CropRect prev = CropRect::full();
+        for (int f = 0; f < 150; ++f) {
+            const int64_t ts = 5000 + f * 33;
+            const float tSec = static_cast<float>(f * 33) * 0.001f;
+            const float cx = 0.50f + 0.022f * std::sin(2.0f * 3.14159f * 0.8f * tSec);
+            const float cy = 0.52f + 0.010f * std::cos(2.0f * 3.14159f * 0.7f * tSec);
+            const float fw = 0.26f + 0.018f * std::sin(2.0f * 3.14159f * 0.5f * tSec);
+            roi.onFace(cx, cy, fw, ts, ts + 20);
+            const CropRect c = roi.select(720, 1280, ts + 25);
+            EXPECT_TRUE(!c.isFullFrame());
+            if (f > 5 && (std::fabs(c.left - prev.left) > 1e-4f ||
+                          std::fabs(c.top - prev.top) > 1e-4f ||
+                          std::fabs(c.width - prev.width) > 1e-4f)) {
+                ++cropMoves;
+            }
+            prev = c;
+        }
+        EXPECT_TRUE(cropMoves <= 12);
+
+        // Large walk to left side (cx=0.20) must recenter promptly
+        for (int f = 0; f < 25; ++f) {
+            const int64_t ts = 10000 + f * 33;
+            roi.onFace(0.20f, 0.52f, 0.26f, ts, ts + 20);
+        }
+        const CropRect recentered = roi.select(720, 1280, 10850);
+        EXPECT_TRUE(!recentered.isFullFrame());
+        EXPECT_TRUE(recentered.left <= 0.05f);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1380,6 +1578,7 @@ int main() {
     testV367BeardAndNasalShadowNotMisclassifiedAsForeignOccluder();
     testV368FacialContourStabilityNoJumping();
     testV369SlightCameraShakeZeroWaterRippleAndZeroMeshShear();
+    testV3610CheekBeautyStabilityMirroredNoTwitch();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

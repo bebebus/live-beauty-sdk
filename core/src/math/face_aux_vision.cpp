@@ -282,12 +282,12 @@ void FaceOcclusionSolver::compute(
             rgbToYCbCr(p[0], p[1], p[2], y, cb, cr);
 
             const float chromaDist = std::fabs(cb - refCb) + std::fabs(cr - refCr);
-            const float chromaThr = (inEyesBrow || inMouth) ? 44.0f : 28.0f;
-            const bool nonSkinChroma = (cb > 138.0f || cr < 118.0f) && chromaDist > chromaThr;
+            const float chromaThr = (inEyesBrow || inMouth) ? 46.0f : 34.0f;
+            const bool nonSkinChroma = (cb > 142.0f || cr < 114.0f) && chromaDist > chromaThr;
 
             float foreignScore = 0.0f;
             if (nonSkinChroma) {
-                foreignScore = detail::clampf((chromaDist - chromaThr) / 20.0f, 0.0f, 1.0f);
+                foreignScore = detail::clampf((chromaDist - chromaThr) / 22.0f, 0.0f, 1.0f);
             }
             if (foreignScore > 0.25f) {
                 rawOcc_[rowOff + mx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(foreignScore * 255.0f)), 0, 255));
@@ -320,7 +320,6 @@ void FaceOcclusionSolver::compute(
     }
 
     // 4. 3x3 box feather + invert to visibility + NEON temporal EMA
-    const float alpha = hasHistory_ ? kTemporalAlpha : 1.0f;
     alignas(16) float targetVis[kMaskPixels];
     for (int my = 0; my < kMaskSize; ++my) {
         const int rowOff = my * kMaskSize;
@@ -344,16 +343,21 @@ void FaceOcclusionSolver::compute(
     }
 
 #if LB_HAS_NEON
-    const float32x4_t vOneMinusA = vdupq_n_f32(1.0f - alpha);
-    const float32x4_t vAlpha = vdupq_n_f32(alpha);
-    const float32x4_t vSnapThr = vdupq_n_f32(56.0f);
+    const float smoothAlpha = hasHistory_ ? 0.42f : 1.0f;
+    const float fastAlpha = hasHistory_ ? 0.72f : 1.0f;
+    const float32x4_t vOneMinusA = vdupq_n_f32(1.0f - smoothAlpha);
+    const float32x4_t vAlpha = vdupq_n_f32(smoothAlpha);
+    const float32x4_t vOneMinusF = vdupq_n_f32(1.0f - fastAlpha);
+    const float32x4_t vFastA = vdupq_n_f32(fastAlpha);
+    const float32x4_t vSnapThr = vdupq_n_f32(96.0f);
     const float32x4_t vHalf = vdupq_n_f32(0.5f);
     for (int i = 0; i < kMaskPixels; i += 4) {
         float32x4_t prev = vld1q_f32(&emaMask_[i]);
         float32x4_t cur  = vld1q_f32(&targetVis[i]);
         float32x4_t blended = vmlaq_f32(vmulq_f32(prev, vOneMinusA), cur, vAlpha);
+        float32x4_t fastBlended = vmlaq_f32(vmulq_f32(prev, vOneMinusF), cur, vFastA);
         uint32x4_t snapMask = vcgtq_f32(vabdq_f32(cur, prev), vSnapThr);
-        float32x4_t sm   = vbslq_f32(snapMask, cur, blended);
+        float32x4_t sm   = vbslq_f32(snapMask, fastBlended, blended);
         vst1q_f32(&emaMask_[i], sm);
         uint32x4_t u32 = vcvtq_u32_f32(vaddq_f32(sm, vHalf));
         uint16x4_t u16 = vqmovn_u32(u32);
@@ -364,8 +368,10 @@ void FaceOcclusionSolver::compute(
         outMaskR8[i + 3] = vget_lane_u8(u8, 3);
     }
 #else
+    const float smoothAlpha = hasHistory_ ? 0.42f : 1.0f;
+    const float fastAlpha = hasHistory_ ? 0.72f : 1.0f;
     for (int i = 0; i < kMaskPixels; ++i) {
-        const float effAlpha = (std::fabs(targetVis[i] - emaMask_[i]) > 56.0f) ? 1.0f : alpha;
+        const float effAlpha = (std::fabs(targetVis[i] - emaMask_[i]) > 96.0f) ? fastAlpha : smoothAlpha;
         const float sm = emaMask_[i] * (1.0f - effAlpha) + targetVis[i] * effAlpha;
         emaMask_[i] = sm;
         outMaskR8[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(sm)), 0, 255));
