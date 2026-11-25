@@ -94,6 +94,12 @@ void RenderPipeline::resetTemporal() {
 
 void RenderPipeline::resetDeformerTemporal() {
     deformer_.resetTemporal();
+    deformer2_.resetTemporal();
+}
+
+void RenderPipeline::resetPixelTemporal() {
+    denoiseHistoryValid_ = false;
+    matteHistoryValid_ = false;
 }
 
 void RenderPipeline::releaseGpuResources() {

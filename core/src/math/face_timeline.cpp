@@ -116,6 +116,7 @@ void FaceTimeline::clearHistory() {
     eyeMakeupTarget_ = 1.0f;
     poseVelValid_ = false;
     poseMoving_ = false;
+    poseVelGain_ = 0.0f;
     meshPresent_.fill(false);
     meshHasIris_.fill(false);
     eventHead_ = 0;
@@ -145,6 +146,7 @@ void FaceTimeline::dropSamples() {
     eyeMakeupTarget_ = 1.0f;
     poseVelValid_ = false;
     poseMoving_ = false;
+    poseVelGain_ = 0.0f;
     meshPresent_.fill(false);
     meshHasIris_.fill(false);
 }
@@ -214,14 +216,25 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
         }
     }
 
+    const bool hadVel = poseVelValid_;
     poseVelValid_ = (mesh != nullptr && count_ > 0 && meshPresent_[prevSlot]);
     if (poseVelValid_) {
         const float dt = static_cast<float>(sampleTs - times_[prevSlot]);
         for (int k = 0; k < FaceMeshFilter::kPoseSize; ++k) {
-            poseVel_[k] = (meshPose_[slot][k] - meshPose_[prevSlot][k]) / dt;
+            const float instVel = (meshPose_[slot][k] - meshPose_[prevSlot][k]) / dt;
+            poseVel_[k] = hadVel ? (poseVel_[k] + 0.52f * (instVel - poseVel_[k])) : instVel;
         }
+    } else {
+        poseVel_.fill(0.0f);
     }
-    poseMoving_ = (mesh != nullptr && meshFilter_.poseSpeed() > meshFilter_.poseDead());
+    if (mesh != nullptr) {
+        const float dead = meshFilter_.poseDead();
+        poseVelGain_ = detail::smoothstep(dead * 1.15f, dead * 2.60f + 0.05f, meshFilter_.poseSpeed());
+        poseMoving_ = (poseVelGain_ > 1e-3f);
+    } else {
+        poseVelGain_ = 0.0f;
+        poseMoving_ = false;
+    }
     const bool restart = (count_ == 0);
     rawX_[slot] = x;
     rawY_[slot] = y;
@@ -258,6 +271,7 @@ void FaceTimeline::update(int64_t nowMs) {
         sampleSpeed_ = 0.0f;
         sampleMotion_ = 0.0f;
         poseMoving_ = false;
+        poseVelGain_ = 0.0f;
     }
     if (count_ == 0) {
         sampleSpeed_ = 0.0f;
@@ -292,11 +306,11 @@ const float* FaceTimeline::at(int64_t t) {
         const float horizon = std::min(static_cast<float>(t - times_[newest]), horizonMs());
         float mx = 0.0f, my = 0.0f;
         if (meshPresent_[newest]) {
-            if (poseVelValid_ && poseMoving_ && horizon > 0.0f) {
+            if (poseVelValid_ && poseVelGain_ > 1e-3f && horizon > 0.0f) {
                 float shift[2];
                 FaceMeshFilter::centerShift(
                     meshCoords_[newest].data(), meshPose_[newest].data(), poseVel_.data(),
-                    horizon * kExtrapolateDamp, aspect_, shift);
+                    horizon * kExtrapolateDamp * poseVelGain_, aspect_, shift);
                 mx = shift[0];
                 my = shift[1];
             }
@@ -336,9 +350,14 @@ const float* FaceTimeline::at(int64_t t) {
     const float face = std::max(output_[kRxIndex], kRadiusFloor);
     const float motion = std::max(speed_, sampleMotion_);
     const float shakeEyeKeep = 1.0f - 0.75f * detail::smoothstep(0.55f, 1.35f, motion);
-    const float shakeFaceKeep = 1.0f - 0.70f * detail::smoothstep(0.65f, 1.50f, motion);
     steadyEyeTarget_ = (1.0f - detail::smoothstep(kEyeFade[0], kEyeFade[1], distance / eye)) * shakeEyeKeep;
-    steadyFaceTarget_ = (1.0f - detail::smoothstep(kFaceFade[0], kFaceFade[1], distance / face)) * shakeFaceKeep;
+    // Active landmark tracking must NEVER pump face-shape strength on speech or in-frame head sway;
+    // only fade gently if tracking is coasting in a miss run or beyond 0.55..1.10 face half-widths.
+    if (missSince() == kTimeInvalid) {
+        steadyFaceTarget_ = 1.0f - 0.50f * detail::smoothstep(0.55f, 1.10f, distance / face);
+    } else {
+        steadyFaceTarget_ = 1.0f - detail::smoothstep(kFaceFade[0], kFaceFade[1], distance / face);
+    }
     const float motionKeep = 1.0f - 0.85f * detail::smoothstep(kEyeMakeupMotion[0], kEyeMakeupMotion[1], motion);
     const float extrapKeep = 1.0f - detail::smoothstep(kEyeMakeupExtrap[0], kEyeMakeupExtrap[1], distance / eye);
     eyeMakeupTarget_ = motionKeep * extrapKeep;
@@ -381,8 +400,8 @@ bool FaceTimeline::meshAt(int64_t t, SmoothedMeshView& outView) {
     if (t >= times_[newest]) {
         if (!meshPresent_[newest]) return false;
         meshOutMeta_ = meshMeta_[newest];
-        const float horizon = std::min(static_cast<float>(t - times_[newest]), horizonMs()) * kExtrapolateDamp;
-        if (poseVelValid_ && poseMoving_ && horizon > 0.0f) {
+        const float horizon = std::min(static_cast<float>(t - times_[newest]), horizonMs()) * kExtrapolateDamp * poseVelGain_;
+        if (poseVelValid_ && poseVelGain_ > 1e-3f && horizon > 0.0f) {
             FaceMeshFilter::extrapolate(
                 meshCoords_[newest].data(), meshPose_[newest].data(), poseVel_.data(),
                 horizon, aspect_, meshOutCoords_.data());
@@ -550,7 +569,7 @@ void FaceTimeline::updateVelocity(int64_t sampleTs, int slot) {
 
 void FaceTimeline::settle() {
     steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_, 28.0f, 50.0f);
-    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 28.0f, 50.0f);
+    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 160.0f, 120.0f);
     eyeMakeupKeep_ = approach(eyeMakeupKeep_, eyeMakeupTarget_, pendingDt_, kEyeMakeupOutMs, kEyeMakeupInMs);
     pendingDt_ = 0.0f;
 }

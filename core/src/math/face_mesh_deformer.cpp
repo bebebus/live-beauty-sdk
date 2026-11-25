@@ -247,10 +247,55 @@ bool FaceMeshDeformer::deform(
     const float mouthHalfW = std::max(0.5f * std::hypot(srcMx_[291] - srcMx_[61], srcMy_[291] - srcMy_[61]), 0.01f);
     const float mouthHalfH = std::max(0.5f * std::hypot(srcMx_[0] - srcMx_[17], srcMy_[0] - srcMy_[17]), 0.35f * mouthHalfW);
 
+    const float span132To361 = std::max(std::hypot(srcMx_[361] - srcMx_[132], srcMy_[361] - srcMy_[132]), 0.05f);
+    const float cheekMidX = 0.5f * (srcMx_[132] + srcMx_[361]);
+    const float cheekMidY = 0.5f * (srcMy_[132] + srcMy_[361]);
+    const float rawSignedYaw = ((srcMx_[1] - cheekMidX) * ux + (srcMy_[1] - cheekMidY) * uy) / span132To361;
+
+    const float lineMidX = 0.5f * (srcMx_[10] + srcMx_[152]);
+    const float lineMidY = 0.5f * (srcMy_[10] + srcMy_[152]);
+    const float midBoneX = 0.35f * srcMx_[168] + 0.35f * srcMx_[2] + 0.30f * srcMx_[152];
+    const float midBoneY = 0.35f * srcMy_[168] + 0.35f * srcMy_[2] + 0.30f * srcMy_[152];
+    const float halfH = std::max(0.5f * fh, 0.025f);
+    const float spanBeta = 24.0f / std::max(fw, 0.05f);
+    const float excessBeta = 20.0f / std::max(fw, 0.05f);
+    const auto& leftCandidates = (mirrorSign > 0.0f) ? tbl.cheekAnatRight : tbl.cheekAnatLeft;
+    const auto& rightCandidates = (mirrorSign > 0.0f) ? tbl.cheekAnatLeft : tbl.cheekAnatRight;
+    const float rawWLeft = std::max(softMaxSpan(leftCandidates.data(), static_cast<int>(leftCandidates.size()),
+                                                -1.0f, midBoneX, midBoneY, ux, uy, spanBeta), 0.10f * fw);
+    const float rawWRight = std::max(softMaxSpan(rightCandidates.data(), static_cast<int>(rightCandidates.size()),
+                                                 1.0f, midBoneX, midBoneY, ux, uy, spanBeta), 0.10f * fw);
+
+    float signedYaw = rawSignedYaw;
+    float wLeft = rawWLeft;
+    float wRight = rawWRight;
+    float envAlpha = 1.0f;
+    if (temporal) {
+        const float rawL = rawWLeft / std::max(fw, 1e-4f);
+        const float rawR = rawWRight / std::max(fw, 1e-4f);
+        if (temporalFresh) {
+            signedYawState_ = rawSignedYaw;
+            wLeftRatioState_ = rawL;
+            wRightRatioState_ = rawR;
+        } else {
+            const float yawJump = std::fabs(rawSignedYaw - signedYawState_);
+            const float envTau = (yawJump > 0.11f) ? 26.0f : 150.0f;
+            envAlpha = 1.0f - std::exp(-dtMs / envTau);
+            signedYawState_ += envAlpha * (rawSignedYaw - signedYawState_);
+            wLeftRatioState_ += envAlpha * (rawL - wLeftRatioState_);
+            wRightRatioState_ += envAlpha * (rawR - wRightRatioState_);
+        }
+        signedYaw = signedYawState_;
+        wLeft = std::max(wLeftRatioState_ * fw, 0.10f * fw);
+        wRight = std::max(wRightRatioState_ * fw, 0.10f * fw);
+    }
+
+    const float smoothYawWeight = 1.0f - detail::smoothstep(0.45f, FaceMeshFrame::kMaxYawRatio, std::fabs(signedYaw));
+    const float effYawW = temporal ? smoothYawWeight : yawWeight;
     const float faceMod = presence * steadyFace;
     const float eyeMod = presence * steadyEye;
-    const float symFaceMod = faceMod * yawWeight;
-    const float symEyeMod = eyeMod * yawWeight;
+    const float symFaceMod = faceMod * effYawW;
+    const float symEyeMod = eyeMod * effYawW;
 
     const float sFaceSlim = detail::clampf(params.faceSlim, 0.0f, 1.0f) * faceMod;
     const float sVFace = detail::clampf(params.vFace, 0.0f, 1.0f) * faceMod;
@@ -259,7 +304,7 @@ bool FaceMeshDeformer::deform(
     const float sCheekbone = detail::clampf(params.cheekboneSlim, 0.0f, 1.0f) * faceMod;
     // 纵向防拉长比例补偿：纯横向瘦脸/窄脸会拉高脸长宽比、显头长；在 2D 连续轮廓场内温和微收上下轮廓，
     // 严格保持保面积微分同胚（零三角翻面/零侧脸重影）且五官中区零压扁。
-    const float antiLong = detail::clampf(sFaceSlim * 0.85f + sFaceNarrow * 0.55f, 0.0f, 1.0f) * yawWeight;
+    const float antiLong = detail::clampf(sFaceSlim * 0.85f + sFaceNarrow * 0.55f, 0.0f, 1.0f) * effYawW;
     const float sChin = detail::clampf(params.chinShape, -1.0f, 1.0f) * symFaceMod;
     const float sForehead = detail::clampf(params.foreheadShape, -1.0f, 1.0f) * symFaceMod;
     const float sCranial = detail::clampf(params.cranialTop, 0.0f, 1.0f) * symFaceMod;
@@ -271,37 +316,22 @@ bool FaceMeshDeformer::deform(
     const float sMouthSize = detail::clampf(params.mouthSize, -1.0f, 1.0f) * symEyeMod;
     const float sMouthSmile = detail::clampf(params.mouthSmile, 0.0f, 1.0f) * symEyeMod;
 
-    const float span132To361 = std::max(std::hypot(srcMx_[361] - srcMx_[132], srcMy_[361] - srcMy_[132]), 0.05f);
-    const float cheekMidX = 0.5f * (srcMx_[132] + srcMx_[361]);
-    const float cheekMidY = 0.5f * (srcMy_[132] + srcMy_[361]);
-    const float signedYaw = ((srcMx_[1] - cheekMidX) * ux + (srcMy_[1] - cheekMidY) * uy) / span132To361;
     const float poseRightFade = 1.0f - 0.82f * detail::smoothstep(0.36f, 0.66f, signedYaw);
     const float poseLeftFade = 1.0f - 0.82f * detail::smoothstep(0.36f, 0.66f, -signedYaw);
-    const float effRightW = std::min(rightWeight, poseRightFade);
-    const float effLeftW = std::min(leftWeight, poseLeftFade);
+    const float smoothRightW = 1.0f - detail::smoothstep(0.36f, 0.66f, signedYaw);
+    const float smoothLeftW = 1.0f - detail::smoothstep(0.36f, 0.66f, -signedYaw);
+    const float effRightW = std::min(temporal ? smoothRightW : rightWeight, poseRightFade);
+    const float effLeftW = std::min(temporal ? smoothLeftW : leftWeight, poseLeftFade);
     const float rSideW = (mirrorSign > 0.0f) ? effLeftW : effRightW;
     const float lSideW = (mirrorSign > 0.0f) ? effRightW : effLeftW;
     const float maxDisp = 0.135f * std::max(fw, fh);
     const auto& canonicalUv = FaceMeshTopology::kCanonicalUv;
 
-    const float lineMidX = 0.5f * (srcMx_[10] + srcMx_[152]);
-    const float lineMidY = 0.5f * (srcMy_[10] + srcMy_[152]);
-    const float midBoneX = 0.35f * srcMx_[168] + 0.35f * srcMx_[2] + 0.30f * srcMx_[152];
-    const float midBoneY = 0.35f * srcMy_[168] + 0.35f * srcMy_[2] + 0.30f * srcMy_[152];
-    const float halfH = std::max(0.5f * fh, 0.025f);
-    const float spanBeta = 64.0f / std::max(fw, 0.05f);
-    const float excessBeta = 48.0f / std::max(fw, 0.05f);
-    const auto& leftCandidates = (mirrorSign > 0.0f) ? tbl.cheekAnatRight : tbl.cheekAnatLeft;
-    const auto& rightCandidates = (mirrorSign > 0.0f) ? tbl.cheekAnatLeft : tbl.cheekAnatRight;
-    const float wLeft = std::max(softMaxSpan(leftCandidates.data(), static_cast<int>(leftCandidates.size()),
-                                             -1.0f, midBoneX, midBoneY, ux, uy, spanBeta), 0.10f * fw);
-    const float wRight = std::max(softMaxSpan(rightCandidates.data(), static_cast<int>(rightCandidates.size()),
-                                              1.0f, midBoneX, midBoneY, ux, uy, spanBeta), 0.10f * fw);
     const float wMean = std::max(0.5f * (wLeft + wRight), 0.16f * fw);
-    const float frontGate = 1.0f - detail::smoothstep(0.05f, 0.14f, std::fabs(signedYaw));
-    const float symExp = 0.85f * frontGate;
-    const float lSym = detail::clampf(std::pow(wLeft / wMean, symExp), 0.80f, 1.25f);
-    const float rSym = detail::clampf(std::pow(wRight / wMean, symExp), 0.80f, 1.25f);
+    const float frontGate = 1.0f - detail::smoothstep(0.08f, 0.34f, std::fabs(signedYaw));
+    const float symExp = 0.42f * frontGate;
+    const float lSym = detail::clampf(std::pow(wLeft / wMean, symExp), 0.88f, 1.14f);
+    const float rSym = detail::clampf(std::pow(wRight / wMean, symExp), 0.88f, 1.14f);
     const bool contourActive = (sFaceSlim > 1e-4f || sVFace > 1e-4f || sFaceNarrow > 1e-4f || sCheekbone > 1e-4f);
 
     auto evalContour2D = [&](float px, float py) -> Vec2 {
@@ -524,7 +554,17 @@ bool FaceMeshDeformer::deform(
         const float my = cyDir * (1.0f - wRad) + radY * wRad;
         const float mNorm = std::max(std::hypot(mx, my), 1e-4f);
         const float rx = mx / mNorm, ry = my / mNorm;
-        const float silExcess = std::min(softMaxOvalExcess(k, ox, oy, rx, ry, excessBeta), 0.070f * fw);
+        const float rawSilExcess = std::min(softMaxOvalExcess(k, ox, oy, rx, ry, excessBeta), 0.070f * fw);
+        float silExcess = rawSilExcess;
+        if (temporal) {
+            const float rawSilRatio = rawSilExcess / std::max(fw, 1e-4f);
+            if (temporalFresh) {
+                silExcessRatioState_[k] = rawSilRatio;
+            } else {
+                silExcessRatioState_[k] += envAlpha * (rawSilRatio - silExcessRatioState_[k]);
+            }
+            silExcess = silExcessRatioState_[k] * fw;
+        }
         const float outwardDisp = std::max(0.0f, dispMx_[oi] * rx + dispMy_[oi] * ry);
         const float crownW = (sCranial > 1e-4f) ? detail::smoothstep(-0.10f, 0.68f, cNv) : 0.0f;
         const float templeW = (sCranial > 1e-4f)
@@ -639,6 +679,14 @@ bool FaceMeshDeformer::deform(
     }
     for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) relax_[i] *= relaxFactor_[i];
     if (temporal) {
+        if (!temporalFresh) {
+            const float down = 1.0f - std::exp(-dtMs / kRelaxTauDownMs);
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                if (relax_[i] < relaxState_[i] && relaxFactor_[i] > 0.75f) {
+                    relax_[i] = relaxState_[i] + down * (relax_[i] - relaxState_[i]);
+                }
+            }
+        }
         relaxState_ = relax_;
         temporalValid_ = true;
     }

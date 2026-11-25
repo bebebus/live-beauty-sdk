@@ -474,7 +474,10 @@ void LiveBeautyEngine::submitBodyMiss(int64_t /*sampleTsMs*/) {
 
 CropRect LiveBeautyEngine::selectFaceRoi(int frameWidth, int frameHeight, int64_t nowMs) {
     if (config_.maxFaces >= 2) return CropRect::full();
-    if (cameraShaking_.load(std::memory_order_relaxed) || faces_.slot(0).speed() > 0.35f) {
+    if (cameraShaking_.load(std::memory_order_relaxed)) {
+        return CropRect::full();
+    }
+    if (faces_.slot(0).speed() > 1.15f) {
         roiSelector_.onMiss();
         return CropRect::full();
     }
@@ -635,7 +638,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
 
     const bool shaking = cameraShaking_.load(std::memory_order_relaxed);
     if (shaking) {
-        pipeline_.resetTemporal();
+        pipeline_.resetPixelTemporal();
     }
     const float shakeGate = shaking ? 0.0f : 1.0f;
 

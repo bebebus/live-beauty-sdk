@@ -155,6 +155,7 @@ public:
 
     void setAssets(const PipelineAssets& assets) { assets_ = assets; }
     void resetTemporal();
+    void resetPixelTemporal();
     void resetDeformerTemporal();
     void releaseGpuResources();
 

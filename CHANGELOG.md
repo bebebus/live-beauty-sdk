@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.8] - 2026-11-25
+
+### Fixed
+- **Facial Contour & Face-Shape Stability Elimination of Frame-to-Frame Jumping (`FaceMeshFilter`, `FaceTimeline`, `FaceMeshDeformer`, `FaceRoiSelector`, `LiveBeautyEngine`)**:
+  - Split `FaceMeshFilter` canonical residuals into 4 anatomical regions (`midface`, `eyes`, `mouth`, and dedicated `facial contour` covering `kFaceOval` + outer cheek/jaw/temple ring at `0.65Hz` One-Euro with `2.2x` deadband and zero `lipPower` coupling), decoupled Procrustes translation `q_[0..1]` from steady linear scale/3D-pose `q_[2..7]` (`shapeCatchup` preserved for fast head turns), and removed `resExcess` lip-motion contamination from `motionSpeed_`, stopping speech and thumbnail contour noise from shaking the jawline and cheeks.
+  - Stabilized `FaceTimeline::steadyFace_` (`1.0` throughout active landmark tracking without speech/sway `shakeFaceKeep` pumping; smooth `160ms`/`120ms` miss ramps) and upgraded `FaceMeshFilter::extrapolate` + `poseVel_` to a pure 2D rigid Euclidean isometry (translation + damped roll only, zero scale/shear/3D-perspective extrapolation) with continuous `poseVelGain_`, eliminating 15Hz/30Hz inter-sample face-width sawtooth breathing.
+  - Added dimensionless scale-invariant temporal smoothing (`wLeftRatioState_`, `wRightRatioState_`, `signedYawState_`, `silExcessRatioState_`, `tau = 150ms` with `26ms` fast-turn adaptation), softened `spanBeta`/`excessBeta` (`24/fw`, `20/fw`) and `frontGate` (`[0.08, 0.34]`), restored damped `relax_` transitions (`kRelaxTauUpMs = 120ms`, `kRelaxTauDownMs = 35ms`), and split `RenderPipeline::resetPixelTemporal()` so handheld `cameraShaking` flushes pixel denoise/matte ghosts without resetting `FaceMeshDeformer` temporal state or thrashing `FaceRoiSelector` on moderate head motion.
+
 ## [3.6.7] - 2026-11-25
 
 ### Fixed

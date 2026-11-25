@@ -1136,6 +1136,127 @@ void testV367BeardAndNasalShadowNotMisclassifiedAsForeignOccluder() {
     EXPECT_TRUE(mask[cupMy * 64 + cupMx] <= 80);
 }
 
+void testV368FacialContourStabilityNoJumping() {
+    constexpr float kAspect = 9.0f / 16.0f;
+    FaceTimeline tl;
+    tl.setAspect(kAspect);
+    FaceMeshDeformer def;
+    FaceMeshDeformer::Params params{};
+    params.faceSlim = 0.78f;
+    params.vFace = 0.68f;
+    params.faceNarrow = 0.50f;
+    params.faceSmall = 0.42f;
+    params.cheekboneSlim = 0.58f;
+    params.chinShape = 0.45f;
+
+    // 1. Talking / animated lip motion + realistic MediaPipe 256px contour noise around 5-deg yaw (signedYaw ~ 0.09):
+    //    steadyFace() must stay >= 0.99 (never pumped down by lip motion!), and warped jaw/cheek width must NOT jump!
+    float prevJawW = -1.0f;
+    float prevCheekW = -1.0f;
+    float maxJawStep = 0.0f;
+    float maxCheekStep = 0.0f;
+    float minSteadyFace = 1.0f;
+
+    for (int f = 0; f < 45; ++f) {
+        const int64_t ts = 1000 + f * 33;
+        const float jitterSign = (f % 2 == 0) ? 1.0f : -1.0f;
+        const float scaleJitter = 1.0f + 0.008f * jitterSign;
+        const float yawJitter = 0.09f + 0.022f * jitterSign;  // oscillates right across old [0.05, 0.14] frontGate cliff!
+        std::array<float, FaceMeshFrame::kCoordCount> lm{};
+        makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.36f * scaleJitter, yawJitter, 0.0f, 0.0f, lm);
+
+        // Inject realistic thumbnail contour jitter on kFaceOval + speaking lip motion on lower lip/mouth
+        for (uint16_t oi : FaceMeshTopology::kFaceOval) {
+            const float side = (lm[oi * 2] >= 0.50f) ? 1.0f : -1.0f;
+            lm[oi * 2] += side * 0.0032f * jitterSign;
+        }
+        const float talkOpen = 0.016f * (0.5f + 0.5f * std::sin(static_cast<float>(f) * 1.15f));
+        for (int idx : {14, 17, 87, 317, 84, 314, 178, 402}) {
+            lm[idx * 2 + 1] -= talkOpen;  // bottom-up GL Y: lower lip moves down when speaking
+        }
+
+        FaceMeshFrame frame{};
+        frame.landmarks = lm;
+        frame.hasIris = true;
+        EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, frame.meta.data()));
+        std::array<float, FaceGeometryConstants::kStateSize> st{};
+        EXPECT_TRUE(FaceMeshFrame::fillGeometryState(
+            lm.data(), FaceMeshFrame::kCoordCount, frame.axisX(), frame.axisY(), kAspect, 1.0f, st.data()));
+
+        tl.add(ts, st.data(), &frame);
+        tl.update(ts);
+        EXPECT_TRUE(tl.at(ts) != nullptr);
+        FaceTimeline::SmoothedMeshView mv{};
+        EXPECT_TRUE(tl.meshAt(ts, mv));
+        EXPECT_TRUE(def.deform(
+            mv.landmarks, kAspect, mv.axisX(), mv.axisY(),
+            mv.faceWidth(), mv.faceHeight(),
+            mv.leftWeight(), mv.rightWeight(), mv.yawWeight(),
+            tl.presence(), tl.steadyFace(), tl.steadyEye(), params, ts));
+
+        if (f >= 8) {
+            minSteadyFace = std::min(minSteadyFace, tl.steadyFace());
+            const float* wl = def.warpedLandmarks();
+            const float jawW = std::hypot(wl[397 * 2] - wl[172 * 2], (wl[397 * 2 + 1] - wl[172 * 2 + 1]) / kAspect);
+            const float cheekW = std::hypot(wl[454 * 2] - wl[234 * 2], (wl[454 * 2 + 1] - wl[234 * 2 + 1]) / kAspect);
+            if (prevJawW > 0.0f) {
+                maxJawStep = std::max(maxJawStep, std::fabs(jawW - prevJawW));
+                maxCheekStep = std::max(maxCheekStep, std::fabs(cheekW - prevCheekW));
+            }
+            prevJawW = jawW;
+            prevCheekW = cheekW;
+        }
+    }
+    EXPECT_TRUE(minSteadyFace >= 0.99f);
+    EXPECT_TRUE(maxJawStep <= 0.0018f);
+    EXPECT_TRUE(maxCheekStep <= 0.0020f);
+
+    // 2. Async 15Hz inference + 30Hz render extrapolation during gentle head sway:
+    //    Inter-sample extrapolated frames must NOT extrapolate scale breathing or pump steadyFace!
+    tl.reset();
+    def.resetTemporal();
+    float maxExtrapWidthSawtooth = 0.0f;
+    float minSwaySteadyFace = 1.0f;
+    float lastRenderJawW = -1.0f;
+    for (int r = 0; r < 40; ++r) {
+        const int64_t renderTs = 3000 + r * 33;
+        if (r % 2 == 0) {
+            const float swayX = 0.50f + 0.045f * std::sin(static_cast<float>(r) * 0.22f);
+            const float scaleNoise = (r % 4 == 0) ? 1.010f : 0.990f;
+            std::array<float, FaceMeshFrame::kCoordCount> lm{};
+            makeCanonicalFace(kAspect, swayX, 0.50f, 0.36f * scaleNoise, 0.0f, 0.0f, 0.0f, lm);
+            FaceMeshFrame frame{};
+            frame.landmarks = lm;
+            frame.hasIris = true;
+            EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, frame.meta.data()));
+            std::array<float, FaceGeometryConstants::kStateSize> st{};
+            EXPECT_TRUE(FaceMeshFrame::fillGeometryState(
+                lm.data(), FaceMeshFrame::kCoordCount, frame.axisX(), frame.axisY(), kAspect, 1.0f, st.data()));
+            tl.add(renderTs, st.data(), &frame);
+        }
+        tl.update(renderTs);
+        EXPECT_TRUE(tl.at(renderTs) != nullptr);
+        FaceTimeline::SmoothedMeshView mv{};
+        EXPECT_TRUE(tl.meshAt(renderTs, mv));
+        EXPECT_TRUE(def.deform(
+            mv.landmarks, kAspect, mv.axisX(), mv.axisY(),
+            mv.faceWidth(), mv.faceHeight(),
+            mv.leftWeight(), mv.rightWeight(), mv.yawWeight(),
+            tl.presence(), tl.steadyFace(), tl.steadyEye(), params, renderTs));
+        if (r >= 10) {
+            minSwaySteadyFace = std::min(minSwaySteadyFace, tl.steadyFace());
+            const float* wl = def.warpedLandmarks();
+            const float jawW = std::hypot(wl[397 * 2] - wl[172 * 2], (wl[397 * 2 + 1] - wl[172 * 2 + 1]) / kAspect);
+            if (lastRenderJawW > 0.0f) {
+                maxExtrapWidthSawtooth = std::max(maxExtrapWidthSawtooth, std::fabs(jawW - lastRenderJawW));
+            }
+            lastRenderJawW = jawW;
+        }
+    }
+    EXPECT_TRUE(minSwaySteadyFace >= 0.98f);
+    EXPECT_TRUE(maxExtrapWidthSawtooth <= 0.0020f);
+}
+
 }  // namespace
 
 int main() {
@@ -1157,6 +1278,7 @@ int main() {
     testV36MulticlassParsingParticlesAndBundleGestureTriggers();
     testV366FastReacquireAndZeroLagLipNoseEye();
     testV367BeardAndNasalShadowNotMisclassifiedAsForeignOccluder();
+    testV368FacialContourStabilityNoJumping();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

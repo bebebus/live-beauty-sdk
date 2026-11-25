@@ -35,9 +35,15 @@ void FaceRoiSelector::onFace(
         smoothCy_ = mpCy;
         smoothFaceWidth_ = faceWidth;
     } else {
-        smoothCx_ += (mpCx - smoothCx_) * kEmaAlpha;
-        smoothCy_ += (mpCy - smoothCy_) * kEmaAlpha;
-        smoothFaceWidth_ += (faceWidth - smoothFaceWidth_) * kEmaAlpha;
+        const float dx = mpCx - smoothCx_;
+        const float dy = mpCy - smoothCy_;
+        const float dw = faceWidth - smoothFaceWidth_;
+        const float shift = std::hypot(dx, dy);
+        const float alphaPos = active_ ? (0.22f * detail::smoothstep(0.004f, 0.025f, shift)) : kEmaAlpha;
+        const float alphaW = active_ ? (0.22f * detail::smoothstep(0.005f, 0.028f, std::fabs(dw))) : kEmaAlpha;
+        smoothCx_ += dx * alphaPos;
+        smoothCy_ += dy * alphaPos;
+        smoothFaceWidth_ += dw * alphaW;
     }
     lastSampleMs_ = sampleMs;
     lastReceivedMs_ = receivedMs;

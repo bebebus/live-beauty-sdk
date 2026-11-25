@@ -77,11 +77,12 @@ public:
 
 private:
     static constexpr int kFace = FaceMeshFrame::kFaceCount;
-    static constexpr int kRegions = 3;
+    static constexpr int kRegions = 4;
     static constexpr int kIrisRight = 468;
     static constexpr int kIrisLeft = 473;
     static constexpr int kEyeRegion = 1;
     static constexpr int kLowRegion = 2;
+    static constexpr int kContourRegion = 3;
     static constexpr float kTeRefMs = 1000.0f / 30.0f;
 
     void startRun();
@@ -111,6 +112,7 @@ private:
     bool started_ = false;
     int64_t lastTs_ = kTimeInvalid;
     float vp_ = 0.0f;
+    float vpShape_ = 0.0f;
     float noisePower_ = -1.0f;
     float noiseMin_ = 0.0f;
 

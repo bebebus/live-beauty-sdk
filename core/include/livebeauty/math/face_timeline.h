@@ -122,6 +122,7 @@ private:
     std::array<float, FaceMeshFilter::kPoseSize> poseVel_{};
     bool poseVelValid_ = false;
     bool poseMoving_ = false;
+    float poseVelGain_ = 0.0f;
     int64_t last_ = kTimeInvalid;
     float sampleSpeed_ = 0.0f;
     float sampleMotion_ = 0.0f;
