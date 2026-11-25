@@ -1386,8 +1386,14 @@ void testV3610CheekBeautyStabilityMirroredNoTwitch() {
                               int seed, float innerPx, float contourPx) {
         std::array<float, FaceMeshFrame::kCoordCount> mp{};
         auto hnoise = [](int a, int b) {
-            const float s = std::sin(static_cast<float>(a) * 12.9898f + static_cast<float>(b) * 78.233f) * 43758.5453f;
-            return (s - std::floor(s)) * 2.0f - 1.0f;
+            uint32_t x = static_cast<uint32_t>(a) * 0x9E3779B9u ^
+                         (static_cast<uint32_t>(b) * 0x85EBCA6Bu + 0xC2B2AE35u);
+            x ^= x >> 16;
+            x *= 0x7FEB352Du;
+            x ^= x >> 15;
+            x *= 0x846CA68Bu;
+            x ^= x >> 16;
+            return static_cast<float>(x & 0xFFFFu) * (2.0f / 65535.0f) - 1.0f;
         };
         const float corrL = (contourPx > 0.0f) ? hnoise(seed, 901) * contourPx * 0.70f / kW : 0.0f;
         const float corrR = (contourPx > 0.0f) ? hnoise(seed, 902) * contourPx * 0.70f / kW : 0.0f;
@@ -1588,8 +1594,14 @@ void testV3612PhoneShakeZeroFeatureLag() {
         const float cp = std::cos(pitch), sp = std::sin(pitch);
         const float cr = std::cos(roll), sr = std::sin(roll);
         auto hnoise = [](int a, int b) {
-            const float s = std::sin(static_cast<float>(a) * 12.9898f + static_cast<float>(b) * 78.233f) * 43758.5453f;
-            return (s - std::floor(s)) * 2.0f - 1.0f;
+            uint32_t x = static_cast<uint32_t>(a) * 0x9E3779B9u ^
+                         (static_cast<uint32_t>(b) * 0x85EBCA6Bu + 0xC2B2AE35u);
+            x ^= x >> 16;
+            x *= 0x7FEB352Du;
+            x ^= x >> 15;
+            x *= 0x846CA68Bu;
+            x ^= x >> 16;
+            return static_cast<float>(x & 0xFFFFu) * (2.0f / 65535.0f) - 1.0f;
         };
 
         for (int i = 0; i < 468; ++i) {

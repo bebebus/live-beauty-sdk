@@ -544,7 +544,7 @@ void FaceMeshFilter::step(float teMs) {
         const float yawLag = std::hypot(hw1Raw - hw1_, hw2Raw - hw2_);
         const float pLag = std::hypot(p00Raw - p00_, std::hypot(p01Raw - p01_, p11Raw - p11_));
         const float pose3dLag = std::hypot(yawLag, pLag);
-        const float yawDead = std::max(0.30f, 1.8f * dead);
+        const float yawDead = std::max(0.52f, 3.0f * dead);
         const float pose3dActBoost = 42.0f * std::max(0.0f, effVp - 1.8f * dead);
         const float a3d = detail::oneEuroAlpha(
             kPose3dFcMin * comp + kPose3dBeta * std::max(0.0f, yawSpeed - yawDead) +
