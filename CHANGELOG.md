@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.11] - 2026-11-25
+
+### Fixed
+- **Realistic Natural Lip Color & 3D-Shaded Translucent Lipstick (`gles_shaders.cpp`, `metal_shaders.h`, `face_makeup_uv.cpp`, `render_pipeline.cpp`)**:
+  - Removed the synthetic `healthyLip` pink RGB override (`B > G` magenta-pink blended up to `51%` even in default `natural` mode with `lipstick = 0`) from `kCompositePro` / `fs_composite_pro`, and tightened `mouthZone` (`exclM` `0.55..0.88`) to match `1 - toneKeep` cleanly with zero lip-border skin bleed. Bare-lip care now preserves real lip RGB, shading, and texture 100%, only neutralizing unnatural bluish-purple cyanosis (`B > G`) and applying gentle proportional exposure balance for genuinely dim lips (`yLip < 0.42`, fading cleanly to `0.0` on normal/bright lips).
+  - Replaced `kMakeupLip` / `fs_makeup_lip`'s flat opaque tint (`illum ∈ [0.88, 0.99]`, ~89% flat paint) with physically-based 3D-shaded Beer-Lambert translucent lip staining (`shade ∈ [0.56, 1.00]` preserving real upper-lip shadow vs lower-lip fullness and `1.15x/0.85x` lip-line micro-texture), scaled glossy specular naturally with `uLipColor.a`, removed velvet white-haze lift, calibrated `kRoseBean` (`0.74, 0.33, 0.30`) and `kCoralPeach` (`0.82, 0.39, 0.31`) away from fluorescent pink, and refined `lipAlpha` (`0.75 * lipstick * faceGain`).
+
 ## [3.6.10] - 2026-11-25
 
 ### Fixed

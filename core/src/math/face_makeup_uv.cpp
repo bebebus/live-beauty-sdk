@@ -249,13 +249,13 @@ bool FaceMakeupUv::computeIrisCircle(
 
 Vec3 FaceMakeupUv::lipstickRgb(LipstickColor color) {
     switch (color) {
-        case LipstickColor::kCoralPeach: return {0.90f, 0.42f, 0.35f};
+        case LipstickColor::kCoralPeach: return {0.82f, 0.39f, 0.31f};
         case LipstickColor::kCherryRed:  return {0.84f, 0.16f, 0.15f};
         case LipstickColor::kMilkTea:    return {0.79f, 0.45f, 0.37f};
         case LipstickColor::kBerryPlum:  return {0.72f, 0.19f, 0.33f};
         case LipstickColor::kOrangeSoda: return {0.90f, 0.35f, 0.19f};
         case LipstickColor::kRoseBean:
-        default:                         return {0.77f, 0.35f, 0.34f};
+        default:                         return {0.74f, 0.33f, 0.30f};
     }
 }
 

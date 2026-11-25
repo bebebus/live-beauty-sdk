@@ -714,7 +714,7 @@ void RenderPipeline::renderMakeup(
     const float uvLipYaw = (frontFaceCw ? 1.0f : -1.0f) * rawSignedYaw;
     if (cfg.lipstick > 0.0f && assets_.contourHighlightAtlas != kInvalidTexture) {
         const Vec3 lipRgb = math::FaceMakeupUv::lipstickRgb(cfg.lipstickColor);
-        const float lipAlpha = cfg.lipstick * 0.85f * faceGain;
+        const float lipAlpha = cfg.lipstick * 0.75f * faceGain;
         if (lipAlpha > 1e-4f) {
             TextureBindings tb{};
             UniformBlock ub{};
