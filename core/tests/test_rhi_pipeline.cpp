@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <unordered_map>
 #include <vector>

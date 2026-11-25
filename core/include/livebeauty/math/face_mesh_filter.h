@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include "livebeauty/math/face_geometry.h"
 #include "livebeauty/types.h"
 

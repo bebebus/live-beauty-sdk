@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 #include "livebeauty/bundle/effect_bundle.h"
