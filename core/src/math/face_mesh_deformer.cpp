@@ -224,16 +224,16 @@ bool FaceMeshDeformer::deform(
     const float fw = faceWidth;
     const float fh = faceHeight;
 
-    const float rEyeX = 0.25f * (srcMx_[33] + srcMx_[133] + srcMx_[159] + srcMx_[145]);
-    const float rEyeY = 0.25f * (srcMy_[33] + srcMy_[133] + srcMy_[159] + srcMy_[145]);
-    const float rEyeW = std::max(std::hypot(srcMx_[33] - srcMx_[133], srcMy_[33] - srcMy_[133]), 0.01f);
-    const float rEyeH = std::max(std::hypot(srcMx_[159] - srcMx_[145], srcMy_[159] - srcMy_[145]), 0.004f);
+    const float rEyeX = 0.35f * (srcMx_[33] + srcMx_[133]) + 0.15f * (srcMx_[159] + srcMx_[145]);
+    const float rEyeY = 0.35f * (srcMy_[33] + srcMy_[133]) + 0.15f * (srcMy_[159] + srcMy_[145]);
+    const float rawREyeW = std::max(std::hypot(srcMx_[33] - srcMx_[133], srcMy_[33] - srcMy_[133]), 0.01f);
+    const float rawREyeH = std::max(std::hypot(srcMx_[159] - srcMx_[145], srcMy_[159] - srcMy_[145]), 0.004f);
     const float rBrowV = (srcMx_[105] - rEyeX) * vx + (srcMy_[105] - rEyeY) * vy;
 
-    const float lEyeX = 0.25f * (srcMx_[362] + srcMx_[263] + srcMx_[386] + srcMx_[374]);
-    const float lEyeY = 0.25f * (srcMy_[362] + srcMy_[263] + srcMy_[386] + srcMy_[374]);
-    const float lEyeW = std::max(std::hypot(srcMx_[362] - srcMx_[263], srcMy_[362] - srcMy_[263]), 0.01f);
-    const float lEyeH = std::max(std::hypot(srcMx_[386] - srcMx_[374], srcMy_[386] - srcMy_[374]), 0.004f);
+    const float lEyeX = 0.35f * (srcMx_[362] + srcMx_[263]) + 0.15f * (srcMx_[386] + srcMx_[374]);
+    const float lEyeY = 0.35f * (srcMy_[362] + srcMy_[263]) + 0.15f * (srcMy_[386] + srcMy_[374]);
+    const float rawLEyeW = std::max(std::hypot(srcMx_[362] - srcMx_[263], srcMy_[362] - srcMy_[263]), 0.01f);
+    const float rawLEyeH = std::max(std::hypot(srcMx_[386] - srcMx_[374], srcMy_[386] - srcMy_[374]), 0.004f);
     const float lBrowV = (srcMx_[334] - lEyeX) * vx + (srcMy_[334] - lEyeY) * vy;
 
     const float noseTipX = srcMx_[1], noseTipY = srcMy_[1];
@@ -269,14 +269,27 @@ bool FaceMeshDeformer::deform(
     float signedYaw = rawSignedYaw;
     float wLeft = rawWLeft;
     float wRight = rawWRight;
+    float rEyeW = rawREyeW;
+    float lEyeW = rawLEyeW;
+    float rEyeH = rawREyeH;
+    float lEyeH = rawLEyeH;
     float envAlpha = 1.0f;
     if (temporal) {
-        const float rawL = rawWLeft / std::max(fw, 1e-4f);
-        const float rawR = rawWRight / std::max(fw, 1e-4f);
+        const float invFw = 1.0f / std::max(fw, 1e-4f);
+        const float rawL = rawWLeft * invFw;
+        const float rawR = rawWRight * invFw;
+        const float rawRew = rawREyeW * invFw;
+        const float rawLew = rawLEyeW * invFw;
+        const float rawReh = rawREyeH * invFw;
+        const float rawLeh = rawLEyeH * invFw;
         if (temporalFresh) {
             signedYawState_ = rawSignedYaw;
             wLeftRatioState_ = rawL;
             wRightRatioState_ = rawR;
+            rEyeWRatioState_ = rawRew;
+            lEyeWRatioState_ = rawLew;
+            rEyeHRatioState_ = rawReh;
+            lEyeHRatioState_ = rawLeh;
         } else {
             const float yawJump = std::fabs(rawSignedYaw - signedYawState_);
             const float envTau = (yawJump > 0.11f) ? 26.0f : 150.0f;
@@ -284,10 +297,18 @@ bool FaceMeshDeformer::deform(
             signedYawState_ += envAlpha * (rawSignedYaw - signedYawState_);
             wLeftRatioState_ += envAlpha * (rawL - wLeftRatioState_);
             wRightRatioState_ += envAlpha * (rawR - wRightRatioState_);
+            rEyeWRatioState_ += envAlpha * (rawRew - rEyeWRatioState_);
+            lEyeWRatioState_ += envAlpha * (rawLew - lEyeWRatioState_);
+            rEyeHRatioState_ += envAlpha * (rawReh - rEyeHRatioState_);
+            lEyeHRatioState_ += envAlpha * (rawLeh - lEyeHRatioState_);
         }
         signedYaw = signedYawState_;
         wLeft = std::max(wLeftRatioState_ * fw, 0.10f * fw);
         wRight = std::max(wRightRatioState_ * fw, 0.10f * fw);
+        rEyeW = std::max(rEyeWRatioState_ * fw, 0.01f);
+        lEyeW = std::max(lEyeWRatioState_ * fw, 0.01f);
+        rEyeH = std::max(rEyeHRatioState_ * fw, 0.004f);
+        lEyeH = std::max(lEyeHRatioState_ * fw, 0.004f);
     }
 
     const float smoothYawWeight = 1.0f - detail::smoothstep(0.45f, FaceMeshFrame::kMaxYawRatio, std::fabs(signedYaw));

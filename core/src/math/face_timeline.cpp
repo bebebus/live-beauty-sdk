@@ -220,16 +220,29 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
     poseVelValid_ = (mesh != nullptr && count_ > 0 && meshPresent_[prevSlot]);
     if (poseVelValid_) {
         const float dt = static_cast<float>(sampleTs - times_[prevSlot]);
+        const int prev2Slot = (head_ - 2 + kHistory) % kHistory;
+        const bool hasPrev2 = (count_ >= 2 && meshPresent_[prev2Slot] && times_[prevSlot] > times_[prev2Slot]);
+        const float dtPrev = hasPrev2 ? static_cast<float>(times_[prevSlot] - times_[prev2Slot]) : dt;
         for (int k = 0; k < FaceMeshFilter::kPoseSize; ++k) {
-            const float instVel = (meshPose_[slot][k] - meshPose_[prevSlot][k]) / dt;
-            poseVel_[k] = hadVel ? (poseVel_[k] + 0.52f * (instVel - poseVel_[k])) : instVel;
+            const float v01 = (meshPose_[slot][k] - meshPose_[prevSlot][k]) / dt;
+            if (k < 2) {
+                float leadVel = v01;
+                if (hasPrev2 && dtPrev <= static_cast<float>(kMaxGapMs)) {
+                    const float v12 = (meshPose_[prevSlot][k] - meshPose_[prev2Slot][k]) / dtPrev;
+                    leadVel = v01 + 0.45f * (dt / (0.5f * (dt + dtPrev))) * (v01 - v12);
+                    if (v01 * leadVel < 0.0f) leadVel = 0.0f;
+                }
+                poseVel_[k] = hadVel ? (poseVel_[k] + 0.85f * (leadVel - poseVel_[k])) : leadVel;
+            } else {
+                poseVel_[k] = hadVel ? (poseVel_[k] + 0.55f * (v01 - poseVel_[k])) : v01;
+            }
         }
     } else {
         poseVel_.fill(0.0f);
     }
     if (mesh != nullptr) {
         const float dead = meshFilter_.poseDead();
-        poseVelGain_ = detail::smoothstep(dead * 1.15f, dead * 2.60f + 0.05f, meshFilter_.poseSpeed());
+        poseVelGain_ = detail::smoothstep(dead * 0.75f, dead * 1.65f + 0.012f, meshFilter_.poseSpeed());
         poseMoving_ = (poseVelGain_ > 1e-3f);
     } else {
         poseVelGain_ = 0.0f;
@@ -411,6 +424,16 @@ bool FaceTimeline::meshAt(int64_t t, SmoothedMeshView& outView) {
                 horizon, aspect_, shift);
             meshOutMeta_[FaceMeshFrame::kMetaCenterX] += shift[0];
             meshOutMeta_[FaceMeshFrame::kMetaCenterY] += shift[1] * aspect_;
+            const float s = std::max(FaceMeshFilter::scaleOf(meshPose_[newest].data()), 1e-4f);
+            const float omega = detail::clampf(0.5f * (poseVel_[4] - poseVel_[3]) / s, -0.0040f, 0.0040f);
+            const float dTheta = horizon * omega;
+            const float c = std::cos(dTheta);
+            const float sn = std::sin(dTheta);
+            const float ax = meshOutMeta_[FaceMeshFrame::kMetaAxisX];
+            const float ay = meshOutMeta_[FaceMeshFrame::kMetaAxisY];
+            meshOutMeta_[FaceMeshFrame::kMetaAxisX] = c * ax - sn * ay;
+            meshOutMeta_[FaceMeshFrame::kMetaAxisY] = sn * ax + c * ay;
+            normalizeMetaAxis(meshOutMeta_.data());
         } else {
             meshOutCoords_ = meshCoords_[newest];
         }

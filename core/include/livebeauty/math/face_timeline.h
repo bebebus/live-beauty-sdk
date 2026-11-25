@@ -16,7 +16,7 @@ public:
     static constexpr float kExtrapolateIntervals = 1.25f;
     static constexpr float kExtrapolateMinMs = 40.0f;
     static constexpr float kExtrapolateMaxMs = 100.0f;
-    static constexpr float kExtrapolateDamp = 0.85f;
+    static constexpr float kExtrapolateDamp = 0.90f;
     static constexpr float kTInMs = 50.0f;
     static constexpr float kMissDebounceMinMs = 33.0f;
     static constexpr float kMissDebounceIntervals = 1.2f;

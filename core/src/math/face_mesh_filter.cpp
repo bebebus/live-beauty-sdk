@@ -22,8 +22,8 @@ constexpr int kLipRing[40] = {
 constexpr int kRightLids[6] = {160, 144, 159, 145, 158, 153};
 constexpr int kLeftLids[6] = {387, 373, 386, 374, 385, 380};
 constexpr int kCenterPoints[4] = {234, 454, 10, 152};
-constexpr float kResFcMin[4] = {2.2f, 3.2f, 3.4f, 0.65f};
-constexpr float kResBeta[4] = {65.0f, 105.0f, 110.0f, 8.0f};
+constexpr float kResFcMin[4] = {0.65f, 1.20f, 1.25f, 0.52f};
+constexpr float kResBeta[4] = {24.0f, 68.0f, 72.0f, 10.0f};
 
 struct FilterStaticData {
     float canonicalFaceWidth = 1.0f;
@@ -145,8 +145,8 @@ struct FilterStaticData {
             return 1.0f - detail::smoothstep(0.65f, 1.05f, dd);
         };
         auto mouthMember = [&](int i) {
-            const float dd = std::hypot((uv[i * 2] - 0.50f) / 0.23f, (uv[i * 2 + 1] - 0.705f) / 0.155f);
-            return 1.0f - detail::smoothstep(0.65f, 1.08f, dd);
+            const float dd = std::hypot((uv[i * 2] - 0.50f) / 0.19f, (uv[i * 2 + 1] - 0.695f) / 0.115f);
+            return 1.0f - detail::smoothstep(0.62f, 1.02f, dd);
         };
         auto contourMember = [&](int i) {
             const float rUv = std::hypot((uv[i * 2] - 0.50f) / 0.36f, (uv[i * 2 + 1] - 0.50f) / 0.43f);
@@ -155,7 +155,7 @@ struct FilterStaticData {
         regSum.fill(0.0f);
         for (int i = 0; i < FaceMeshFrame::kFaceCount; ++i) {
             const float eye = std::max(eyeMember(i, 33, 133), eyeMember(i, 362, 263));
-            const float mouth = std::min(mouthMember(i), 1.0f - eye);
+            const float mouth = isOval[i] ? 0.0f : std::min(mouthMember(i), 1.0f - eye);
             const float rem = std::max(0.0f, 1.0f - eye - mouth);
             const float contour = rem * (isOval[i] ? 1.0f : contourMember(i));
             const float mid = rem - contour;
@@ -218,17 +218,20 @@ void FaceMeshFilter::extrapolate(
         return;
     }
     const float s = std::max(scaleOf(pose8), 1e-4f);
-    // Pure 2D Euclidean rigid isometry (translation + damped in-plane roll only):
-    // never extrapolate noisy scale/shear/3D-perspective derivatives so face contour width never sawtooth-breathes!
-    const float omega = detail::clampf(0.5f * (poseVel8[4] - poseVel8[3]) / s, -0.003f, 0.003f);
+    // Pure 2D Euclidean SE(2) rigid isometry (curvature-compensated translation + damped in-plane roll):
+    // preserves all 2D facial widths identically and never extrapolates noisy Z-perspective derivatives!
+    const float omega = detail::clampf(0.5f * (poseVel8[4] - poseVel8[3]) / s, -0.0040f, 0.0040f);
     const float cx = pose8[0];
     const float cy = pose8[1];
     const float h = horizonMs;
+    const float dTheta = h * omega;
+    const float c = std::cos(dTheta);
+    const float sn = std::sin(dTheta);
     for (int i = 0; i < FaceMeshFrame::kLandmarkCount; ++i) {
         const float rx = src478x2[i * 2] - cx;
         const float ry = src478x2[i * 2 + 1] / aspect - cy;
-        const float mx = h * (poseVel8[0] - omega * ry);
-        const float my = h * (poseVel8[1] + omega * rx);
+        const float mx = h * poseVel8[0] + (c - 1.0f) * rx - sn * ry;
+        const float my = h * poseVel8[1] + sn * rx + (c - 1.0f) * ry;
         out478x2[i * 2] = src478x2[i * 2] + mx;
         out478x2[i * 2 + 1] = src478x2[i * 2 + 1] + my * aspect;
     }
@@ -242,7 +245,7 @@ void FaceMeshFilter::centerShift(
     const float det = detOf(pose8);
     if (std::fabs(det) < 1e-10f || !(aspect > 0.0f)) return;
     const float s = std::max(scaleOf(pose8), 1e-4f);
-    const float omega = detail::clampf(0.5f * (poseVel8[4] - poseVel8[3]) / s, -0.003f, 0.003f);
+    const float omega = detail::clampf(0.5f * (poseVel8[4] - poseVel8[3]) / s, -0.0040f, 0.0040f);
     float rx = 0.0f, ry = 0.0f;
     for (int idx : kCenterPoints) {
         rx += src478x2[idx * 2] - pose8[0];
@@ -250,15 +253,19 @@ void FaceMeshFilter::centerShift(
     }
     rx *= 0.25f;
     ry *= 0.25f;
-    outShift[0] = horizonMs * (poseVel8[0] - omega * ry);
-    outShift[1] = horizonMs * (poseVel8[1] + omega * rx);
+    const float dTheta = horizonMs * omega;
+    const float c = std::cos(dTheta);
+    const float sn = std::sin(dTheta);
+    outShift[0] = horizonMs * poseVel8[0] + (c - 1.0f) * rx - sn * ry;
+    outShift[1] = horizonMs * poseVel8[1] + sn * rx + (c - 1.0f) * ry;
 }
 
 void FaceMeshFilter::reset(bool keepBaseline) {
     started_ = false;
     lastTs_ = kTimeInvalid;
     vp_ = 0.0f;
-    vpShape_ = 0.0f;
+    dq_.fill(0.0f);
+    dLogScale_ = 0.0f;
     noisePower_ = -1.0f;
     noiseMin_ = 0.0f;
     jumped_ = false;
@@ -282,7 +289,8 @@ int FaceMeshFilter::filter(int64_t ts, const float* raw478x2, float aspect, floa
     if (!restart) {
         const float s = scaleOf(q_.data());
         const float sRaw = scaleOf(qRaw_.data());
-        if (std::hypot(qRaw_[0] - q_[0], qRaw_[1] - q_[1]) > kJumpT * s ||
+        if (detOf(qRaw_.data()) * detOf(q_.data()) <= 0.0f ||
+            std::hypot(qRaw_[0] - q_[0], qRaw_[1] - q_[1]) > kJumpT * s ||
             !(sRaw > 0.0f) || std::fabs(std::log(sRaw / s)) > kJumpLogS) {
             restart = true;
             jumped_ = true;
@@ -325,6 +333,28 @@ void FaceMeshFilter::startRun() {
     started_ = true;
     q_ = qRaw_;
     qRawPrev_ = qRaw_;
+    dq_.fill(0.0f);
+    const float s3d = std::sqrt(std::max(viewScale2(qRaw_.data()), 1e-10f));
+    logScale_ = std::log(s3d);
+    logScaleRawPrev_ = logScale_;
+    dLogScale_ = 0.0f;
+    const float detSign = (detOf(qRaw_.data()) >= 0.0f) ? 1.0f : -1.0f;
+    const float m0 = (qRaw_[2] / s3d) * detSign;
+    const float m1 = qRaw_[3] / s3d;
+    const float m2 = (qRaw_[4] / s3d) * detSign;
+    const float m3 = qRaw_[5] / s3d;
+    const float rn = std::hypot(m0 + m3, m2 - m1);
+    cRot_ = (rn > 1e-6f) ? ((m0 + m3) / rn) : 1.0f;
+    sRot_ = (rn > 1e-6f) ? ((m2 - m1) / rn) : 0.0f;
+    p00_ = cRot_ * m0 + sRot_ * m2;
+    p01_ = cRot_ * m1 + sRot_ * m3;
+    p11_ = -sRot_ * m1 + cRot_ * m3;
+    hw1_ = qRaw_[6] / s3d;
+    hw2_ = qRaw_[7] / s3d;
+    hw1RawPrev_ = hw1_;
+    hw2RawPrev_ = hw2_;
+    dHw1_ = 0.0f;
+    dHw2_ = 0.0f;
     residual(qRaw_.data(), rRawX_.data(), rRawY_.data());
     rX_ = rRawX_;
     rY_ = rRawY_;
@@ -333,7 +363,6 @@ void FaceMeshFilter::startRun() {
     drX_.fill(0.0f);
     drY_.fill(0.0f);
     vp_ = 0.0f;
-    vpShape_ = 0.0f;
     noisePower_ = -1.0f;
     noiseMin_ = 0.0f;
     poseSpeed_ = 0.0f;
@@ -346,39 +375,63 @@ void FaceMeshFilter::step(float teMs) {
     const auto& sd = staticData();
     const float teSec = teMs / 1000.0f;
     const float comp = std::min(1.0f, std::sqrt(kTeRefMs / teMs));
-    const float s = scaleOf(q_.data());
+    const float s = std::max(scaleOf(q_.data()), 1e-4f);
+    const float s3dPrev = std::exp(logScale_);
+    const float s3dRaw = std::sqrt(std::max(viewScale2(qRaw_.data()), 1e-10f));
+    const bool illPosed = (std::fabs(detOf(qRaw_.data())) < kDetMin * s * s);
+    const float detSign = (detOf(qRaw_.data()) >= 0.0f) ? 1.0f : -1.0f;
 
-    float acc = 0.0f;
-    float lagAcc = 0.0f;
-    float shapeAcc = 0.0f;
-    float shapeLagAcc = 0.0f;
+    const float m0Raw = (qRaw_[2] / s3dRaw) * detSign;
+    const float m1Raw = qRaw_[3] / s3dRaw;
+    const float m2Raw = (qRaw_[4] / s3dRaw) * detSign;
+    const float m3Raw = qRaw_[5] / s3dRaw;
+    const float rnRaw = std::hypot(m0Raw + m3Raw, m2Raw - m1Raw);
+    const float cRotRaw = (rnRaw > 1e-6f) ? ((m0Raw + m3Raw) / rnRaw) : cRot_;
+    const float sRotRaw = (rnRaw > 1e-6f) ? ((m2Raw - m1Raw) / rnRaw) : sRot_;
+    const float p00Raw = cRotRaw * m0Raw + sRotRaw * m2Raw;
+    const float p01Raw = cRotRaw * m1Raw + sRotRaw * m3Raw;
+    const float p11Raw = -sRotRaw * m1Raw + cRotRaw * m3Raw;
+    const float hw1Raw = qRaw_[6] / s3dRaw;
+    const float hw2Raw = qRaw_[7] / s3dRaw;
+
+    const float adPoseUp = detail::oneEuroAlpha(kPoseDcut, teMs);
+    const float adPoseDown = detail::oneEuroAlpha(kPoseDcutDown, teMs);
+    for (int k = 0; k < kPoseSize; ++k) {
+        const float instVq = (qRaw_[k] - qRawPrev_[k]) / teSec;
+        // Signed velocity decays fast when motion stops (|instVq| < 0.55*|dq_|), while keeping symmetric adPoseUp on alternating noise!
+        const float adk = (std::fabs(instVq) < 0.55f * std::fabs(dq_[k])) ? adPoseDown : adPoseUp;
+        dq_[k] += adk * (instVq - dq_[k]);
+    }
+
+    float rawRigidAcc = 0.0f;
+    float cohAcc = 0.0f;
+    float lag2dAcc = 0.0f;
+    // Scale- & 3D-noise-decoupled 2D rigid pose target using current smoothed (P, hw, s3dPrev) + raw (tx, ty, cRotRaw, sRotRaw)
+    const float r2dA11 = (cRotRaw * p00_ - sRotRaw * p01_) * detSign * s3dPrev;
+    const float r2dA12 = (cRotRaw * p01_ - sRotRaw * p11_) * s3dPrev;
+    const float r2dA21 = (sRotRaw * p00_ + cRotRaw * p01_) * detSign * s3dPrev;
+    const float r2dA22 = (sRotRaw * p01_ + cRotRaw * p11_) * s3dPrev;
     for (size_t j = 0; j < sd.basis.size(); ++j) {
         const int b = sd.basis[j];
-        const float smx = (qRaw_[2] - qRawPrev_[2]) * sd.lx[b] +
-                          (qRaw_[3] - qRawPrev_[3]) * sd.ly[b] + (qRaw_[6] - qRawPrev_[6]) * sd.z[b];
-        const float smy = (qRaw_[4] - qRawPrev_[4]) * sd.lx[b] +
-                          (qRaw_[5] - qRawPrev_[5]) * sd.ly[b] + (qRaw_[7] - qRawPrev_[7]) * sd.z[b];
-        const float mx = (qRaw_[0] - qRawPrev_[0]) + smx;
-        const float my = (qRaw_[1] - qRawPrev_[1]) + smy;
-        acc += sd.basisW[j] * (mx * mx + my * my);
-        shapeAcc += sd.basisW[j] * (smx * smx + smy * smy);
+        const float mx = (qRaw_[0] - qRawPrev_[0]) +
+                         (qRaw_[2] - qRawPrev_[2]) * sd.lx[b] +
+                         (qRaw_[3] - qRawPrev_[3]) * sd.ly[b];
+        const float my = (qRaw_[1] - qRawPrev_[1]) +
+                         (qRaw_[4] - qRawPrev_[4]) * sd.lx[b] +
+                         (qRaw_[5] - qRawPrev_[5]) * sd.ly[b];
+        rawRigidAcc += sd.basisW[j] * (mx * mx + my * my);
 
-        const float slx = (qRaw_[2] - q_[2]) * sd.lx[b] +
-                          (qRaw_[3] - q_[3]) * sd.ly[b] + (qRaw_[6] - q_[6]) * sd.z[b];
-        const float sly = (qRaw_[4] - q_[4]) * sd.lx[b] +
-                          (qRaw_[5] - q_[5]) * sd.ly[b] + (qRaw_[7] - q_[7]) * sd.z[b];
-        const float lx = (qRaw_[0] - q_[0]) + slx;
-        const float ly = (qRaw_[1] - q_[1]) + sly;
-        lagAcc += sd.basisW[j] * (lx * lx + ly * ly);
-        shapeLagAcc += sd.basisW[j] * (slx * slx + sly * sly);
+        const float vx = dq_[0] + dq_[2] * sd.lx[b] + dq_[3] * sd.ly[b];
+        const float vy = dq_[1] + dq_[4] * sd.lx[b] + dq_[5] * sd.ly[b];
+        cohAcc += sd.basisW[j] * (vx * vx + vy * vy);
+
+        const float lx = (qRaw_[0] - q_[0]) + (r2dA11 - q_[2]) * sd.lx[b] + (r2dA12 - q_[3]) * sd.ly[b];
+        const float ly = (qRaw_[1] - q_[1]) + (r2dA21 - q_[4]) * sd.lx[b] + (r2dA22 - q_[5]) * sd.ly[b];
+        lag2dAcc += sd.basisW[j] * (lx * lx + ly * ly);
     }
-    const float spRaw = std::sqrt(acc * 0.5f) / s / teSec;
-    const float poseDcut = (spRaw < vp_) ? kPoseDcutDown : kPoseDcut;
-    vp_ += detail::oneEuroAlpha(poseDcut, teMs) * (spRaw - vp_);
-    const float spShape = std::sqrt(shapeAcc * 0.5f) / s / teSec;
-    vpShape_ += detail::oneEuroAlpha((spShape < vpShape_) ? kPoseDcutDown : 3.5f, teMs) * (spShape - vpShape_);
+    const float spRaw = std::sqrt(rawRigidAcc * 0.5f) / s / teSec;
+    vp_ = std::sqrt(cohAcc * 0.5f) / s;
 
-    const bool illPosed = (std::fabs(detOf(qRaw_.data())) < kDetMin * s * s);
     if (!illPosed) {
         residual(qRaw_.data(), rRawX_.data(), rRawY_.data());
         float sum = 0.0f;
@@ -399,82 +452,105 @@ void FaceMeshFilter::step(float teMs) {
     const float floorVal = (noisePower_ < 0.0f) ? 0.0f : std::sqrt(noiseMin_);
     noiseFloor_ = floorVal;
     const float dead = kKPose * kCPose * floorVal;
-    const float basisLag = std::sqrt(lagAcc * 0.5f) / std::max(s, 1e-4f);
-    const float shapeLag = std::sqrt(shapeLagAcc * 0.5f) / std::max(s, 1e-4f);
-    const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.025f, 0.095f, basisLag));
-    const float lagCatchup = 18.0f * std::max(0.0f, basisLag - std::max(0.012f, 2.2f * dead));
-    const float aTrans = detail::oneEuroAlpha(
+    const float basisLag = std::sqrt(lag2dAcc * 0.5f) / s;
+    const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.022f, 0.080f, basisLag));
+    const float lagCatchup = 22.0f * std::max(0.0f, basisLag - std::max(0.012f, 2.0f * dead));
+    const float aPose = detail::oneEuroAlpha(
         kPoseFcMin * comp + kPoseBeta * (std::max(0.0f, effVp - dead) + lagCatchup), teMs);
-    const float effVpShape = std::max(vpShape_, spShape * detail::smoothstep(0.040f, 0.110f, shapeLag));
-    const float shapeCatchup = 26.0f * std::max(0.0f, shapeLag - std::max(0.036f, 3.2f * dead));
-    const float aShape = detail::oneEuroAlpha(
-        0.85f * comp + 16.0f * std::max(0.0f, effVpShape - 1.8f * dead) + kPoseBeta * shapeCatchup, teMs);
-    q_[0] += aTrans * (qRaw_[0] - q_[0]);
-    q_[1] += aTrans * (qRaw_[1] - q_[1]);
-    for (int k = 2; k < kPoseSize; ++k) q_[k] += aShape * (qRaw_[k] - q_[k]);
+
+    if (!illPosed) {
+        // 1. Isotropic 3D scale (invariant to 2D roll + 3D yaw/pitch)
+        const float logSRaw = std::log(s3dRaw);
+        const float instDLogS = (logSRaw - logScaleRawPrev_) / teSec;
+        logScaleRawPrev_ = logSRaw;
+        dLogScale_ += detail::oneEuroAlpha(kScaleDcut, teMs) * (instDLogS - dLogScale_);
+        const float scaleDead = std::max(0.16f, 1.2f * dead);
+        const float aScale = detail::oneEuroAlpha(
+            kScaleFcMin * comp + kScaleBeta * std::max(0.0f, std::fabs(dLogScale_) - scaleDead), teMs);
+        logScale_ += aScale * (logSRaw - logScale_);
+        const float sFilt = std::exp(logScale_);
+
+        // 2. 3D out-of-plane perspective & foreshortening (shielded from 2D shake so Z-column noise never ripples!)
+        const float ad3d = detail::oneEuroAlpha(kPose3dDcut, teMs);
+        dHw1_ += ad3d * ((hw1Raw - hw1RawPrev_) / teSec - dHw1_);
+        dHw2_ += ad3d * ((hw2Raw - hw2RawPrev_) / teSec - dHw2_);
+        hw1RawPrev_ = hw1Raw;
+        hw2RawPrev_ = hw2Raw;
+        const float yawSpeed = std::hypot(dHw1_, dHw2_);
+        const float yawLag = std::hypot(hw1Raw - hw1_, hw2Raw - hw2_);
+        const float yawDead = std::max(0.22f, 1.7f * dead);
+        const float a3d = detail::oneEuroAlpha(
+            kPose3dFcMin * comp + kPose3dBeta * std::max(0.0f, yawSpeed - yawDead) +
+            160.0f * std::max(0.0f, yawLag - 0.085f), teMs);
+        p00_ += a3d * (p00Raw - p00_);
+        p01_ += a3d * (p01Raw - p01_);
+        p11_ += a3d * (p11Raw - p11_);
+        hw1_ += a3d * (hw1Raw - hw1_);
+        hw2_ += a3d * (hw2Raw - hw2_);
+
+        // 3. Unified fast 2D SE(2) translation + camera roll update (exact 0.0px rotational shear!)
+        q_[0] += aPose * (qRaw_[0] - q_[0]);
+        q_[1] += aPose * (qRaw_[1] - q_[1]);
+        cRot_ += aPose * (cRotRaw - cRot_);
+        sRot_ += aPose * (sRotRaw - sRot_);
+        const float rotNorm = std::hypot(cRot_, sRot_);
+        if (rotNorm > 1e-6f) {
+            cRot_ /= rotNorm;
+            sRot_ /= rotNorm;
+        }
+
+        // 4. Recompose 2x3 Stiefel matrix R(theta) * P + [hw1; hw2], project to unit viewScale2, and scale by sFilt
+        float u0 = (cRot_ * p00_ - sRot_ * p01_) * detSign;
+        float u1 = cRot_ * p01_ - sRot_ * p11_;
+        float u2 = (sRot_ * p00_ + cRot_ * p01_) * detSign;
+        float u3 = sRot_ * p01_ + cRot_ * p11_;
+        float u4 = hw1_;
+        float u5 = hw2_;
+        const float cx = u1 * u5 - u4 * u3;
+        const float cy = u4 * u2 - u0 * u5;
+        const float cz = u0 * u3 - u1 * u2;
+        const float normM = std::sqrt(std::max(std::sqrt(cx * cx + cy * cy + cz * cz), 1e-8f));
+        const float kScale = sFilt / normM;
+        q_[2] = u0 * kScale;
+        q_[3] = u1 * kScale;
+        q_[4] = u2 * kScale;
+        q_[5] = u3 * kScale;
+        q_[6] = u4 * kScale;
+        q_[7] = u5 * kScale;
+    } else {
+        for (int k = 0; k < kPoseSize; ++k) q_[k] += aPose * (qRaw_[k] - q_[k]);
+        const float s3dCur = std::sqrt(std::max(viewScale2(q_.data()), 1e-10f));
+        logScale_ = std::log(s3dCur);
+        logScaleRawPrev_ = logScale_;
+    }
     qRawPrev_ = qRaw_;
     poseSpeed_ = effVp;
     poseDead_ = dead;
 
     if (!illPosed) {
-        const float adUp = detail::oneEuroAlpha(kResDcut, teMs);
-        const float adDown = detail::oneEuroAlpha(kResDcutDown, teMs);
-        std::array<float, kRegions> regionLagSq{};
-        regionLagSq.fill(0.0f);
+        const float ad = detail::oneEuroAlpha(kResDcut, teMs);
         for (int i = 0; i < kFace; ++i) {
-            const float instVx = (rRawX_[i] - rPrevX_[i]) / teSec;
-            const float instVy = (rRawY_[i] - rPrevY_[i]) / teSec;
-            const float instMag2 = instVx * instVx + instVy * instVy;
-            const float curMag2 = drX_[i] * drX_[i] + drY_[i] * drY_[i];
-            const float ad = (instMag2 < curMag2) ? adDown : adUp;
-            drX_[i] += ad * (instVx - drX_[i]);
-            drY_[i] += ad * (instVy - drY_[i]);
-            const float lx = rRawX_[i] - rX_[i];
-            const float ly = rRawY_[i] - rY_[i];
-            const float lp = lx * lx + ly * ly;
-            for (int g = 0; g < kRegions; ++g) regionLagSq[g] += sd.reg[i * kRegions + g] * lp;
+            drX_[i] += ad * ((rRawX_[i] - rPrevX_[i]) / teSec - drX_[i]);
+            drY_[i] += ad * ((rRawY_[i] - rPrevY_[i]) / teSec - drY_[i]);
         }
         regionRms_.fill(0.0f);
         for (int i = 0; i < kFace; ++i) {
             const float p = drX_[i] * drX_[i] + drY_[i] * drY_[i];
             for (int g = 0; g < kRegions; ++g) regionRms_[g] += sd.reg[i * kRegions + g] * p;
         }
-        float lidPower = 0.0f, lidLagSq = 0.0f;
-        for (int idx : kLidRing) {
-            lidPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
-            const float lx = rRawX_[idx] - rX_[idx], ly = rRawY_[idx] - rY_[idx];
-            lidLagSq += lx * lx + ly * ly;
-        }
-        float lipPower = 0.0f, lipLagSq = 0.0f;
-        for (int idx : kLipRing) {
-            lipPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
-            const float lx = rRawX_[idx] - rX_[idx], ly = rRawY_[idx] - rY_[idx];
-            lipLagSq += lx * lx + ly * ly;
-        }
+        float lidPower = 0.0f;
+        for (int idx : kLidRing) lidPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+        float lipPower = 0.0f;
+        for (int idx : kLipRing) lipPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
 
         const float resDead = kKRes * kCRes * std::pow(teMs / kTeRefMs, kResTeExp) * floorVal;
         for (int g = 0; g < kRegions; ++g) {
             regionRms_[g] = std::sqrt(regionRms_[g] / std::max(sd.regSum[g], 1e-4f));
-            float regLag = std::sqrt(regionLagSq[g] / std::max(sd.regSum[g], 1e-4f));
-            if (g == kEyeRegion) {
-                regionRms_[g] = std::max(regionRms_[g], std::sqrt(lidPower / 32.0f));
-                regLag = std::max(regLag, std::sqrt(lidLagSq / 32.0f));
-            }
-            if (g == kLowRegion) {
-                regionRms_[g] = std::max(regionRms_[g], std::sqrt(lipPower / 40.0f));
-                regLag = std::max(regLag, std::sqrt(lipLagSq / 40.0f));
-            }
-            if (g == kContourRegion) {
-                const float contourExcess = std::max(0.0f, regionRms_[g] - 2.2f * resDead);
-                const float contourCatchup = 3.5f * std::max(0.0f, regLag - std::max(0.032f, 3.8f * resDead));
-                regionAlpha_[g] = detail::oneEuroAlpha(
-                    kResFcMin[g] * comp + kResBeta[g] * (contourExcess + contourCatchup), teMs);
-            } else {
-                const float excess = std::max(0.0f, regionRms_[g] - resDead);
-                const float resLagBoost = 22.0f * std::max(0.0f, regLag - std::max(0.012f, 2.2f * resDead));
-                regionAlpha_[g] = detail::oneEuroAlpha(
-                    kResFcMin[g] * comp + kResBeta[g] * (excess + resLagBoost), teMs);
-            }
+            if (g == kEyeRegion) regionRms_[g] = std::max(regionRms_[g], std::sqrt(lidPower / 32.0f));
+            if (g == kLowRegion) regionRms_[g] = std::max(regionRms_[g], std::sqrt(lipPower / 40.0f));
+            const float deadG = (g == kContourRegion) ? (1.6f * resDead) : resDead;
+            regionAlpha_[g] = detail::oneEuroAlpha(
+                kResFcMin[g] * comp + kResBeta[g] * std::max(0.0f, regionRms_[g] - deadG), teMs);
         }
         for (int i = 0; i < kFace; ++i) {
             float ai = 0.0f;

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.9] - 2026-11-25
+
+### Fixed
+- **Slight Camera Shake Water-Ripple / Jello Distortion Elimination (`FaceMeshFilter`, `FaceTimeline`, `FaceMeshDeformer`, `FaceRelightSolver`, `RenderPipeline`, `LiveBeautyEngine`)**:
+  - Replaced `FaceMeshFilter`'s split `q_[0..1]` vs slow `q_[2..7]` affine smoothing with an exact 2D `SE(2)` polar-rotation + 3D perspective/foreshortening + isotropic `viewScale2` log-scale decomposition: `(tx, ty)` and in-plane camera roll `(cRot, sRot)` update at identical unified fast `aPose` (`0.0 px` rotational shear during handheld camera tilt), while ill-conditioned 3D Z-columns `(w1, w2)` and symmetric foreshortening `(p00, p01, p11)` filter on their own 3D velocity/lag gate (`yawLag` fast-turn snap preserved), and signed 8-DoF velocity `dq_` eliminates rectified jitter bias.
+  - Restored symmetric `kResDcut = 1.5 Hz` One-Euro derivative filtering (removing `kResDcutDown` peak-rectification and `resLagBoost` tangential skin-noise amplification) with matched calm regional cutoffs (`0.52..1.25 Hz`) and zero `kFaceOval` lip coupling, eliminating multi-rate triangle shear waves across cheeks during slight camera shake.
+  - Added curvature-braked 2D `SE(2)` sub-frame extrapolation + `meshOutMeta_` axis rotation in `FaceTimeline`, canthi-anchored dimensionless eye-lens ratio smoothing (`rEyeWRatioState_`, `lEyeWRatioState_`, `rEyeHRatioState_`, `lEyeHRatioState_`) in `FaceMeshDeformer`, per-slot temporal 3D angle smoothing in `FaceRelightSolver`, and face-center motion compensation + speed gating for async 64x64 `aiResidualRect` in `LiveBeautyEngine`.
+
 ## [3.6.8] - 2026-11-25
 
 ### Fixed

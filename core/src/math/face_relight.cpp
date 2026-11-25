@@ -169,6 +169,53 @@ HeadPose3D FaceRelightSolver::estimateHeadPose(
     return pose;
 }
 
+void FaceRelightSolver::resetTemporal() {
+    for (auto& s : slots_) s = TemporalSlot{};
+}
+
+HeadPose3D FaceRelightSolver::smoothPose(const HeadPose3D& raw, int slot) {
+    const int idx = std::clamp(slot, 0, static_cast<int>(slots_.size()) - 1);
+    auto& st = slots_[idx];
+    if (!raw.valid) {
+        st.valid = false;
+        return raw;
+    }
+    if (!st.valid) {
+        st.valid = true;
+        st.yaw = raw.yawRad;
+        st.pitch = raw.pitchRad;
+        st.roll = raw.rollRad;
+        return raw;
+    }
+    const float dYaw = raw.yawRad - st.yaw;
+    const float dPitch = raw.pitchRad - st.pitch;
+    const float a3d = (std::hypot(dYaw, dPitch) > 0.14f) ? 0.55f : 0.16f;
+    st.yaw += a3d * dYaw;
+    st.pitch += a3d * dPitch;
+    const float dRoll = std::remainder(raw.rollRad - st.roll, 6.2831853f);
+    st.roll += 0.65f * dRoll;
+
+    HeadPose3D out = raw;
+    out.yawRad = st.yaw;
+    out.pitchRad = st.pitch;
+    out.rollRad = st.roll;
+    const float cr = std::cos(st.roll), sr = std::sin(st.roll);
+    const float cyaw = std::cos(st.yaw), syaw = std::sin(st.yaw);
+    const float cp = std::cos(st.pitch), sp = std::sin(st.pitch);
+    const float m00 = cyaw, m01 = syaw * sp, m02 = syaw * cp;
+    const float m11 = cp, m12 = -sp;
+    out.rot[0] = cr * m00;
+    out.rot[1] = cr * m01 - sr * m11;
+    out.rot[2] = cr * m02 - sr * m12;
+    out.rot[3] = sr * m00;
+    out.rot[4] = sr * m01 + cr * m11;
+    out.rot[5] = sr * m02 + cr * m12;
+    out.rot[6] = -syaw;
+    out.rot[7] = cyaw * sp;
+    out.rot[8] = cyaw * cp;
+    return out;
+}
+
 Vec3 FaceRelightSolver::rotateVec(const HeadPose3D& pose, const Vec3& v) {
     return {
         pose.rot[0] * v.x + pose.rot[1] * v.y + pose.rot[2] * v.z,

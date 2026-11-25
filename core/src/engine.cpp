@@ -757,13 +757,18 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         const float rcy = autoResidualRect_.top + 0.5f * autoResidualRect_.height;
         const float curCx = meshView.centerX();
         const float curCy = 1.0f - meshView.centerY();
+        const float dx = curCx - rcx;
+        const float dy = curCy - rcy;
         const float fw = std::max(meshView.faceWidth(), 0.04f);
-        const float centerShift = std::hypot(curCx - rcx, (curCy - rcy) / std::max(aspect, 0.1f));
-        const float shiftKeep = 1.0f - detail::smoothstep(0.025f * fw, 0.075f * fw, centerShift);
+        const float centerShift = std::hypot(dx, dy / std::max(aspect, 0.1f));
+        const float shiftKeep = (1.0f - detail::smoothstep(0.020f * fw, 0.060f * fw, centerShift)) *
+                                (1.0f - detail::smoothstep(0.03f, 0.10f, primaryTl.speed()));
         const float effResStrength = autoResidualStrength_ * shiftKeep * asyncMaskKeep * in.steadyFace;
         if (effResStrength > 1e-4f) {
             in.aiResidualTex = autoResidualTex_;
             in.aiResidualRect = autoResidualRect_;
+            in.aiResidualRect.left += dx;
+            in.aiResidualRect.top += dy;
             in.aiResidualStrength = effResStrength;
         }
     }

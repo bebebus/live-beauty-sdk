@@ -129,6 +129,10 @@ private:
     std::array<float, FaceMeshTopology::kOvalVertexCount> silExcessRatioState_{};
     float wLeftRatioState_ = 0.0f;
     float wRightRatioState_ = 0.0f;
+    float rEyeWRatioState_ = 0.0f;
+    float lEyeWRatioState_ = 0.0f;
+    float rEyeHRatioState_ = 0.0f;
+    float lEyeHRatioState_ = 0.0f;
     float signedYawState_ = 0.0f;
     bool temporalValid_ = false;
     int64_t lastNowMs_ = kTimeInvalid;

@@ -56,6 +56,10 @@ public:
         float axisY,
         float yawWeight);
 
+    /** Temporally smooth 3D relight head angles per face slot so landmark noise never shimmers studio shading. */
+    HeadPose3D smoothPose(const HeadPose3D& raw, int slot = 0);
+    void resetTemporal();
+
     /**
      * Compute per-vertex 3D studio relighting lobe into `out468` in [0..1] (neutral baseline ~0.30,
      * highlights up to 1.0, shadow-lifted contours down to 0.05) for rasterization into the skin mask B channel.
@@ -71,8 +75,15 @@ public:
     static Vec3 rotateVec(const HeadPose3D& pose, const Vec3& v);
 
 private:
+    struct TemporalSlot {
+        bool valid = false;
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+        float roll = 0.0f;
+    };
     std::array<float, FaceMeshTopology::kFaceVertexCount * 3> canonicalNormals_{};
     std::array<float, FaceMeshTopology::kFaceVertexCount> anatomicalAccent_{};
+    std::array<TemporalSlot, 2> slots_{};
 };
 
 }  // namespace livebeauty::math

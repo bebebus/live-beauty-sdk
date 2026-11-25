@@ -84,6 +84,7 @@ RenderPipeline::~RenderPipeline() {
 void RenderPipeline::resetTemporal() {
     deformer_.resetTemporal();
     deformer2_.resetTemporal();
+    relightSolver_.resetTemporal();
     denoiseHistoryValid_ = false;
     matteHistoryValid_ = false;
     for (auto& s : ar3dSprings_) s.reset();
@@ -95,6 +96,7 @@ void RenderPipeline::resetTemporal() {
 void RenderPipeline::resetDeformerTemporal() {
     deformer_.resetTemporal();
     deformer2_.resetTemporal();
+    relightSolver_.resetTemporal();
 }
 
 void RenderPipeline::resetPixelTemporal() {
@@ -457,9 +459,10 @@ void RenderPipeline::renderSkinMask(
     // P1: Real 3D rotated canonical vertex normals for pose-reactive studio relighting
     bool computed3dRelight = false;
     if (useRelight3d && relightStrength > 1e-4f) {
-        const auto pose3d = math::FaceRelightSolver::estimateHeadPose(
+        const auto rawPose3d = math::FaceRelightSolver::estimateHeadPose(
             landmarks478x2, aspect, axisX, axisY, yawWeight);
-        if (pose3d.valid) {
+        if (rawPose3d.valid) {
+            const auto pose3d = relightSolver_.smoothPose(rawPose3d, clearFirst ? 0 : 1);
             relightSolver_.computeVertexRelight(
                 pose3d, relightStyle, relightStrength, relightBuf_.data(), frontFaceCw);
             computed3dRelight = true;

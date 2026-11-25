@@ -1521,6 +1521,169 @@ void testV367EyeSocketNoseAndBeardContourNoDarkTrenches(MetalDevice& dev) {
     }
 }
 
+void testV369MetalSlightCameraShakeNoWaterRipple(MetalDevice& dev) {
+    constexpr int kW = 180;
+    constexpr int kH = 320;
+    constexpr float kAspect = static_cast<float>(kW) / static_cast<float>(kH);
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const auto& uv = FaceMeshTopology::kCanonicalUv;
+    const float baseScale = 0.44f / FaceMeshFilter::canonicalFaceWidth();
+
+    struct ShakePose {
+        float tx, ty, rollRad, scaleMul;
+    };
+    auto shakeAtMs = [](int64_t tsMs) -> ShakePose {
+        const double t = static_cast<double>(tsMs) * 0.001;
+        ShakePose p{};
+        p.tx = static_cast<float>(0.028 * std::sin(2.0 * M_PI * 2.7 * t) + 0.011 * std::sin(2.0 * M_PI * 4.3 * t + 0.7));
+        p.ty = static_cast<float>(0.022 * std::cos(2.0 * M_PI * 2.3 * t + 0.4) + 0.009 * std::sin(2.0 * M_PI * 3.9 * t));
+        p.rollRad = static_cast<float>(0.038 * std::sin(2.0 * M_PI * 2.5 * t + 0.3));
+        p.scaleMul = static_cast<float>(1.0 + 0.012 * std::sin(2.0 * M_PI * 1.9 * t));
+        return p;
+    };
+    auto forwardPt = [&](float lx, float ly, const ShakePose& p, float& outU, float& outVTop) {
+        const float cr = std::cos(p.rollRad), sr = std::sin(p.rollRad);
+        outU = 0.5f + p.tx + (cr * lx - sr * ly) * p.scaleMul;
+        outVTop = ((0.48f / kAspect) + p.ty + (sr * lx + cr * ly) * p.scaleMul) * kAspect;
+    };
+    auto evalRest = [&](float u, float vTop, float rgb[3]) {
+        const float mx = u - 0.5f;
+        const float my = (vTop - 0.48f) / kAspect;
+        const float rFace = std::hypot(mx / 0.23f, my / 0.30f);
+        const float shade = 1.0f - 0.22f * (mx / 0.23f) * (mx / 0.23f) - 0.14f * (my / 0.30f) * (my / 0.30f);
+        float skR = 204.0f * shade, skG = 160.0f * shade, skB = 138.0f * shade;
+        const float fold = std::exp(-0.5f * (std::pow((std::fabs(mx) - 0.068f) / 0.020f, 2.0f) + std::pow((my - 0.075f) / 0.048f, 2.0f)));
+        skR -= 24.0f * fold; skG -= 22.0f * fold; skB -= 20.0f * fold;
+        const float eyeD = std::hypot((std::fabs(mx) - 0.092f) / 0.042f, (my + 0.068f) / 0.020f);
+        const float inEye = 1.0f - detail::smoothstep(0.75f, 1.05f, eyeD);
+        const float irisD = std::hypot((std::fabs(mx) - 0.092f) / 0.018f, (my + 0.068f) / 0.018f);
+        const float inIris = 1.0f - detail::smoothstep(0.75f, 1.05f, irisD);
+        const float eyeLum = 226.0f * (1.0f - inIris) + 32.0f * inIris;
+        skR = skR * (1.0f - inEye) + eyeLum * inEye;
+        skG = skG * (1.0f - inEye) + eyeLum * inEye;
+        skB = skB * (1.0f - inEye) + eyeLum * inEye;
+        const float faceMask = 1.0f - detail::smoothstep(0.94f, 1.04f, rFace);
+        rgb[0] = std::clamp(145.0f * (1.0f - faceMask) + skR * faceMask, 0.0f, 255.0f);
+        rgb[1] = std::clamp(142.0f * (1.0f - faceMask) + skG * faceMask, 0.0f, 255.0f);
+        rgb[2] = std::clamp(138.0f * (1.0f - faceMask) + skB * faceMask, 0.0f, 255.0f);
+    };
+
+    const TextureId atlas = makeSolidTex(dev, 16, 16, 200, 200, 200, 255);
+    PipelineAssets assets{kInvalidTexture, atlas, atlas, atlas, atlas, atlas};
+
+    auto measureShakeStepRms = [&](bool beautyEnabled, int frameDelayFrames, int64_t latMs) -> double {
+        LiveBeautyEngine engine(dev);
+        engine.setAssets(assets);
+        BeautyConfig cfg{};
+        cfg.enabled = beautyEnabled;
+        cfg.skinOnly = true;
+        cfg.smoothing = 0.65f;
+        cfg.whiten = 0.70f;
+        cfg.relight = 0.65f;
+        cfg.faceSlim = 0.68f;
+        cfg.eyeEnlarge = 0.62f;
+        cfg.frameDelayFrames = frameDelayFrames;
+        engine.setConfig(cfg);
+
+        TextureId camTex = kInvalidTexture;
+        std::vector<uint8_t> camPx(kW * kH * 4, 255), outPx(kW * kH * 4, 0);
+        constexpr int kGrid = 17;
+        std::vector<float> prevRestLuma(kGrid * kGrid, -1.0f);
+        double sumSq = 0.0;
+        int count = 0;
+
+        for (int f = 0; f < 36; ++f) {
+            const int64_t frameTs = 1000 + f * 33;
+            const int64_t lmTs = frameTs - latMs;
+            const ShakePose camP = shakeAtMs(frameTs);
+            const ShakePose lmP = shakeAtMs(lmTs);
+            const ShakePose dispP = shakeAtMs(frameTs - static_cast<int64_t>(frameDelayFrames) * 33);
+            const float crInv = std::cos(-camP.rollRad), srInv = std::sin(-camP.rollRad);
+            for (int y = 0; y < kH; ++y) {
+                const float vTop = (y + 0.5f) / kH;
+                for (int x = 0; x < kW; ++x) {
+                    const float u = (x + 0.5f) / kW;
+                    const float dx = (u - 0.5f - camP.tx) / camP.scaleMul;
+                    const float dy = (vTop / kAspect - (0.48f / kAspect) - camP.ty) / camP.scaleMul;
+                    float rgb[3];
+                    evalRest(0.5f + crInv * dx - srInv * dy, 0.48f + (srInv * dx + crInv * dy) * kAspect, rgb);
+                    const int idx = (y * kW + x) * 4;
+                    camPx[idx + 0] = static_cast<uint8_t>(std::lround(rgb[0]));
+                    camPx[idx + 1] = static_cast<uint8_t>(std::lround(rgb[1]));
+                    camPx[idx + 2] = static_cast<uint8_t>(std::lround(rgb[2]));
+                    camPx[idx + 3] = 255;
+                }
+            }
+            if (camTex == kInvalidTexture) camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camPx.data());
+            else dev.updateTexture2D(camTex, kW, kH, TextureFormat::kRgba8, camPx.data());
+
+            float mpXy[478 * 2];
+            for (int i = 0; i < 468; ++i) {
+                float u, vTop;
+                forwardPt(xyz[i * 3 + 0] * baseScale, -xyz[i * 3 + 1] * baseScale, lmP, u, vTop);
+                const float mul = (std::hypot(uv[i * 2] - 0.5f, uv[i * 2 + 1] - 0.5f) > 0.22f) ? 1.8f : 1.0f;
+                u += std::sin(static_cast<float>(i * 12.9898f + f * 78.233f)) * 0.0025f * mul;
+                vTop += std::cos(static_cast<float>(i * 39.3467f + f * 41.135f)) * 0.0025f * mul * kAspect;
+                mpXy[i * 2 + 0] = u;
+                mpXy[i * 2 + 1] = vTop;
+            }
+            auto setIris = [&](int base, int a, int b, int top, int bot) {
+                const float cx = 0.25f * (mpXy[a * 2] + mpXy[b * 2] + mpXy[top * 2] + mpXy[bot * 2]);
+                const float cy = 0.25f * (mpXy[a * 2 + 1] + mpXy[b * 2 + 1] + mpXy[top * 2 + 1] + mpXy[bot * 2 + 1]);
+                for (int k = 0; k < 5; ++k) { mpXy[(base + k) * 2] = cx; mpXy[(base + k) * 2 + 1] = cy; }
+            };
+            setIris(468, 33, 133, 159, 145);
+            setIris(473, 362, 263, 386, 374);
+
+            EXPECT_TRUE(engine.submitFaceLandmarks(lmTs, mpXy, 478, kW, kH, frameTs));
+            const TextureId outTex = engine.processFrame(camTex, kW, kH, frameTs, frameTs);
+            EXPECT_TRUE(dev.readbackTextureRgba8(outTex, outPx.data(), kW, kH));
+
+            if (f >= 12) {
+                for (int gy = 0; gy < kGrid; ++gy) {
+                    const float ly = -0.17f + 0.34f * (gy / float(kGrid - 1));
+                    for (int gx = 0; gx < kGrid; ++gx) {
+                        const float lx = -0.14f + 0.28f * (gx / float(kGrid - 1));
+                        float u, vTop;
+                        forwardPt(lx, ly, dispP, u, vTop);
+                        const float fx = std::clamp(u * kW - 0.5f, 0.0f, float(kW - 1));
+                        const float fy = std::clamp(vTop * kH - 0.5f, 0.0f, float(kH - 1));
+                        const int x0 = int(fx), x1 = std::min(x0 + 1, kW - 1);
+                        const int y0 = int(fy), y1 = std::min(y0 + 1, kH - 1);
+                        const float wx = fx - x0, wy = fy - y0;
+                        auto lum = [&](int x, int y) {
+                            const int off = (y * kW + x) * 4;
+                            return 0.2126f * outPx[off] + 0.7152f * outPx[off + 1] + 0.0722f * outPx[off + 2];
+                        };
+                        const float curLuma = (1.0f - wy) * ((1.0f - wx) * lum(x0, y0) + wx * lum(x1, y0)) +
+                                              wy * ((1.0f - wx) * lum(x0, y1) + wx * lum(x1, y1));
+                        const int gi = gy * kGrid + gx;
+                        if (prevRestLuma[gi] >= 0.0f) {
+                            const double d = std::fabs(curLuma - prevRestLuma[gi]);
+                            sumSq += d * d;
+                            ++count;
+                        }
+                        prevRestLuma[gi] = curLuma;
+                    }
+                }
+            }
+        }
+        engine.releaseGpuResources();
+        dev.destroyTexture(camTex);
+        return std::sqrt(sumSq / std::max(1, count));
+    };
+
+    const double bypassRms = measureShakeStepRms(false, 0, 0);
+    const double alignedDelayRms = measureShakeStepRms(true, 1, 33);
+    const double extrapolatedRms = measureShakeStepRms(true, 0, 33);
+    // Aligned FrameDelayRing rendering must be even calmer than raw Bypass rasterization,
+    // and unaligned 33ms sub-frame extrapolation must stay within +0.25 luma RMS of Bypass!
+    EXPECT_TRUE(alignedDelayRms <= bypassRms);
+    EXPECT_TRUE(extrapolatedRms <= bypassRms + 0.25);
+
+    dev.destroyTexture(atlas);
+}
+
 }  // namespace
 
 int main() {
@@ -1543,6 +1706,7 @@ int main() {
         testV36MetalChromaKeyParticleSdfAndHandShieldProbes(dev);
         testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(dev);
         testV367EyeSocketNoseAndBeardContourNoDarkTrenches(dev);
+        testV369MetalSlightCameraShakeNoWaterRipple(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

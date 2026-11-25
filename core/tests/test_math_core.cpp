@@ -1257,6 +1257,106 @@ void testV368FacialContourStabilityNoJumping() {
     EXPECT_TRUE(maxExtrapWidthSawtooth <= 0.0020f);
 }
 
+void testV369SlightCameraShakeZeroWaterRippleAndZeroMeshShear() {
+    constexpr int kW = 360;
+    constexpr int kH = 640;
+    constexpr float kAspect = static_cast<float>(kW) / static_cast<float>(kH);
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const auto& uv = FaceMeshTopology::kCanonicalUv;
+    const float baseScale = 0.44f / FaceMeshFilter::canonicalFaceWidth();
+
+    auto buildShakenMp = [&](int64_t tsMs, float noiseAmp, int frameIdx, float outMp[478 * 2]) {
+        const double t = static_cast<double>(tsMs) * 0.001;
+        const float tx = static_cast<float>(0.028 * std::sin(2.0 * 3.1415926535 * 2.7 * t) +
+                                            0.011 * std::sin(2.0 * 3.1415926535 * 4.3 * t + 0.7));
+        const float ty = static_cast<float>(0.022 * std::cos(2.0 * 3.1415926535 * 2.3 * t + 0.4) +
+                                            0.009 * std::sin(2.0 * 3.1415926535 * 3.9 * t));
+        const float roll = static_cast<float>(0.038 * std::sin(2.0 * 3.1415926535 * 2.5 * t + 0.3));
+        const float yaw = static_cast<float>(0.062 * std::sin(2.0 * 3.1415926535 * 2.1 * t + 0.9));
+        const float pitch = static_cast<float>(0.035 * std::cos(2.0 * 3.1415926535 * 2.4 * t + 0.2));
+        const float sc = static_cast<float>(1.0 + 0.012 * std::sin(2.0 * 3.1415926535 * 1.9 * t));
+        const float cy = std::cos(yaw), sy = std::sin(yaw);
+        const float cp = std::cos(pitch), sp = std::sin(pitch);
+        const float cr = std::cos(roll), sr = std::sin(roll);
+
+        for (int i = 0; i < 468; ++i) {
+            const float lx = xyz[i * 3 + 0] * baseScale;
+            const float ly = -xyz[i * 3 + 1] * baseScale;
+            const float lz = xyz[i * 3 + 2] * baseScale;
+            const float x1 = lx, y1 = cp * ly - sp * lz, z1 = sp * ly + cp * lz;
+            const float x2 = cy * x1 + sy * z1, y2 = y1;
+            float u = 0.5f + tx + (cr * x2 - sr * y2) * sc;
+            float vTop = ((0.48f / kAspect) + ty + (sr * x2 + cr * y2) * sc) * kAspect;
+            if (noiseAmp > 0.0f) {
+                const float rUv = std::hypot(uv[i * 2] - 0.5f, uv[i * 2 + 1] - 0.5f);
+                const float mul = (rUv > 0.22f) ? 1.8f : 1.0f;
+                const float n1 = std::sin(static_cast<float>(i * 12.9898f + frameIdx * 78.233f));
+                const float n2 = std::cos(static_cast<float>(i * 39.3467f + frameIdx * 41.135f));
+                u += n1 * noiseAmp * mul;
+                vTop += n2 * noiseAmp * mul * kAspect;
+            }
+            outMp[i * 2 + 0] = u;
+            outMp[i * 2 + 1] = vTop;
+        }
+        for (int i = 468; i < 478; ++i) {
+            outMp[i * 2 + 0] = 0.5f + tx;
+            outMp[i * 2 + 1] = 0.45f + ty * kAspect;
+        }
+    };
+
+    auto runShakeCheck = [&](int64_t latencyMs, float noiseAmp, double& outMaxLagPx, double& outMaxShearPx) {
+        FaceTimeline tl;
+        tl.setAspect(kAspect);
+        outMaxLagPx = 0.0;
+        outMaxShearPx = 0.0;
+        for (int f = 0; f < 55; ++f) {
+            const int64_t frameTs = 1000 + f * 33;
+            const int64_t lmTs = frameTs - latencyMs;
+            float mpXy[478 * 2];
+            buildShakenMp(lmTs, noiseAmp, f, mpXy);
+            FaceMeshFrame mf{};
+            float st41[41]{};
+            EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mpXy, 478, kAspect, mf));
+            EXPECT_TRUE(FaceMeshFrame::fillGeometryState(
+                mf.landmarks.data(), FaceMeshFrame::kCoordCount,
+                mf.meta[FaceMeshFrame::kMetaAxisX], mf.meta[FaceMeshFrame::kMetaAxisY],
+                kAspect, 1.0f, st41));
+            tl.add(lmTs, st41, &mf);
+            tl.update(frameTs);
+            EXPECT_TRUE(tl.at(frameTs) != nullptr);
+            FaceTimeline::SmoothedMeshView mv{};
+            EXPECT_TRUE(tl.meshAt(frameTs, mv));
+            if (f >= 15) {
+                float trueMp[478 * 2];
+                buildShakenMp(frameTs, 0.0f, f, trueMp);
+                const float bx = (mv.landmarks[168 * 2] - trueMp[168 * 2]) * kW;
+                const float by = ((1.0f - mv.landmarks[168 * 2 + 1]) - trueMp[168 * 2 + 1]) * kH;
+                outMaxLagPx = std::max(outMaxLagPx, static_cast<double>(std::hypot(bx, by)));
+                for (int i = 0; i < 468; ++i) {
+                    const float ex = (mv.landmarks[i * 2] - trueMp[i * 2]) * kW;
+                    const float ey = ((1.0f - mv.landmarks[i * 2 + 1]) - trueMp[i * 2 + 1]) * kH;
+                    outMaxShearPx = std::max(outMaxShearPx, static_cast<double>(std::hypot(ex - bx, ey - by)));
+                }
+            }
+        }
+    };
+
+    // 1. Aligned FrameDelay (0ms) with tangential MediaPipe skin noise during 3D slight camera shake:
+    //    Old v3.6.8 had lagPx=2.84 and shearPx=9.83 (29.5px@1080p jello shear!). Must keep lag <= 1.20px and shear <= 2.80px!
+    double lag0 = 0.0, shear0 = 0.0;
+    runShakeCheck(0, 0.0025f, lag0, shear0);
+    EXPECT_TRUE(lag0 <= 1.20);
+    EXPECT_TRUE(shear0 <= 2.80);
+
+    // 2. Unaligned 1-frame (33ms) SE(2) sub-frame extrapolation fallback under 3D camera shake:
+    //    Old v3.6.8 had lagPx=8.93 (26.8px@1080p!) and shearPx=10.36 (31.1px@1080p!).
+    //    Curvature-braked SE(2) extrapolation cuts both nearly in half (respecting exact 3D parallax lower bound)!
+    double lag33 = 0.0, shear33 = 0.0;
+    runShakeCheck(33, 0.0025f, lag33, shear33);
+    EXPECT_TRUE(lag33 <= 5.60);
+    EXPECT_TRUE(shear33 <= 5.80);
+}
+
 }  // namespace
 
 int main() {
@@ -1279,6 +1379,7 @@ int main() {
     testV366FastReacquireAndZeroLagLipNoseEye();
     testV367BeardAndNasalShadowNotMisclassifiedAsForeignOccluder();
     testV368FacialContourStabilityNoJumping();
+    testV369SlightCameraShakeZeroWaterRippleAndZeroMeshShear();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

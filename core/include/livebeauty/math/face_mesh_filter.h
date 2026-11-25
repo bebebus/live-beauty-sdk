@@ -14,15 +14,20 @@ public:
     static constexpr int kPoseSize = 8;
     static constexpr int64_t kMaxGapMs = 220;
 
-    static constexpr float kPoseFcMin = 2.8f;
-    static constexpr float kPoseBeta = 85.0f;
-    static constexpr float kPoseDcut = 6.0f;
+    static constexpr float kPoseFcMin = 2.6f;
+    static constexpr float kPoseBeta = 95.0f;
+    static constexpr float kPoseDcut = 4.5f;
     static constexpr float kPoseDcutDown = 16.0f;
-    static constexpr float kKPose = 1.8f;
-    static constexpr float kCPose = 0.25f;
-    static constexpr float kResDcut = 5.0f;
-    static constexpr float kResDcutDown = 16.0f;
-    static constexpr float kKRes = 1.4f;
+    static constexpr float kPose3dFcMin = 1.85f;
+    static constexpr float kPose3dBeta = 24.0f;
+    static constexpr float kPose3dDcut = 2.4f;
+    static constexpr float kScaleFcMin = 1.25f;
+    static constexpr float kScaleBeta = 18.0f;
+    static constexpr float kScaleDcut = 2.0f;
+    static constexpr float kKPose = 1.0f;
+    static constexpr float kCPose = 0.20f;
+    static constexpr float kResDcut = 1.5f;
+    static constexpr float kKRes = 1.6f;
     static constexpr float kCRes = 0.20f;
     static constexpr float kResTeExp = 0.85f;
     static constexpr float kNfTauMs = 250.0f;
@@ -106,13 +111,27 @@ private:
     std::array<float, kPoseSize> q_{};
     std::array<float, kPoseSize> qRaw_{};
     std::array<float, kPoseSize> qRawPrev_{};
+    std::array<float, kPoseSize> dq_{};
+    float cRot_ = 1.0f;
+    float sRot_ = 0.0f;
+    float p00_ = 1.0f;
+    float p01_ = 0.0f;
+    float p11_ = 1.0f;
+    float hw1_ = 0.0f;
+    float hw2_ = 0.0f;
+    float hw1RawPrev_ = 0.0f;
+    float hw2RawPrev_ = 0.0f;
+    float dHw1_ = 0.0f;
+    float dHw2_ = 0.0f;
+    float logScale_ = 0.0f;
+    float logScaleRawPrev_ = 0.0f;
+    float dLogScale_ = 0.0f;
     std::array<float, kRegions> regionRms_{};
     std::array<float, kRegions> regionAlpha_{};
 
     bool started_ = false;
     int64_t lastTs_ = kTimeInvalid;
     float vp_ = 0.0f;
-    float vpShape_ = 0.0f;
     float noisePower_ = -1.0f;
     float noiseMin_ = 0.0f;
 
