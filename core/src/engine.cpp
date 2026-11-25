@@ -630,9 +630,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     const int64_t resolvedHairStampArg = (hairMaskTex != rhi::kInvalidTexture) ? hairMaskStampMs : autoParseHairTsMs_;
     const bool hasHairTex = (resolvedHairTex != rhi::kInvalidTexture);
     const int64_t effHairStamp = (resolvedHairStampArg != kTimeInvalid) ? resolvedHairStampArg : displayTsMs;
+    // Active hair dye / shine is a core user-visible feature (not optional body warp): follow loadFades_.smooth()
+    // so mild thermal loadLevel == 1 never silently switches hair coloring off.
+    const float hairLoadKeep = wantAutoHair ? loadFades_.smooth() : loadFades_.body();
     const float hairLevel = hairGate_.update(
         hasHairTex, effHairStamp, displayTsMs,
-        loadFades_.body(), primaryTl.latest(), primaryTl.missSince(), nowMs);
+        hairLoadKeep, primaryTl.latest(), primaryTl.missSince(), nowMs);
     const float neckWeight = (bodyState != nullptr && config_.neckLengthen > 0.0f) ? bodySmoother_.presence() : 0.0f;
     const float hairShown = hasHairTex ? hairGate_.shown(neckWeight) : 0.0f;
     const float hairBgShown = hasHairTex ? hairLevel : 0.0f;
@@ -671,7 +674,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             }
         }
         if (hasMaskPose) {
-            // If head/camera displacement since mask capture exceeds kAffineMaxShift (0.10), suppress stale mask instead of snapping to uncompensated identity!
+            // If head/camera displacement since mask capture exceeds kAffineMaxShift (0.18), suppress stale mask instead of snapping to uncompensated identity!
             affineValid = math::HairMaskTuning::affine(poseMask, poseDisplay, aspect, hairAffine.data());
         } else if (newest != kTimeInvalid) {
             // Mask timestamp precedes the current continuous face-tracking run (e.g. a fast shake triggered jump/gap reset): suppress pre-jump mask!
@@ -698,7 +701,11 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.denoiseKeep = primaryTl.denoiseKeep() * shakeGate;
 
     const float asyncMaskKeep = affineValid ? (in.denoiseKeep * shakeGate) : 0.0f;
-    const float effHairShown = hairShown * asyncMaskKeep;
+    // v3.6.13: Active hair styling already tracks live head motion via rigid hairAffine + GPU RGB boundary matting;
+    // decouple effHairShown from the 16ms denoiseKeep_ micro-motion gate so slight head sway never flashes hair dye
+    // off/on, while still gating strictly on affineValid (>kAffineMaxShift suppression), shakeGate, and steadyFace.
+    const float hairMotionKeep = (affineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
+    const float effHairShown = hairShown * (wantAutoHair ? hairMotionKeep : asyncMaskKeep);
     const float effHairBgShown = hairBgShown * asyncMaskKeep;
 
     in.secondaryFace.hasState = (secState41 != nullptr);

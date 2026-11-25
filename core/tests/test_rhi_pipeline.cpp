@@ -1128,6 +1128,116 @@ void testV3610CheekMakeupSteadyFaceAndAutoOccDecoupling() {
     }
 }
 
+void testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId inTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.hairDye = 0.80f;
+    cfg.hairDyeColor = HairDyeColor::kHazeBlue;
+    cfg.hairShine = 0.45f;
+    engine.setConfig(cfg);
+
+    const float aspect = 720.0f / 1280.0f;
+    auto makeFaceAt = [&](float cx) {
+        std::array<float, math::FaceMeshFrame::kCoordCount> mp{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float scale = 0.36f / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            mp[i * 2] = cx + xyz[i * 3] * scale;
+            mp[i * 2 + 1] = 1.0f - (0.50f + xyz[i * 3 + 1] * scale * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mp[i * 2] = cx;
+            mp[i * 2 + 1] = 0.45f;
+        }
+        return mp;
+    };
+
+    std::vector<float> logits(16 * 16 * 6, -3.5f);
+    for (int i = 0; i < 16 * 16; ++i) {
+        logits[static_cast<size_t>(i * 6 + (i < 128 ? 1 : 3))] = 4.0f;
+    }
+
+    // Warm up at rest so hairGate presence ramps to 1.0
+    for (int f = 0; f < 6; ++f) {
+        const int64_t t = 1000 + f * 33;
+        auto mp = makeFaceAt(0.50f);
+        EXPECT_TRUE(engine.submitFaceLandmarks(t, mp.data(), 478, 720, 1280, t));
+        if (f == 0 || f == 3) {
+            EXPECT_TRUE(engine.submitMulticlass6Logits(logits.data(), 16, 16, t));
+        }
+        engine.processFrame(inTex, 720, 1280, t, t);
+    }
+
+    // 1. Gentle continuous head sway (+0.015 screenW/frame = 0.45 screenW/s -> forces denoiseKeep == 0.0)
+    //    with multiclass refreshing every 2 frames (~66ms): kPassHairDye MUST stay 100% active on EVERY frame
+    //    and push non-zero uU5.zw RGB boundary matting radius!
+    int activeFrames = 0;
+    bool sawMatteRadius = false;
+    float cx = 0.50f;
+    for (int f = 0; f < 10; ++f) {
+        const int64_t t = 1200 + f * 33;
+        cx += (f < 5 ? 0.014f : -0.014f);
+        auto mp = makeFaceAt(cx);
+        EXPECT_TRUE(engine.submitFaceLandmarks(t, mp.data(), 478, 720, 1280, t));
+        if (f % 2 == 0) {
+            EXPECT_TRUE(engine.submitMulticlass6Logits(logits.data(), 16, 16, t));
+        }
+        dev.calls.clear();
+        engine.processFrame(inTex, 720, 1280, t, t);
+        if ((engine.stats().activePassesMask & kPassHairDye) != 0) {
+            ++activeFrames;
+        }
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kHairDye && c.uniforms.count >= 6 &&
+                c.uniforms.v[5].z > 0.005f && c.uniforms.v[5].w > 0.005f) {
+                sawMatteRadius = true;
+            }
+        }
+    }
+    EXPECT_TRUE(activeFrames == 10);
+    EXPECT_TRUE(sawMatteRadius);
+
+    // 2. Hard camera shake suppresses kPassHairDye, and releasing shake recovers cleanly on next frame
+    engine.setCameraShaking(true);
+    engine.processFrame(inTex, 720, 1280, 1550, 1550);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
+    engine.setCameraShaking(false);
+    auto mpRec = makeFaceAt(cx);
+    EXPECT_TRUE(engine.submitFaceLandmarks(1583, mpRec.data(), 478, 720, 1280, 1583));
+    EXPECT_TRUE(engine.submitMulticlass6Logits(logits.data(), 16, 16, 1583));
+    engine.processFrame(inTex, 720, 1280, 1583, 1583);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) != 0);
+
+    // 3. Mild thermal load (loadFadeBody == 0.0 while loadFadeSmooth == 1.0):
+    //    RenderPipeline hair dye MUST remain active at full smooth fade!
+    {
+        MockRhiDevice pipeDev;
+        RenderPipeline pipe(pipeDev);
+        BeautyConfig pCfg{};
+        pCfg.enabled = true;
+        pCfg.hairDye = 0.80f;
+        pCfg.hairDyeColor = HairDyeColor::kHazeBlue;
+        FrameInputs pIn{};
+        pIn.inputTexture = pipeDev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        pIn.hairMaskTex = pipeDev.createTexture2D(128, 128, TextureFormat::kR8, nullptr);
+        pIn.hairShown = 1.0f;
+        math::HairMaskTuning::identity(pIn.hairAffine.data());
+        pIn.width = 720;
+        pIn.height = 1280;
+        pIn.loadFadeBody = 0.0f;
+        pIn.loadFadeSmooth = 1.0f;
+        const TextureId outTex = pipe.render(pCfg, pIn);
+        EXPECT_TRUE(outTex != pIn.inputTexture);
+        EXPECT_TRUE((pipe.lastActivePassesMask() & kPassHairDye) != 0);
+    }
+
+    engine.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -1142,6 +1252,7 @@ int main() {
     testCodeReviewEngineLifecycleAndPriorityGuards();
     testV36ChromaKeyParticlesMulticlassAndHandShield();
     testV3610CheekMakeupSteadyFaceAndAutoOccDecoupling();
+    testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

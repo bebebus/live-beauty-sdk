@@ -1936,6 +1936,121 @@ void testV3611RealisticNaturalLipColorNoFakePink(MetalDevice& dev) {
     EXPECT_TRUE(int(presetMale.r) - 140 <= 10 && int(presetMale.g) >= int(presetMale.b) + 4);
 }
 
+void testV3613MetalHairDyeRgbBoundaryMattingBangsAndDarkHairUniformity(MetalDevice& dev) {
+    constexpr int kW = 64, kH = 64;
+    std::vector<uint8_t> img(kW * kH * 4, 255);
+    std::vector<uint8_t> hairMask(kW * kH, 0);
+    std::vector<uint8_t> sem(kW * kH * 4, 0);
+
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            const int idx4 = (y * kW + x) * 4;
+            if (x < 44) {
+                // Left 44 columns: Hair -> Bangs/Eyebrow -> Forehead skin
+                if (y < 28) {
+                    // Very dark natural Asian hair (18, 15, 14)
+                    img[idx4 + 0] = 18; img[idx4 + 1] = 15; img[idx4 + 2] = 14;
+                    hairMask[y * kW + x] = 255;
+                    // Intentional 2x2 interior mask dropout hole around (22, 12)
+                    if (x >= 21 && x <= 22 && y >= 11 && y <= 12) {
+                        hairMask[y * kW + x] = 0;
+                    }
+                } else if (y < 34) {
+                    if (x < 30) {
+                        // Forehead bangs over face polygon (sem.r = 255, sem.g = 0, hairMask = 255)
+                        img[idx4 + 0] = 20; img[idx4 + 1] = 17; img[idx4 + 2] = 15;
+                        hairMask[y * kW + x] = 255;
+                        sem[idx4 + 0] = 255; sem[idx4 + 1] = 0; sem[idx4 + 3] = 255;
+                    } else {
+                        // Dark eyebrow inside eye/brow cutout (sem.g = 255) with spilled hairMask = 255
+                        img[idx4 + 0] = 22; img[idx4 + 1] = 19; img[idx4 + 2] = 17;
+                        hairMask[y * kW + x] = 255;
+                        sem[idx4 + 0] = 255; sem[idx4 + 1] = 255; sem[idx4 + 3] = 255;
+                    }
+                } else {
+                    // Bright forehead skin (204, 160, 142); rows 34..36 have coarse mask bleed (180)!
+                    img[idx4 + 0] = 204; img[idx4 + 1] = 160; img[idx4 + 2] = 142;
+                    hairMask[y * kW + x] = (y < 37) ? 180 : 0;
+                    sem[idx4 + 0] = 255; sem[idx4 + 1] = 0; sem[idx4 + 3] = 255;
+                }
+            } else {
+                // Right 20 columns (outside face polygon, sem.r = 0): Hair vs Bright Studio Wall
+                if (y < 28) {
+                    // Dark hair; rows 26..27 are under-segmented hairline edges (hairMask = 20)!
+                    img[idx4 + 0] = 18; img[idx4 + 1] = 15; img[idx4 + 2] = 14;
+                    hairMask[y * kW + x] = (y >= 26) ? 20 : 255;
+                } else {
+                    // Bright studio wall (220, 215, 210); rows 28..29 have coarse mask bleed (190)!
+                    img[idx4 + 0] = 220; img[idx4 + 1] = 215; img[idx4 + 2] = 210;
+                    hairMask[y * kW + x] = (y < 30) ? 190 : 0;
+                }
+            }
+        }
+    }
+
+    const TextureId imgTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, img.data());
+    const TextureId hairTex = dev.createTexture2D(kW, kH, TextureFormat::kR8, hairMask.data());
+    const TextureId semTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, sem.data());
+    const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+    const Vec3 hazeBlue = FaceMakeupUv::hairDyeRgb(HairDyeColor::kHazeBlue);
+    RenderState st{};
+    TextureBindings tb{};
+    tb.bind(0, imgTex); tb.bind(1, hairTex); tb.bind(2, semTex);
+    UniformBlock ub{};
+    ub.push(1.0f, 0.0f, 0.0f, 0.90f);  // hairDye = 0.90
+    ub.push(0.0f, 1.0f, 0.0f, 0.0f);   // hairShine = 0
+    ub.push(hazeBlue.x, hazeBlue.y, hazeBlue.z, 1.0f);
+    ub.push(0.50f, 0.75f, 0.30f, 0.15f);
+    ub.push(1.0f, 0.0f, 1.0f, 0.0f);
+    // 4-pixel RGB boundary matting radius matching the 2-3px coarse mask bleed & under-segmentation
+    ub.push(1.0f / float(kW), 1.0f / float(kH), 4.0f / float(kW), 4.0f / float(kH));
+    dev.beginPass(rt, kW, kH, false, {});
+    dev.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
+    dev.endPass();
+
+    std::vector<uint8_t> out(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+
+    auto px = [&](int x, int y) -> Rgba {
+        const int i = (y * kW + x) * 4;
+        return {out[i], out[i + 1], out[i + 2], out[i + 3]};
+    };
+
+    // 1. Very dark Asian hair (18, 15, 14) gets strong uniform Haze-Blue coverage (B > R + 18, B >= 55)
+    const Rgba darkHair = px(12, 12);
+    EXPECT_TRUE(int(darkHair.b) > int(darkHair.r) + 18 && int(darkHair.b) >= 55);
+
+    // 2. Interior 2x2 mask dropout hole inside dark hair is cleanly filled via surrounding hair color match
+    const Rgba filledHole = px(22, 12);
+    EXPECT_TRUE(int(filledHole.b) > int(filledHole.r) + 14);
+
+    // 3. Forehead bangs (sem.r=255, sem.g=0, hairMask=255) are cleanly dyed without forehead suppression
+    const Rgba bangs = px(14, 30);
+    EXPECT_TRUE(int(bangs.b) > int(bangs.r) + 18);
+
+    // 4. Eyebrow inside sem.g=255 stays exact 0/255 untouched even with spilled hairMask=255
+    const Rgba brow = px(37, 30);
+    EXPECT_TRUE(brow.r == 22 && brow.g == 19 && brow.b == 17);
+
+    // 5. Coarse mask bleed (180/255) onto bright forehead skin is snapped to exact 0/255 bleed!
+    const Rgba foreheadBleed = px(14, 35);
+    EXPECT_TRUE(foreheadBleed.r == 204 && foreheadBleed.g == 160 && foreheadBleed.b == 142);
+
+    // 6. Coarse mask bleed (190/255) onto bright background wall (sem.r=0!) is snapped by RGB matting to exact 0/255!
+    const Rgba wallBleed = px(54, 29);
+    EXPECT_TRUE(wallBleed.r == 220 && wallBleed.g == 215 && wallBleed.b == 210);
+
+    // 7. Under-segmented hairline edge (hairMask=20/255 on dark hair) snaps UP and gets dyed cleanly!
+    const Rgba hairlineEdge = px(54, 26);
+    EXPECT_TRUE(int(hairlineEdge.b) > int(hairlineEdge.r) + 14);
+
+    dev.destroyRenderTarget(rt);
+    dev.destroyTexture(semTex);
+    dev.destroyTexture(hairTex);
+    dev.destroyTexture(imgTex);
+}
+
 }  // namespace
 
 int main() {
@@ -1961,6 +2076,7 @@ int main() {
         testV369MetalSlightCameraShakeNoWaterRipple(dev);
         testV3610MetalCheekBeautyZeroTwitch(dev);
         testV3611RealisticNaturalLipColorNoFakePink(dev);
+        testV3613MetalHairDyeRgbBoundaryMattingBangsAndDarkHairUniformity(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

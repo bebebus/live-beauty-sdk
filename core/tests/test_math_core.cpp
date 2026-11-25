@@ -1755,6 +1755,55 @@ void testV3612PhoneShakeZeroFeatureLag() {
     EXPECT_NEAR(recEyeH, refEyeH, 0.8f);
 }
 
+void testV3613HairCoverageGhostFreeEmaAndAffineMargin() {
+    // 1. Moderate real-world hair confidence (c[1]=2.0 vs c[0]=1.4 -> p[1]≈0.646, pSkin≈0)
+    //    MUST yield strong hair coverage (>= 200/255) instead of being crushed by high 0.55..0.88 threshold!
+    constexpr int kS = 16;
+    std::vector<float> logits(kS * kS * 6, -3.5f);
+    for (int y = 0; y < kS; ++y) {
+        for (int x = 0; x < kS; ++x) {
+            float* c = logits.data() + static_cast<size_t>((y * kS + x) * 6);
+            if (y < kS / 2) {
+                c[1] = 2.0f;  // moderate hair confidence (~0.646)
+                c[0] = 1.4f;
+            } else {
+                c[3] = 2.5f;  // clear face skin
+                c[1] = 0.2f;
+            }
+        }
+    }
+    FaceParsingMapper mapper;
+    std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+    EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwc(logits.data(), kS, kS, occ.data(), hair.data(), person.data()));
+    EXPECT_TRUE(hair[24 * 128 + 64] >= 200);
+    EXPECT_TRUE(hair[100 * 128 + 64] < 5);
+
+    // 2. Responsive hair EMA snaps immediately when hair moves to a new region (zero temporal ghost smear!)
+    std::fill(logits.begin(), logits.end(), -3.5f);
+    for (int y = 0; y < kS; ++y) {
+        for (int x = 0; x < kS; ++x) {
+            float* c = logits.data() + static_cast<size_t>((y * kS + x) * 6);
+            if (y >= kS / 2) {
+                c[1] = 4.0f;  // moved to bottom half
+            } else {
+                c[0] = 4.0f;  // top half is now background
+            }
+        }
+    }
+    EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwc(logits.data(), kS, kS, occ.data(), hair.data(), person.data()));
+    EXPECT_TRUE(hair[24 * 128 + 64] <= 15);
+    EXPECT_TRUE(hair[100 * 128 + 64] >= 240);
+
+    // 3. HairMaskTuning::affine tolerates realistic 14% head displacement between 50ms segmentation ticks
+    //    while still rejecting stale 25% jumps (> kAffineMaxShift = 0.18).
+    float aff[HairMaskTuning::kAffineSize];
+    const float poseMask[6] = {0.43f, 0.50f, 0.20f, 0.25f, 1.0f, 0.0f};
+    const float poseMid[6] = {0.57f, 0.50f, 0.20f, 0.25f, 1.0f, 0.0f};   // shift = 0.14 <= 0.18 -> valid!
+    const float poseJump[6] = {0.68f, 0.50f, 0.20f, 0.25f, 1.0f, 0.0f};  // shift = 0.25 > 0.18 -> rejected!
+    EXPECT_TRUE(HairMaskTuning::affine(poseMask, poseMid, 0.5625f, aff));
+    EXPECT_TRUE(!HairMaskTuning::affine(poseMask, poseJump, 0.5625f, aff));
+}
+
 }  // namespace
 
 int main() {
@@ -1780,6 +1829,7 @@ int main() {
     testV369SlightCameraShakeZeroWaterRippleAndZeroMeshShear();
     testV3610CheekBeautyStabilityMirroredNoTwitch();
     testV3612PhoneShakeZeroFeatureLag();
+    testV3613HairCoverageGhostFreeEmaAndAffineMargin();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

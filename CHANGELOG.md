@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.13] - 2026-11-26
+
+### Fixed
+- **Stable, Pixel-Accurate Salon Hair Dyeing & Coverage (`LiveBeautyEngine`, `FaceParsingMapper`, `HairMaskTuning`, `RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Decoupled active hair styling (`hairDye > 0 || hairShine > 0`) from `FaceTimeline::denoiseKeep_`'s 16ms micro-motion binary cutoff and `loadFades_.body()` thermal level-1 shutoff in `LiveBeautyEngine` (now gating on `affineValid * shakeGate * steadyFace` and `loadFades_.smooth()`), expanded `HairMaskTuning::kAffineMaxShift` (`0.10 -> 0.18`) and tightened `kPresenceFadeInMs` (`300ms -> 120ms`), eliminating hair-color flickering/flashing off during slight head movement or normal streaming load while preserving camera-shake and stale-jump suppression.
+  - Replaced `FaceParsingMapper::mapMulticlass6LogitsNhwc`'s overly strict hair cutoff (`smoothstep(0.55, 0.88, p[1] - 0.85*pSkin)`) and sluggish 3x3 box-blur EMA (`alpha=0.46`) with a calibrated coverage ramp (`smoothstep(0.32, 0.72, p[1] - 0.75*pSkin)`) and center-weighted 3x3 Gaussian + responsive jump-snapping hair EMA (`alpha=0.74`, snap `>56 -> 0.96`), lifting real-portrait hair coverage from ~52–57% to ~80–87% with zero forehead skin bleed and zero motion ghost trails.
+  - Upgraded `kHairDyeFrag` (GLES2/WebGL1) and `fs_hair_dye` (Metal) in lockstep with a 3-tier Local Foreground/Background RGB Color Projection boundary matting pass (passing mask matting radius in `uU5.zw`, snapping coarse 128×128 mask bleed on skin/walls to `0/255`, snapping under-segmented dark hairline edges up to full coverage, and filling dark interior mask dropouts while preserving scalp partings), single calibrated mask ramp (`smoothstep(0.16, 0.58)`), bangs-friendly forehead guard (unconditionally protecting `sem.g` eyes/brows/lips while dyeing confident bangs over forehead `sem.r`), and uniform dark-hair coloring (`strandLift = smoothstep(0.008, 0.08, y)`, mix `0.62 + 0.38 * strandLift`).
+
 ## [3.6.12] - 2026-11-26
 
 ### Fixed

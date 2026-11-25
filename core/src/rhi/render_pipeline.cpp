@@ -1772,7 +1772,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         ub.push(dyeRgb.x, dyeRgb.y, dyeRgb.z, polySkinMaskReady ? 1.0f : 0.0f);
         ub.push(crownCx, crownCy, crownRx, crownRy);
         ub.push(ux, uy, aspect, signedYaw);
-        ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), 0.0f, 0.0f);
+        // uU5: (pixelTexelX, pixelTexelY, maskMatteRadiusU, maskMatteRadiusV) for RGB-guided boundary matting
+        ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height),
+                1.6f / 128.0f, 1.6f / 128.0f);
         device_.beginPass(rtBgOut_, in.width, in.height, false);
         device_.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
         device_.endPass();

@@ -1155,12 +1155,87 @@ fragment float4 fs_hair_dye(QuadOut in [[stage_in]],
     float2 muv = float2(uni.u[0].x * uv.x + uni.u[0].y * uv.y + uni.u[0].z,
                         uni.u[1].x * uv.x + uni.u[1].y * uv.y + uni.u[1].z);
     float inBounds = step(0.0f, muv.x) * step(muv.x, 1.0f) * step(0.0f, muv.y) * step(muv.y, 1.0f);
-    float rawHair = tex1.sample(kLinearClamp, toMtlUv(muv)).r * inBounds;
-    float hairMask = smoothstep(0.28f, 0.72f, rawHair);
+    float rawHair = tex1.sample(kLinearClamp, toMtlUv(clamp(muv, 0.0f, 1.0f))).r * inBounds;
+    float refinedHair = rawHair;
+    if (uni.u[5].z > 0.0001f && uni.u[5].w > 0.0001f) {
+        float2 duX = float2(uni.u[5].z, 0.0f);
+        float2 duY = float2(0.0f, uni.u[5].w);
+        float2 dmX = float2(uni.u[0].x, uni.u[1].x) * uni.u[5].z;
+        float2 dmY = float2(uni.u[0].y, uni.u[1].y) * uni.u[5].w;
+        float2 mLuv = muv - dmX;
+        float2 mRuv = muv + dmX;
+        float2 mUuv = muv + dmY;
+        float2 mDuv = muv - dmY;
+        float mL = tex1.sample(kLinearClamp, toMtlUv(clamp(mLuv, 0.0f, 1.0f))).r *
+                   step(0.0f, mLuv.x) * step(mLuv.x, 1.0f) * step(0.0f, mLuv.y) * step(mLuv.y, 1.0f);
+        float mR = tex1.sample(kLinearClamp, toMtlUv(clamp(mRuv, 0.0f, 1.0f))).r *
+                   step(0.0f, mRuv.x) * step(mRuv.x, 1.0f) * step(0.0f, mRuv.y) * step(mRuv.y, 1.0f);
+        float mU = tex1.sample(kLinearClamp, toMtlUv(clamp(mUuv, 0.0f, 1.0f))).r *
+                   step(0.0f, mUuv.x) * step(mUuv.x, 1.0f) * step(0.0f, mUuv.y) * step(mUuv.y, 1.0f);
+        float mD = tex1.sample(kLinearClamp, toMtlUv(clamp(mDuv, 0.0f, 1.0f))).r *
+                   step(0.0f, mDuv.x) * step(mDuv.x, 1.0f) * step(0.0f, mDuv.y) * step(mDuv.y, 1.0f);
+        float maxN = max(rawHair, max(max(mL, mR), max(mU, mD)));
+        if (maxN <= 0.04f) {
+            return orig;
+        }
+        float minN = min(rawHair, min(min(mL, mR), min(mU, mD)));
+        if (minN < 0.85f) {
+            float3 cL = tex0.sample(kLinearClamp, toMtlUv(clamp(uv - duX, 0.0f, 1.0f))).rgb;
+            float3 cR = tex0.sample(kLinearClamp, toMtlUv(clamp(uv + duX, 0.0f, 1.0f))).rgb;
+            float3 cU = tex0.sample(kLinearClamp, toMtlUv(clamp(uv + duY, 0.0f, 1.0f))).rgb;
+            float3 cD = tex0.sample(kLinearClamp, toMtlUv(clamp(uv - duY, 0.0f, 1.0f))).rgb;
+            float2 mULuv = muv - dmX + dmY;
+            float2 mURuv = muv + dmX + dmY;
+            float2 mDLuv = muv - dmX - dmY;
+            float2 mDRuv = muv + dmX - dmY;
+            float mUL = tex1.sample(kLinearClamp, toMtlUv(clamp(mULuv, 0.0f, 1.0f))).r *
+                        step(0.0f, mULuv.x) * step(mULuv.x, 1.0f) * step(0.0f, mULuv.y) * step(mULuv.y, 1.0f);
+            float mUR = tex1.sample(kLinearClamp, toMtlUv(clamp(mURuv, 0.0f, 1.0f))).r *
+                        step(0.0f, mURuv.x) * step(mURuv.x, 1.0f) * step(0.0f, mURuv.y) * step(mURuv.y, 1.0f);
+            float mDL = tex1.sample(kLinearClamp, toMtlUv(clamp(mDLuv, 0.0f, 1.0f))).r *
+                        step(0.0f, mDLuv.x) * step(mDLuv.x, 1.0f) * step(0.0f, mDLuv.y) * step(mDLuv.y, 1.0f);
+            float mDR = tex1.sample(kLinearClamp, toMtlUv(clamp(mDRuv, 0.0f, 1.0f))).r *
+                        step(0.0f, mDRuv.x) * step(mDRuv.x, 1.0f) * step(0.0f, mDRuv.y) * step(mDRuv.y, 1.0f);
+            float3 cUL = tex0.sample(kLinearClamp, toMtlUv(clamp(uv - duX + duY, 0.0f, 1.0f))).rgb;
+            float3 cUR = tex0.sample(kLinearClamp, toMtlUv(clamp(uv + duX + duY, 0.0f, 1.0f))).rgb;
+            float3 cDL = tex0.sample(kLinearClamp, toMtlUv(clamp(uv - duX - duY, 0.0f, 1.0f))).rgb;
+            float3 cDR = tex0.sample(kLinearClamp, toMtlUv(clamp(uv + duX - duY, 0.0f, 1.0f))).rgb;
+            float3 fgSum = float3(0.0f); float fgW = 0.0f;
+            float3 bgSum = float3(0.0f); float bgW = 0.0f;
+            float wF; float wB;
+            wF = smoothstep(0.62f, 0.90f, mL); wB = smoothstep(0.62f, 0.90f, 1.0f - mL); fgSum += cL * wF; fgW += wF; bgSum += cL * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mR); wB = smoothstep(0.62f, 0.90f, 1.0f - mR); fgSum += cR * wF; fgW += wF; bgSum += cR * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mU); wB = smoothstep(0.62f, 0.90f, 1.0f - mU); fgSum += cU * wF; fgW += wF; bgSum += cU * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mD); wB = smoothstep(0.62f, 0.90f, 1.0f - mD); fgSum += cD * wF; fgW += wF; bgSum += cD * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mUL) * 0.75f; wB = smoothstep(0.62f, 0.90f, 1.0f - mUL) * 0.75f; fgSum += cUL * wF; fgW += wF; bgSum += cUL * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mUR) * 0.75f; wB = smoothstep(0.62f, 0.90f, 1.0f - mUR) * 0.75f; fgSum += cUR * wF; fgW += wF; bgSum += cUR * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mDL) * 0.75f; wB = smoothstep(0.62f, 0.90f, 1.0f - mDL) * 0.75f; fgSum += cDL * wF; fgW += wF; bgSum += cDL * wB; bgW += wB;
+            wF = smoothstep(0.62f, 0.90f, mDR) * 0.75f; wB = smoothstep(0.62f, 0.90f, 1.0f - mDR) * 0.75f; fgSum += cDR * wF; fgW += wF; bgSum += cDR * wB; bgW += wB;
+            if (fgW > 0.20f && bgW > 0.20f) {
+                float3 F = fgSum / fgW;
+                float3 B = bgSum / bgW;
+                float3 D = F - B;
+                float dLen2 = dot(D, D);
+                float contrast = smoothstep(0.010f, 0.060f, dLen2);
+                float proj = clamp(dot(orig.rgb - B, D) / max(dLen2, 0.0001f), 0.0f, 1.0f);
+                float3 err = orig.rgb - (B + D * proj);
+                float onLine = exp(-dot(err, err) * 18.0f);
+                float boundaryConf = smoothstep(0.20f, 1.00f, fgW) * smoothstep(0.20f, 1.00f, bgW) * contrast * onLine;
+                refinedHair = mix(rawHair, proj, boundaryConf * 0.90f);
+            } else if (fgW > 1.50f && bgW < 0.08f) {
+                float3 F = fgSum / fgW;
+                float3 df = orig.rgb - F;
+                float holeFill = smoothstep(1.50f, 3.00f, fgW) * (1.0f - smoothstep(0.02f, 0.08f, bgW)) * exp(-dot(df, df) * 55.0f);
+                refinedHair = max(refinedHair, holeFill * 0.88f);
+            }
+        }
+    }
+    float hairMask = smoothstep(0.16f, 0.58f, refinedHair);
     if (uni.u[2].w > 0.5f) {
         float4 sem = tex2.sample(kLinearClamp, toMtlUv(uv));
-        float bareFace = clamp(sem.r * clamp(sem.a * 1.04f - 0.02f, 0.0f, 1.0f) * 0.85f + sem.g, 0.0f, 1.0f);
-        hairMask *= (1.0f - smoothstep(0.45f, 0.85f, bareFace));
+        float eyeBrowLip = smoothstep(0.22f, 0.62f, sem.g);
+        float weakHairFace = sem.r * (1.0f - smoothstep(0.45f, 0.78f, refinedHair));
+        hairMask *= (1.0f - eyeBrowLip) * (1.0f - smoothstep(0.35f, 0.78f, weakHairFace));
     }
     if (hairMask <= 0.002f) {
         return orig;
@@ -1168,9 +1243,9 @@ fragment float4 fs_hair_dye(QuadOut in [[stage_in]],
     float3 color = orig.rgb;
     if (uni.u[0].w > 0.001f) {
         float y = luma709(color);
-        float strandLift = smoothstep(0.015f, 0.12f, y);
+        float strandLift = smoothstep(0.008f, 0.08f, y);
         float dyeY = max(luma709(uni.u[2].rgb), 0.08f);
-        float bleachNeed = smoothstep(0.28f, 0.72f, dyeY) * smoothstep(0.012f, 0.09f, y) * (1.0f - smoothstep(0.18f, 0.45f, y));
+        float bleachNeed = smoothstep(0.22f, 0.68f, dyeY) * smoothstep(0.006f, 0.06f, y) * (1.0f - smoothstep(0.20f, 0.52f, y));
         float strandDetail = 0.0f;
         if (uni.u[5].x > 0.0001f) {
             float2 stepLat = uni.u[4].xy * uni.u[5].x * 1.5f;
@@ -1181,11 +1256,11 @@ fragment float4 fs_hair_dye(QuadOut in [[stage_in]],
             strandDetail = clamp(y - avgLat, -0.06f, 0.06f);
         }
         float liftedY = clamp(
-            mix(y, clamp(y * (0.65f + dyeY * 1.35f) + dyeY * 0.36f * strandLift + bleachNeed * dyeY * 0.32f, 0.0f, 0.95f), 0.80f) +
+            mix(y, clamp(y * (0.65f + dyeY * 1.35f) + dyeY * 0.36f * strandLift + bleachNeed * dyeY * 0.34f, 0.0f, 0.95f), 0.82f) +
             strandDetail * 1.20f,
             0.0f, 0.96f);
         float3 tinted = fitGamut(clamp(uni.u[2].rgb * (liftedY / dyeY), 0.0f, 1.28f), liftedY);
-        color = mix(color, clamp(tinted, 0.0f, 1.0f), clamp(hairMask * uni.u[0].w * (0.36f + 0.64f * strandLift), 0.0f, 0.92f));
+        color = mix(color, clamp(tinted, 0.0f, 1.0f), clamp(hairMask * uni.u[0].w * (0.62f + 0.38f * strandLift), 0.0f, 0.94f));
     }
     if (uni.u[1].w > 0.001f) {
         float2 axisU = uni.u[4].xy;

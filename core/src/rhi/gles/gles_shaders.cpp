@@ -1235,10 +1235,10 @@ void main() {
 }
 )";
 
-// v3.4/v3.6: Real-time strand-preserving salon hair dyeing (melanin bleach curve + micro-strand detail) & dual-lobe Angel-Ring sheen
+// v3.4/v3.6.13: Real-time strand-preserving salon hair dyeing (RGB-guided boundary matting + uniform dark-hair bleach curve + micro-strand detail) & dual-lobe Angel-Ring sheen
 // uTex0=currentRgb, uTex1=hairMaskTex(top-down), uTex2=rtSkinMask_
 // uU0=(a00, a01, a02, hairDye), uU1=(a10, a11, a12, hairShine)
-// uU2=(dyeR, dyeG, dyeB, hasFacePoly), uU3=(crownCx, crownCy, crownRx, crownRy), uU4=(axisUx, axisUy, aspect, signedYaw), uU5=(texelX, texelY, 0, 0)
+// uU2=(dyeR, dyeG, dyeB, hasFacePoly), uU3=(crownCx, crownCy, crownRx, crownRy), uU4=(axisUx, axisUy, aspect, signedYaw), uU5=(texelX, texelY, matteRadU, matteRadV)
 constexpr const char* kHairDyeFrag = LB_GLSL_PREC R"(
 varying vec2 vTextureCoord;
 uniform sampler2D uTex0;
@@ -1265,12 +1265,88 @@ void main() {
     vec2 muv = vec2(uU0.x * uv.x + uU0.y * uv.y + uU0.z,
                     uU1.x * uv.x + uU1.y * uv.y + uU1.z);
     float inBounds = step(0.0, muv.x) * step(muv.x, 1.0) * step(0.0, muv.y) * step(muv.y, 1.0);
-    float rawHair = texture2D(uTex1, vec2(muv.x, 1.0 - muv.y)).r * inBounds;
-    float hairMask = smoothstep(0.28, 0.72, rawHair);
+    float rawHair = texture2D(uTex1, vec2(clamp(muv.x, 0.0, 1.0), 1.0 - clamp(muv.y, 0.0, 1.0))).r * inBounds;
+    float refinedHair = rawHair;
+    if (uU5.z > 0.0001 && uU5.w > 0.0001) {
+        vec2 duX = vec2(uU5.z, 0.0);
+        vec2 duY = vec2(0.0, uU5.w);
+        vec2 dmX = vec2(uU0.x, uU1.x) * uU5.z;
+        vec2 dmY = vec2(uU0.y, uU1.y) * uU5.w;
+        vec2 mLuv = muv - dmX;
+        vec2 mRuv = muv + dmX;
+        vec2 mUuv = muv + dmY;
+        vec2 mDuv = muv - dmY;
+        float mL = texture2D(uTex1, vec2(clamp(mLuv.x, 0.0, 1.0), 1.0 - clamp(mLuv.y, 0.0, 1.0))).r *
+                   step(0.0, mLuv.x) * step(mLuv.x, 1.0) * step(0.0, mLuv.y) * step(mLuv.y, 1.0);
+        float mR = texture2D(uTex1, vec2(clamp(mRuv.x, 0.0, 1.0), 1.0 - clamp(mRuv.y, 0.0, 1.0))).r *
+                   step(0.0, mRuv.x) * step(mRuv.x, 1.0) * step(0.0, mRuv.y) * step(mRuv.y, 1.0);
+        float mU = texture2D(uTex1, vec2(clamp(mUuv.x, 0.0, 1.0), 1.0 - clamp(mUuv.y, 0.0, 1.0))).r *
+                   step(0.0, mUuv.x) * step(mUuv.x, 1.0) * step(0.0, mUuv.y) * step(mUuv.y, 1.0);
+        float mD = texture2D(uTex1, vec2(clamp(mDuv.x, 0.0, 1.0), 1.0 - clamp(mDuv.y, 0.0, 1.0))).r *
+                   step(0.0, mDuv.x) * step(mDuv.x, 1.0) * step(0.0, mDuv.y) * step(mDuv.y, 1.0);
+        float maxN = max(rawHair, max(max(mL, mR), max(mU, mD)));
+        if (maxN <= 0.04) {
+            gl_FragColor = orig;
+            return;
+        }
+        float minN = min(rawHair, min(min(mL, mR), min(mU, mD)));
+        if (minN < 0.85) {
+            vec3 cL = texture2D(uTex0, clamp(uv - duX, 0.0, 1.0)).rgb;
+            vec3 cR = texture2D(uTex0, clamp(uv + duX, 0.0, 1.0)).rgb;
+            vec3 cU = texture2D(uTex0, clamp(uv + duY, 0.0, 1.0)).rgb;
+            vec3 cD = texture2D(uTex0, clamp(uv - duY, 0.0, 1.0)).rgb;
+            vec2 mULuv = muv - dmX + dmY;
+            vec2 mURuv = muv + dmX + dmY;
+            vec2 mDLuv = muv - dmX - dmY;
+            vec2 mDRuv = muv + dmX - dmY;
+            float mUL = texture2D(uTex1, vec2(clamp(mULuv.x, 0.0, 1.0), 1.0 - clamp(mULuv.y, 0.0, 1.0))).r *
+                        step(0.0, mULuv.x) * step(mULuv.x, 1.0) * step(0.0, mULuv.y) * step(mULuv.y, 1.0);
+            float mUR = texture2D(uTex1, vec2(clamp(mURuv.x, 0.0, 1.0), 1.0 - clamp(mURuv.y, 0.0, 1.0))).r *
+                        step(0.0, mURuv.x) * step(mURuv.x, 1.0) * step(0.0, mURuv.y) * step(mURuv.y, 1.0);
+            float mDL = texture2D(uTex1, vec2(clamp(mDLuv.x, 0.0, 1.0), 1.0 - clamp(mDLuv.y, 0.0, 1.0))).r *
+                        step(0.0, mDLuv.x) * step(mDLuv.x, 1.0) * step(0.0, mDLuv.y) * step(mDLuv.y, 1.0);
+            float mDR = texture2D(uTex1, vec2(clamp(mDRuv.x, 0.0, 1.0), 1.0 - clamp(mDRuv.y, 0.0, 1.0))).r *
+                        step(0.0, mDRuv.x) * step(mDRuv.x, 1.0) * step(0.0, mDRuv.y) * step(mDRuv.y, 1.0);
+            vec3 cUL = texture2D(uTex0, clamp(uv - duX + duY, 0.0, 1.0)).rgb;
+            vec3 cUR = texture2D(uTex0, clamp(uv + duX + duY, 0.0, 1.0)).rgb;
+            vec3 cDL = texture2D(uTex0, clamp(uv - duX - duY, 0.0, 1.0)).rgb;
+            vec3 cDR = texture2D(uTex0, clamp(uv + duX - duY, 0.0, 1.0)).rgb;
+            vec3 fgSum = vec3(0.0); float fgW = 0.0;
+            vec3 bgSum = vec3(0.0); float bgW = 0.0;
+            float wF; float wB;
+            wF = smoothstep(0.62, 0.90, mL); wB = smoothstep(0.62, 0.90, 1.0 - mL); fgSum += cL * wF; fgW += wF; bgSum += cL * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mR); wB = smoothstep(0.62, 0.90, 1.0 - mR); fgSum += cR * wF; fgW += wF; bgSum += cR * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mU); wB = smoothstep(0.62, 0.90, 1.0 - mU); fgSum += cU * wF; fgW += wF; bgSum += cU * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mD); wB = smoothstep(0.62, 0.90, 1.0 - mD); fgSum += cD * wF; fgW += wF; bgSum += cD * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mUL) * 0.75; wB = smoothstep(0.62, 0.90, 1.0 - mUL) * 0.75; fgSum += cUL * wF; fgW += wF; bgSum += cUL * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mUR) * 0.75; wB = smoothstep(0.62, 0.90, 1.0 - mUR) * 0.75; fgSum += cUR * wF; fgW += wF; bgSum += cUR * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mDL) * 0.75; wB = smoothstep(0.62, 0.90, 1.0 - mDL) * 0.75; fgSum += cDL * wF; fgW += wF; bgSum += cDL * wB; bgW += wB;
+            wF = smoothstep(0.62, 0.90, mDR) * 0.75; wB = smoothstep(0.62, 0.90, 1.0 - mDR) * 0.75; fgSum += cDR * wF; fgW += wF; bgSum += cDR * wB; bgW += wB;
+            if (fgW > 0.20 && bgW > 0.20) {
+                vec3 F = fgSum / fgW;
+                vec3 B = bgSum / bgW;
+                vec3 D = F - B;
+                float dLen2 = dot(D, D);
+                float contrast = smoothstep(0.010, 0.060, dLen2);
+                float proj = clamp(dot(orig.rgb - B, D) / max(dLen2, 0.0001), 0.0, 1.0);
+                vec3 err = orig.rgb - (B + D * proj);
+                float onLine = exp(-dot(err, err) * 18.0);
+                float boundaryConf = smoothstep(0.20, 1.00, fgW) * smoothstep(0.20, 1.00, bgW) * contrast * onLine;
+                refinedHair = mix(rawHair, proj, boundaryConf * 0.90);
+            } else if (fgW > 1.50 && bgW < 0.08) {
+                vec3 F = fgSum / fgW;
+                vec3 df = orig.rgb - F;
+                float holeFill = smoothstep(1.50, 3.00, fgW) * (1.0 - smoothstep(0.02, 0.08, bgW)) * exp(-dot(df, df) * 55.0);
+                refinedHair = max(refinedHair, holeFill * 0.88);
+            }
+        }
+    }
+    float hairMask = smoothstep(0.16, 0.58, refinedHair);
     if (uU2.w > 0.5) {
         vec4 sem = texture2D(uTex2, uv);
-        float bareFace = clamp(sem.r * clamp(sem.a * 1.04 - 0.02, 0.0, 1.0) * 0.85 + sem.g, 0.0, 1.0);
-        hairMask *= (1.0 - smoothstep(0.45, 0.85, bareFace));
+        float eyeBrowLip = smoothstep(0.22, 0.62, sem.g);
+        float weakHairFace = sem.r * (1.0 - smoothstep(0.45, 0.78, refinedHair));
+        hairMask *= (1.0 - eyeBrowLip) * (1.0 - smoothstep(0.35, 0.78, weakHairFace));
     }
     if (hairMask <= 0.002) {
         gl_FragColor = orig;
@@ -1279,9 +1355,9 @@ void main() {
     vec3 color = orig.rgb;
     if (uU0.w > 0.001) {
         float y = lumaHair(color);
-        float strandLift = smoothstep(0.015, 0.12, y);
+        float strandLift = smoothstep(0.008, 0.08, y);
         float dyeY = max(lumaHair(uU2.rgb), 0.08);
-        float bleachNeed = smoothstep(0.28, 0.72, dyeY) * smoothstep(0.012, 0.09, y) * (1.0 - smoothstep(0.18, 0.45, y));
+        float bleachNeed = smoothstep(0.22, 0.68, dyeY) * smoothstep(0.006, 0.06, y) * (1.0 - smoothstep(0.20, 0.52, y));
         float strandDetail = 0.0;
         if (uU5.x > 0.0001) {
             vec2 stepLat = uU4.xy * uU5.x * 1.5;
@@ -1292,11 +1368,11 @@ void main() {
             strandDetail = clamp(y - avgLat, -0.06, 0.06);
         }
         float liftedY = clamp(
-            mix(y, clamp(y * (0.65 + dyeY * 1.35) + dyeY * 0.36 * strandLift + bleachNeed * dyeY * 0.32, 0.0, 0.95), 0.80) +
+            mix(y, clamp(y * (0.65 + dyeY * 1.35) + dyeY * 0.36 * strandLift + bleachNeed * dyeY * 0.34, 0.0, 0.95), 0.82) +
             strandDetail * 1.20,
             0.0, 0.96);
         vec3 tinted = fitHairGamut(clamp(uU2.rgb * (liftedY / dyeY), 0.0, 1.28), liftedY);
-        color = mix(color, clamp(tinted, 0.0, 1.0), clamp(hairMask * uU0.w * (0.36 + 0.64 * strandLift), 0.0, 0.92));
+        color = mix(color, clamp(tinted, 0.0, 1.0), clamp(hairMask * uU0.w * (0.62 + 0.38 * strandLift), 0.0, 0.94));
     }
     if (uU1.w > 0.001) {
         vec2 axisU = uU4.xy;

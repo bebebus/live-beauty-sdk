@@ -19,11 +19,11 @@ struct HairMaskTuning {
 
     static constexpr int64_t kFreshMs = 650;
     static constexpr float kFreshFullMs = 420.0f;
-    static constexpr float kPresenceFadeInMs = 300.0f;
+    static constexpr float kPresenceFadeInMs = 120.0f;
     static constexpr float kPresenceHoldMs = 300.0f;
     static constexpr float kPresenceFadeOutMs = 400.0f;
 
-    static constexpr float kAffineMaxShift = 0.10f;
+    static constexpr float kAffineMaxShift = 0.18f;
     static constexpr float kAffineMinScale = 0.80f;
     static constexpr float kAffineMaxScale = 1.25f;
     static constexpr int kAffineSize = 8;
