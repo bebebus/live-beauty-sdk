@@ -269,11 +269,23 @@ internal class PacingLock {
             locked = true
             return
         }
-        if (streaming && want >= 0 && delay < DelaySchedule.MAX_DELAY && wantCount >= GROW_WINDOW &&
-            (lastGrowAt == Long.MIN_VALUE || nowMs - lastGrowAt >= GROW_COOLDOWN_MS) &&
-            recentWantPercentile(GROW_WINDOW) >= delay + GROW_MARGIN) {
-            delay++
-            lastGrowAt = nowMs
+        if (want >= 0 && delay < DelaySchedule.MAX_DELAY) {
+            if (streaming) {
+                if (wantCount >= GROW_WINDOW &&
+                    (lastGrowAt == Long.MIN_VALUE || nowMs - lastGrowAt >= GROW_COOLDOWN_MS) &&
+                    recentWantPercentile(GROW_WINDOW) >= delay + GROW_MARGIN
+                ) {
+                    delay++
+                    lastGrowAt = nowMs
+                }
+            } else if (wantCount >= PREVIEW_GROW_WINDOW &&
+                (lastGrowAt == Long.MIN_VALUE || nowMs - lastGrowAt >= PREVIEW_GROW_COOLDOWN_MS) &&
+                recentWantPercentile(PREVIEW_GROW_WINDOW) >= delay + 1
+            ) {
+                // 预览态允许在推理变慢（CPU 回退、热降频、剧烈晃动）时向上补齐延后，避免画面永久落后于关键点。
+                delay++
+                lastGrowAt = nowMs
+            }
         }
     }
 
@@ -309,6 +321,8 @@ internal class PacingLock {
         const val GROW_WINDOW = 90
         const val GROW_MARGIN = 2
         const val GROW_COOLDOWN_MS = 30_000L
+        const val PREVIEW_GROW_WINDOW = 30
+        const val PREVIEW_GROW_COOLDOWN_MS = 3_000L
         private const val STALL_SAMPLES = 64
     }
 }

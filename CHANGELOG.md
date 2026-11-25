@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.12] - 2026-11-26
+
+### Fixed
+- **Zero-Lag Facial Feature Tracking During Handheld Phone Shake (`LiveBeautyCppEngine`, `FrameDelay`, `FLTFaceLandmarkTracker`, `FaceMeshFilter`, `FaceTimeline`, `FaceMeshDeformer`)**:
+  - Eliminated MediaPipe `FaceLandmarker`'s un-configurable internal `LandmarksSmoothingCalculator` (`OneEuroFilter: min_cutoff=0.05Hz, beta=80.0, derivate_cutoff=1.0Hz`, which activates exclusively in `RunningMode.VIDEO` with `num_faces == 1` and injected 120–250ms / 20–63px double-filtering lag on oscillatory phone shake) by configuring `numFaces >= 2` (`minTrackingConfidence = 0.35f`) with sticky primary-face selection (preferring the fresh BlazeFace crop on overlapping whip-pan duplicates, and locking onto the broadcaster's anchor when a bystander enters frame), running `setOutputFaceBlendshapes` strictly on demand (saving ~5–10ms/frame CPU when AR accessories/stickers are inactive), elevating the face worker thread to `THREAD_PRIORITY_DISPLAY` (Android) / `QOS_CLASS_USER_INTERACTIVE` (iOS), eliminating the deferred-PBO / CPU 45ms beat-frequency stall, and enabling preview-mode `PacingLock` upward adaptation when inference slows down after initial lock.
+  - Added coherent regional mean-lag catch-up (`regionLag_` on nose/eye/mouth, canceling uncorrelated landmark jitter by ~sqrt(N) while snapping rolling-shutter and wide-angle perspective lag back in 1–2 frames), `logScale_` lag catch-up (`> 2.2%`), and full 3D `(hw, P)` perspective lag catch-up in `FaceMeshFilter`, preserving 100% of v3.6.8–v3.6.10 stationary cheek/contour stability and slight-shake zero-ripple gates.
+  - Prevented `FaceTimeline::at()` from crushing `steadyEye` down to `0.25` during aligned handheld phone shake (`shakeEyeKeep` shifted to extreme motion blur `1.35..2.50`), tightened `eyeMakeupKeep` and `steadyEye` recovery (`36ms` / `32ms`), expanded `horizonMs()` to `66..85ms` with rate-scaled curvature lead, and updated `FaceMeshDeformer::deform()` with split inner-feature displacement smoothing (`kDispTauInnerMs = 28ms` vs outer cheek/contour `kDispTauSteadyMs = 95ms`), fast `steadyEye`/`presence` transition detection (`kDispTauFastMs = 18ms`), smooth `envTau` yaw ramp, and crisp `45ms` eye-envelope tracking.
+
 ## [3.6.11] - 2026-11-25
 
 ### Fixed

@@ -32,6 +32,7 @@ struct DeformerStaticTables {
     std::array<int, FaceMeshTopology::kFaceVertexCount + 1> vertexTriOffsets{};
     std::vector<uint16_t> vertexTriIndices;
     std::array<float, FaceMeshTopology::kCanonicalTriangleCount> triArea3d{};
+    std::array<float, FaceMeshTopology::kBufferOffset> innerFeatureW{};
 
     DeformerStaticTables() {
         std::array<std::set<int>, FaceMeshTopology::kFaceVertexCount> adj;
@@ -70,13 +71,30 @@ struct DeformerStaticTables {
         ovalNb2Offsets[FaceMeshTopology::kOvalVertexCount] = nb2Total;
 
         const auto& canonUv = FaceMeshTopology::kCanonicalUv;
+        innerFeatureW.fill(0.0f);
+        auto eyeProx = [&](int i, int a, int b) {
+            const float cu = 0.5f * (canonUv[a * 2] + canonUv[b * 2]);
+            const float ew = std::fabs(canonUv[b * 2] - canonUv[a * 2]);
+            const float cv = 0.5f * (canonUv[a * 2 + 1] + canonUv[b * 2 + 1]) - 0.10f * ew;
+            const float dd = std::hypot((canonUv[i * 2] - cu) / (ew * 0.95f),
+                                        (canonUv[i * 2 + 1] - cv) / (ew * 0.90f));
+            return 1.0f - detail::smoothstep(0.65f, 1.05f, dd);
+        };
         for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
-            const float nu = (canonUv[i * 2] - 0.5f) * 2.0f;
-            const float nv = (0.5f - canonUv[i * 2 + 1]) * 2.0f;
+            const float u = canonUv[i * 2];
+            const float v = canonUv[i * 2 + 1];
+            const float nu = (u - 0.5f) * 2.0f;
+            const float nv = (0.5f - v) * 2.0f;
             if (nv >= -0.72f && nv <= -0.04f) {
                 if (nu < -0.35f) cheekAnatRight.push_back(static_cast<uint16_t>(i));
                 else if (nu > 0.35f) cheekAnatLeft.push_back(static_cast<uint16_t>(i));
             }
+            const float wEye = std::max(eyeProx(i, 33, 133), eyeProx(i, 362, 263));
+            const float wNose = 1.0f - detail::smoothstep(
+                0.65f, 1.05f, std::hypot((u - 0.50f) / 0.11f, (v - 0.51f) / 0.15f));
+            const float wMouth = 1.0f - detail::smoothstep(
+                0.65f, 1.05f, std::hypot((u - 0.50f) / 0.18f, (v - 0.695f) / 0.11f));
+            innerFeatureW[i] = std::max({wEye, wNose, wMouth});
         }
 
         const auto& xyz = FaceMeshTopology::kCanonicalXyz;
@@ -118,6 +136,8 @@ const DeformerStaticTables& tables() {
 void FaceMeshDeformer::resetTemporal() {
     temporalValid_ = false;
     dispTemporalValid_ = false;
+    prevEyeMod_ = 1.0f;
+    prevFaceMod_ = 1.0f;
     lastNowMs_ = kTimeInvalid;
 }
 
@@ -297,15 +317,17 @@ bool FaceMeshDeformer::deform(
             lEyeHRatioState_ = rawLeh;
         } else {
             yawJump = std::fabs(rawSignedYaw - signedYawState_);
-            const float envTau = (yawJump > 0.11f) ? 26.0f : 150.0f;
+            const float envTau = 150.0f - (150.0f - 26.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
+            const float eyeEnvTau = 45.0f - (45.0f - 20.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
             envAlpha = 1.0f - std::exp(-dtMs / envTau);
+            const float eyeEnvAlpha = 1.0f - std::exp(-dtMs / eyeEnvTau);
             signedYawState_ += envAlpha * (rawSignedYaw - signedYawState_);
             wLeftRatioState_ += envAlpha * (rawL - wLeftRatioState_);
             wRightRatioState_ += envAlpha * (rawR - wRightRatioState_);
-            rEyeWRatioState_ += envAlpha * (rawRew - rEyeWRatioState_);
-            lEyeWRatioState_ += envAlpha * (rawLew - lEyeWRatioState_);
-            rEyeHRatioState_ += envAlpha * (rawReh - rEyeHRatioState_);
-            lEyeHRatioState_ += envAlpha * (rawLeh - lEyeHRatioState_);
+            rEyeWRatioState_ += eyeEnvAlpha * (rawRew - rEyeWRatioState_);
+            lEyeWRatioState_ += eyeEnvAlpha * (rawLew - lEyeWRatioState_);
+            rEyeHRatioState_ += eyeEnvAlpha * (rawReh - rEyeHRatioState_);
+            lEyeHRatioState_ += eyeEnvAlpha * (rawLeh - lEyeHRatioState_);
         }
         signedYaw = signedYawState_;
         wLeft = std::max(wLeftRatioState_ * sRef, 0.10f * fw);
@@ -741,9 +763,11 @@ bool FaceMeshDeformer::deform(
             std::fabs(params.cranialTop - prevParams_.cranialTop) > 0.004f;
         const bool initDisp = temporalFresh || !dispTemporalValid_;
         const bool yawWeightChanging = !initDisp && (std::fabs(effYawW - prevEffYawW_) > 0.03f);
-        const float dispTau = (paramsChanged || yawJump > 0.08f || yawWeightChanging)
-            ? kDispTauFastMs : kDispTauSteadyMs;
-        const float dispAlpha = initDisp ? 1.0f : (1.0f - std::exp(-dtMs / dispTau));
+        const bool modChanging = !initDisp &&
+            (std::fabs(eyeMod - prevEyeMod_) > 0.025f || std::fabs(faceMod - prevFaceMod_) > 0.025f);
+        const bool fastGlobal = (paramsChanged || yawJump > 0.08f || yawWeightChanging || modChanging);
+        const float outerDispAlpha = initDisp ? 1.0f : (1.0f - std::exp(-dtMs / (fastGlobal ? kDispTauFastMs : kDispTauSteadyMs)));
+        const float innerDispAlpha = initDisp ? 1.0f : (1.0f - std::exp(-dtMs / (fastGlobal ? kDispTauFastMs : kDispTauInnerMs)));
 
         std::array<float, FaceMeshTopology::kBufferOffset> rawUBuf{};
         std::array<float, FaceMeshTopology::kBufferOffset> rawVBuf{};
@@ -758,8 +782,10 @@ bool FaceMeshDeformer::deform(
                 dispUState_[i] = rawU;
                 dispVState_[i] = rawV;
             } else {
-                dispUState_[i] += dispAlpha * (rawU - dispUState_[i]);
-                dispVState_[i] += dispAlpha * (rawV - dispVState_[i]);
+                const float wi = tbl.innerFeatureW[i];
+                const float ai = outerDispAlpha + wi * (innerDispAlpha - outerDispAlpha);
+                dispUState_[i] += ai * (rawU - dispUState_[i]);
+                dispVState_[i] += ai * (rawV - dispVState_[i]);
             }
             const float smU = dispUState_[i] * sRef;
             const float smV = dispVState_[i] * sRef;
@@ -768,6 +794,8 @@ bool FaceMeshDeformer::deform(
         }
         prevParams_ = params;
         prevEffYawW_ = effYawW;
+        prevEyeMod_ = eyeMod;
+        prevFaceMod_ = faceMod;
         dispTemporalValid_ = true;
 
         // Post-smoothing fold guard: if a solidly front-facing triangle approaches inversion, blend gently

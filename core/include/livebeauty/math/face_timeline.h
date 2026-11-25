@@ -13,9 +13,9 @@ public:
     static constexpr int kPose6Size = 6;
     static constexpr int kStateSize = FaceGeometryConstants::kStateSize;
     static constexpr int64_t kMaxGapMs = 220;
-    static constexpr float kExtrapolateIntervals = 1.25f;
-    static constexpr float kExtrapolateMinMs = 40.0f;
-    static constexpr float kExtrapolateMaxMs = 100.0f;
+    static constexpr float kExtrapolateIntervals = 2.0f;
+    static constexpr float kExtrapolateMinMs = 66.0f;
+    static constexpr float kExtrapolateMaxMs = 85.0f;
     static constexpr float kExtrapolateDamp = 0.90f;
     static constexpr float kTInMs = 50.0f;
     static constexpr float kMissDebounceMinMs = 33.0f;

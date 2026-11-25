@@ -1555,6 +1555,191 @@ void testV3610CheekBeautyStabilityMirroredNoTwitch() {
     }
 }
 
+void testV3612PhoneShakeZeroFeatureLag() {
+    constexpr int kW = 720;
+    constexpr int kH = 1280;
+    constexpr float kAspect = static_cast<float>(kW) / static_cast<float>(kH);
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const auto& uv = FaceMeshTopology::kCanonicalUv;
+    const float baseScale = 0.44f / FaceMeshFilter::canonicalFaceWidth();
+    constexpr int64_t kStopAtMs = 3000;
+
+    auto buildPhoneShakeMp = [&](int64_t tsMs, float noisePx, int frameIdx, float outMp[478 * 2]) {
+        const double tRaw = static_cast<double>(std::max<int64_t>(0, tsMs - 1000)) * 0.001;
+        const double tStop = static_cast<double>(kStopAtMs - 1000) * 0.001;
+        double amp = 1.0;
+        if (tRaw < 0.30) amp = 0.0;
+        else if (tRaw < 0.45) amp = (tRaw - 0.30) / 0.15;
+        else if (tRaw >= tStop) amp = 0.0;
+        const double t = (tRaw >= tStop) ? tStop : tRaw;
+
+        const float tx = static_cast<float>(amp * (0.095 * std::sin(2.0 * 3.1415926535 * 2.1 * t) +
+                                                   0.032 * std::sin(2.0 * 3.1415926535 * 3.6 * t + 0.5)));
+        const float ty = static_cast<float>(amp * (0.055 * std::cos(2.0 * 3.1415926535 * 1.8 * t + 0.3)));
+        const float roll = static_cast<float>(amp * 0.11 * std::sin(2.0 * 3.1415926535 * 2.0 * t + 0.4));
+        const float yaw = static_cast<float>(amp * 0.24 * std::sin(2.0 * 3.1415926535 * 1.9 * t + 0.7));
+        const float pitch = static_cast<float>(amp * 0.12 * std::cos(2.0 * 3.1415926535 * 2.2 * t + 0.2));
+        const float sc = static_cast<float>(1.0 + amp * 0.08 * std::sin(2.0 * 3.1415926535 * 1.6 * t));
+        const float rsSkew = static_cast<float>(amp * 0.045 * std::cos(2.0 * 3.1415926535 * 2.1 * t));
+        const float cy = std::cos(yaw), sy = std::sin(yaw);
+        const float cp = std::cos(pitch), sp = std::sin(pitch);
+        const float cr = std::cos(roll), sr = std::sin(roll);
+        auto hnoise = [](int a, int b) {
+            const float s = std::sin(static_cast<float>(a) * 12.9898f + static_cast<float>(b) * 78.233f) * 43758.5453f;
+            return (s - std::floor(s)) * 2.0f - 1.0f;
+        };
+
+        for (int i = 0; i < 468; ++i) {
+            const float lx = xyz[i * 3 + 0] * baseScale;
+            const float ly = -xyz[i * 3 + 1] * baseScale;
+            const float lz = xyz[i * 3 + 2] * baseScale;
+            const float y1 = cp * ly - sp * lz;
+            const float z1 = sp * ly + cp * lz;
+            const float x2 = -(cy * lx + sy * z1);
+            const float z2 = -sy * lx + cy * z1;
+            const float persp = 1.0f / std::max(0.5f, 1.0f - 0.32f * z2 * sc);
+            const float xr = (cr * x2 - sr * y1) * sc * persp;
+            const float yr = (sr * x2 + cr * y1) * sc * persp;
+            float u = 0.5f + tx + xr + rsSkew * yr;
+            float vTop = ((0.48f / kAspect) + ty + yr) * kAspect;
+            if (noisePx > 0.0f) {
+                const float rUv = std::hypot((uv[i * 2] - 0.5f) / 0.36f, (uv[i * 2 + 1] - 0.5f) / 0.43f);
+                const float isC = detail::smoothstep(0.62f, 0.90f, rUv);
+                const float sig = noisePx * (1.0f + 1.5f * isC);
+                u += hnoise(frameIdx * 503 + i, 1) * sig / kW;
+                vTop += hnoise(frameIdx * 503 + i, 2) * sig / kH;
+            }
+            outMp[i * 2 + 0] = u;
+            outMp[i * 2 + 1] = vTop;
+        }
+        auto synthIris = [&](int b, int o, int in, int tIdx, int bo) {
+            const float icx = 0.25f * (outMp[o * 2] + outMp[in * 2] + outMp[tIdx * 2] + outMp[bo * 2]);
+            const float icy = 0.25f * (outMp[o * 2 + 1] + outMp[in * 2 + 1] + outMp[tIdx * 2 + 1] + outMp[bo * 2 + 1]);
+            const float ir = std::hypot(outMp[o * 2] - outMp[in * 2], (outMp[o * 2 + 1] - outMp[in * 2 + 1]) / kAspect) * 0.22f;
+            outMp[b * 2] = icx; outMp[b * 2 + 1] = icy;
+            outMp[(b + 1) * 2] = icx + ir; outMp[(b + 1) * 2 + 1] = icy;
+            outMp[(b + 2) * 2] = icx; outMp[(b + 2) * 2 + 1] = icy + ir * kAspect;
+            outMp[(b + 3) * 2] = icx - ir; outMp[(b + 3) * 2 + 1] = icy;
+            outMp[(b + 4) * 2] = icx; outMp[(b + 4) * 2 + 1] = icy - ir * kAspect;
+        };
+        synthIris(468, 33, 133, 159, 145);
+        synthIris(473, 362, 263, 386, 374);
+    };
+
+    // 1. Handheld 2D+3D+perspective+zoom phone shake on mirrored front camera:
+    //    nose/lips/eyes must track within a few pixels, steadyEye must stay locked (no shrink/reinflate pumping),
+    //    and abrupt stop must settle landmarks in <= 1 frame (33ms) and deformer features in <= 3 frames (99ms).
+    FaceTimeline tl;
+    tl.setAspect(kAspect);
+    FaceMeshDeformer def, defRef;
+    FaceMeshDeformer::Params dp{};
+    dp.faceSlim = 0.65f;
+    dp.eyeEnlarge = 0.65f;
+    dp.noseSlim = 0.65f;
+    dp.mouthSize = -0.40f;
+    dp.mouthSmile = 0.55f;
+
+    float refMp[478 * 2];
+    buildPhoneShakeMp(kStopAtMs + 500, 0.0f, 0, refMp);
+    FaceMeshFrame refMf{};
+    EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(refMp, 478, kAspect, refMf));
+    EXPECT_TRUE(defRef.deform(
+        refMf.landmarks.data(), kAspect, refMf.axisX(), refMf.axisY(),
+        refMf.faceWidth(), refMf.faceHeight(), refMf.leftWeight(), refMf.rightWeight(),
+        refMf.yawWeight(), 1.0f, 1.0f, 1.0f, dp, 1000));
+    const float refNoseW = std::fabs(defRef.warpedLandmarks()[48 * 2] - defRef.warpedLandmarks()[278 * 2]) * kW;
+    const float refEyeH = std::fabs(defRef.warpedLandmarks()[159 * 2 + 1] - defRef.warpedLandmarks()[145 * 2 + 1]) * kH;
+    const float refMouthW = std::fabs(defRef.warpedLandmarks()[291 * 2] - defRef.warpedLandmarks()[61 * 2]) * kW;
+
+    float maxNose = 0.0f, sumNose = 0.0f;
+    float maxLip = 0.0f, sumLip = 0.0f;
+    float maxEye = 0.0f, sumEye = 0.0f;
+    float minSteadyEye = 1.0f;
+    int shakeFrames = 0;
+    int settleLmFrame = -1;
+    int settleDefFrame = -1;
+
+    for (int f = 0; f < 95; ++f) {
+        const int64_t ts = 1000 + f * 33;
+        float mp[478 * 2];
+        buildPhoneShakeMp(ts, 1.1f, f, mp);
+        FaceMeshFrame mf{};
+        float st[41]{};
+        EXPECT_TRUE(FaceMeshFrame::fromMediaPipe(mp, 478, kAspect, mf));
+        EXPECT_TRUE(FaceMeshFrame::fillGeometryState(
+            mf.landmarks.data(), FaceMeshFrame::kCoordCount, mf.axisX(), mf.axisY(), kAspect, 1.0f, st));
+        tl.add(ts, st, &mf);
+        tl.update(ts);
+        EXPECT_TRUE(tl.at(ts) != nullptr);
+        FaceTimeline::SmoothedMeshView mv{};
+        EXPECT_TRUE(tl.meshAt(ts, mv));
+        EXPECT_TRUE(def.deform(
+            mv.landmarks, kAspect, mv.axisX(), mv.axisY(),
+            mv.faceWidth(), mv.faceHeight(), mv.leftWeight(), mv.rightWeight(),
+            mv.yawWeight(), tl.presence(), tl.steadyFace(), tl.steadyEye(), dp, ts));
+
+        float trueMp[478 * 2];
+        buildPhoneShakeMp(ts, 0.0f, f, trueMp);
+        auto errPx = [&](int idx) {
+            const float dx = (mv.landmarks[idx * 2] - trueMp[idx * 2]) * kW;
+            const float dy = ((1.0f - mv.landmarks[idx * 2 + 1]) - trueMp[idx * 2 + 1]) * kH;
+            return std::hypot(dx, dy);
+        };
+        const float eNose = std::max({errPx(1), errPx(4), errPx(48), errPx(278)});
+        const float eLip = std::max({errPx(13), errPx(14), errPx(61), errPx(291), errPx(0), errPx(17)});
+        const float eEye = std::max({errPx(33), errPx(133), errPx(159), errPx(145), errPx(263), errPx(362)});
+
+        if (ts >= 1500 && ts < kStopAtMs) {
+            maxNose = std::max(maxNose, eNose); sumNose += eNose;
+            maxLip = std::max(maxLip, eLip); sumLip += eLip;
+            maxEye = std::max(maxEye, eEye); sumEye += eEye;
+            minSteadyEye = std::min(minSteadyEye, tl.steadyEye());
+            ++shakeFrames;
+        }
+        if (ts >= kStopAtMs) {
+            const int postF = static_cast<int>((ts - kStopAtMs) / 33);
+            if (settleLmFrame < 0 && std::max({eNose, eLip, eEye}) <= 2.5f) settleLmFrame = postF;
+            const float gotNoseW = std::fabs(def.warpedLandmarks()[48 * 2] - def.warpedLandmarks()[278 * 2]) * kW;
+            const float gotEyeH = std::fabs(def.warpedLandmarks()[159 * 2 + 1] - def.warpedLandmarks()[145 * 2 + 1]) * kH;
+            const float gotMouthW = std::fabs(def.warpedLandmarks()[291 * 2] - def.warpedLandmarks()[61 * 2]) * kW;
+            if (settleDefFrame < 0 &&
+                std::fabs(gotNoseW - refNoseW) <= 1.2f &&
+                std::fabs(gotEyeH - refEyeH) <= 1.2f &&
+                std::fabs(gotMouthW - refMouthW) <= 1.2f &&
+                tl.steadyEye() >= 0.95f && tl.eyeMakeupKeep() >= 0.85f) {
+                settleDefFrame = postF;
+            }
+        }
+    }
+    EXPECT_TRUE(shakeFrames > 30);
+    EXPECT_TRUE(maxNose <= 2.5f && (sumNose / shakeFrames) <= 1.2f);
+    EXPECT_TRUE(maxLip <= 5.0f && (sumLip / shakeFrames) <= 2.0f);
+    EXPECT_TRUE(maxEye <= 3.8f && (sumEye / shakeFrames) <= 1.6f);
+    EXPECT_TRUE(minSteadyEye >= 0.92f);
+    EXPECT_TRUE(settleLmFrame >= 0 && settleLmFrame <= 1);
+    EXPECT_TRUE(settleDefFrame >= 0 && settleDefFrame <= 3);
+
+    // 2. FaceMeshDeformer steadyEye recovery must switch to kDispTauFastMs (18ms) instead of lingering at 95ms:
+    //    within 2 frames (66ms) after steadyEye recovers 0.25 -> 1.0, warped eye/nose/mouth must reach >= 95% target.
+    FaceMeshDeformer defRec;
+    for (int f = 0; f < 6; ++f) {
+        EXPECT_TRUE(defRec.deform(
+            refMf.landmarks.data(), kAspect, refMf.axisX(), refMf.axisY(),
+            refMf.faceWidth(), refMf.faceHeight(), refMf.leftWeight(), refMf.rightWeight(),
+            refMf.yawWeight(), 1.0f, 1.0f, 0.25f, dp, 5000 + f * 33));
+    }
+    for (int f = 1; f <= 2; ++f) {
+        EXPECT_TRUE(defRec.deform(
+            refMf.landmarks.data(), kAspect, refMf.axisX(), refMf.axisY(),
+            refMf.faceWidth(), refMf.faceHeight(), refMf.leftWeight(), refMf.rightWeight(),
+            refMf.yawWeight(), 1.0f, 1.0f, 1.0f, dp, 5165 + f * 33));
+    }
+    const float recNoseW = std::fabs(defRec.warpedLandmarks()[48 * 2] - defRec.warpedLandmarks()[278 * 2]) * kW;
+    const float recEyeH = std::fabs(defRec.warpedLandmarks()[159 * 2 + 1] - defRec.warpedLandmarks()[145 * 2 + 1]) * kH;
+    EXPECT_NEAR(recNoseW, refNoseW, 0.8f);
+    EXPECT_NEAR(recEyeH, refEyeH, 0.8f);
+}
+
 }  // namespace
 
 int main() {
@@ -1579,6 +1764,7 @@ int main() {
     testV368FacialContourStabilityNoJumping();
     testV369SlightCameraShakeZeroWaterRippleAndZeroMeshShear();
     testV3610CheekBeautyStabilityMirroredNoTwitch();
+    testV3612PhoneShakeZeroFeatureLag();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

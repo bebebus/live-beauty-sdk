@@ -34,10 +34,10 @@ constexpr float kIntervalMaxMs = 200.0f;
 constexpr int64_t kDtClampMs = 100;
 constexpr float kEyeFade[2] = {0.35f, 0.8f};
 constexpr float kFaceFade[2] = {0.15f, 0.35f};
-constexpr float kEyeMakeupMotion[2] = {0.14f, 0.42f};
-constexpr float kEyeMakeupExtrap[2] = {0.12f, 0.35f};
-constexpr float kEyeMakeupOutMs = 35.0f;
-constexpr float kEyeMakeupInMs = 65.0f;
+constexpr float kEyeMakeupMotion[2] = {0.22f, 0.52f};
+constexpr float kEyeMakeupExtrap[2] = {0.14f, 0.38f};
+constexpr float kEyeMakeupOutMs = 30.0f;
+constexpr float kEyeMakeupInMs = 36.0f;
 constexpr float kDenoiseFade[2] = {0.05f, 0.12f};
 
 }  // namespace
@@ -237,11 +237,12 @@ void FaceTimeline::add(int64_t sampleTs, const float* targetState41, const FaceM
                 float leadVel = v01;
                 if (hasPrev2 && dtPrev <= static_cast<float>(kMaxGapMs)) {
                     const float v12 = (meshPose_[prevSlot][k] - meshPose_[prev2Slot][k]) / dtPrev;
-                    // Gate 2nd-derivative curvature lead by poseVelGain_ so stationary/jitter noise is never amplified.
-                    leadVel = v01 + 0.45f * poseVelGain_ * (dt / (0.5f * (dt + dtPrev))) * (v01 - v12);
+                    // Gate 2nd-derivative curvature lead by poseVelGain_ and frame rate so low-fps turnarounds never overshoot.
+                    const float rateScale = std::min(1.0f, 35.0f / std::max(dt, 1.0f));
+                    leadVel = v01 + 0.45f * rateScale * poseVelGain_ * (dt / (0.5f * (dt + dtPrev))) * (v01 - v12);
                     if (v01 * leadVel < 0.0f) leadVel = 0.0f;
                 }
-                poseVel_[k] = hadVel ? (poseVel_[k] + 0.85f * (leadVel - poseVel_[k])) : leadVel;
+                poseVel_[k] = hadVel ? (poseVel_[k] + 0.90f * (leadVel - poseVel_[k])) : leadVel;
             } else {
                 poseVel_[k] = hadVel ? (poseVel_[k] + 0.55f * (v01 - poseVel_[k])) : v01;
             }
@@ -363,7 +364,9 @@ const float* FaceTimeline::at(int64_t t) {
     const float eye = std::max({output_[kEyeRadiusIndex], output_[kEyeRadiusIndex + 3], kRadiusFloor});
     const float face = std::max(output_[kRxIndex], kRadiusFloor);
     const float motion = std::max(speed_, sampleMotion_);
-    const float shakeEyeKeep = 1.0f - 0.75f * detail::smoothstep(0.55f, 1.35f, motion);
+    // Aligned frames (distance == 0) with un-double-filtered landmarks track within 2-3 px during handheld shake:
+    // do NOT crush eye/nose/mouth beauty strength down to 0.25 on normal shake (only softly damp extreme motion blur).
+    const float shakeEyeKeep = 1.0f - 0.45f * detail::smoothstep(1.35f, 2.50f, motion);
     steadyEyeTarget_ = (1.0f - detail::smoothstep(kEyeFade[0], kEyeFade[1], distance / eye)) * shakeEyeKeep;
     // Active landmark tracking must NEVER pump face-shape strength on speech or in-frame head sway;
     // only fade gently if tracking is coasting in a miss run or beyond 0.55..1.10 face half-widths.
@@ -591,8 +594,8 @@ void FaceTimeline::updateVelocity(int64_t sampleTs, int slot) {
 }
 
 void FaceTimeline::settle() {
-    steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_, 28.0f, 50.0f);
-    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 160.0f, 120.0f);
+    steadyEye_ = approach(steadyEye_, steadyEyeTarget_, pendingDt_, 28.0f, 32.0f);
+    steadyFace_ = approach(steadyFace_, steadyFaceTarget_, pendingDt_, 160.0f, 100.0f);
     eyeMakeupKeep_ = approach(eyeMakeupKeep_, eyeMakeupTarget_, pendingDt_, kEyeMakeupOutMs, kEyeMakeupInMs);
     pendingDt_ = 0.0f;
 }

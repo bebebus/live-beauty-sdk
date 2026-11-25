@@ -22,7 +22,9 @@
 }
 - (instancetype)init {
     if ((self=[super init])) {
-        _worker=dispatch_queue_create("io.bebebus.livebeauty.face-landmarks",DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+            DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+        _worker=dispatch_queue_create("io.bebebus.livebeauty.face-landmarks", attr);
         _lastSample=-1000; _lastSubmitted=-1;
     }
     return self;
@@ -45,7 +47,7 @@
         current=_enabled && !_failed && now-_resultTime <= 250 ? _geometry : nil;
         if (generation) *generation=_epoch;
         if (sampleTimestamp) *sampleTimestamp=_resultTime;
-        if (!enabled || _failed || _busy || now <= _lastSubmitted || now-_lastSample < 100) return current;
+        if (!enabled || _failed || _busy || now <= _lastSubmitted || now-_lastSample < 14) return current;
         _busy=YES; _lastSample=now; _lastSubmitted=now; epoch=_epoch;
     }
     CVPixelBufferRetain(buffer); // 最多一帧在后台；不阻塞采集等待推理。
@@ -85,8 +87,8 @@
                         options.baseOptions.modelAssetPath=path;
                         options.runningMode=MPPRunningModeVideo;
                         options.numFaces=2;
-                        options.minFaceDetectionConfidence=0.6; options.minFacePresenceConfidence=0.6;
-                        options.minTrackingConfidence=0.6;
+                        options.minFaceDetectionConfidence=0.5; options.minFacePresenceConfidence=0.5;
+                        options.minTrackingConfidence=0.35;
                         self->_detector=[[MPPFaceLandmarker alloc] initWithOptions:options error:nil];
                         if (!self->_detector) { failed=YES; break; }
                     }

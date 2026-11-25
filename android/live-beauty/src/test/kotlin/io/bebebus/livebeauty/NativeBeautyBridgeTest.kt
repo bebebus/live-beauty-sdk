@@ -70,4 +70,28 @@ class NativeBeautyBridgeTest {
         assertEquals(3, stats.resolvedTier)
         assertEquals(2, stats.activeFaces)
     }
+
+    @Test
+    fun v3612FaceTrackingEliminatesMediaPipeDoubleSmoothingAndBeatStall() {
+        assertEquals(2, LiveBeautyCppEngine.resolveFaceDetectorNumFaces(1))
+        assertEquals(2, LiveBeautyCppEngine.resolveFaceDetectorNumFaces(2))
+        assertEquals(1L, LiveBeautyCppEngine.resolveFaceSampleIntervalMs(gpu = true, deferred = false, loadLevel = 0))
+        assertEquals(1L, LiveBeautyCppEngine.resolveFaceSampleIntervalMs(gpu = false, deferred = true, loadLevel = 1))
+        assertEquals(1L, LiveBeautyCppEngine.resolveFaceSampleIntervalMs(gpu = false, deferred = false, loadLevel = 0))
+        assertEquals(45L, LiveBeautyCppEngine.resolveFaceSampleIntervalMs(gpu = false, deferred = false, loadLevel = 1))
+        assertEquals(
+            1,
+            LiveBeautyCppEngine.selectPrimaryFaceIndex(
+                floatArrayOf(0.50f, 0.54f), floatArrayOf(0.46f, 0.47f), floatArrayOf(0.36f, 0.36f),
+                2, 0.50f, 0.46f, true,
+            ),
+        )
+        assertEquals(
+            1,
+            LiveBeautyCppEngine.selectPrimaryFaceIndex(
+                floatArrayOf(0.18f, 0.72f), floatArrayOf(0.45f, 0.50f), floatArrayOf(0.28f, 0.30f),
+                2, 0.70f, 0.50f, true,
+            ),
+        )
+    }
 }

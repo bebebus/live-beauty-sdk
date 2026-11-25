@@ -67,6 +67,7 @@ public:
     static constexpr float kRelaxTauUpMs = 120.0f;
     static constexpr float kRelaxTauDownMs = 35.0f;
     static constexpr float kDispTauSteadyMs = 95.0f;
+    static constexpr float kDispTauInnerMs = 28.0f;
     static constexpr float kDispTauFastMs = 18.0f;
     static constexpr int64_t kTemporalResetMs = 150;
 
@@ -140,6 +141,8 @@ private:
     float lEyeHRatioState_ = 0.0f;
     float signedYawState_ = 0.0f;
     float prevEffYawW_ = 1.0f;
+    float prevEyeMod_ = 1.0f;
+    float prevFaceMod_ = 1.0f;
     bool temporalValid_ = false;
     bool dispTemporalValid_ = false;
     int64_t lastNowMs_ = kTimeInvalid;

@@ -128,6 +128,7 @@ private:
     float logScaleRawPrev_ = 0.0f;
     float dLogScale_ = 0.0f;
     std::array<float, kRegions> regionRms_{};
+    std::array<float, kRegions> regionLag_{};
     std::array<float, kRegions> regionAlpha_{};
 
     bool started_ = false;

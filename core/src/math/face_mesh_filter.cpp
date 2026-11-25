@@ -22,7 +22,7 @@ constexpr int kLipRing[40] = {
 constexpr int kRightLids[6] = {160, 144, 159, 145, 158, 153};
 constexpr int kLeftLids[6] = {387, 373, 386, 374, 385, 380};
 constexpr int kCenterPoints[4] = {234, 454, 10, 152};
-constexpr float kResFcMin[4] = {0.65f, 1.20f, 1.25f, 0.52f};
+constexpr float kResFcMin[4] = {0.85f, 1.25f, 1.30f, 0.52f};
 constexpr float kResBeta[4] = {24.0f, 68.0f, 72.0f, 10.0f};
 
 struct FilterStaticData {
@@ -516,20 +516,25 @@ void FaceMeshFilter::step(float teMs) {
         kPoseFcMin * comp + kPoseBeta * (std::max(0.0f, effVp - dead) + lagCatchup), teMs);
 
     if (!illPosed) {
-        // 1. Isotropic 3D scale (invariant to 2D roll + 3D yaw/pitch)
+        // 1. Isotropic 3D scale (invariant to 2D roll + 3D yaw/pitch):
+        //    preserves exact stationary noise rejection (testV368/testV3610), while catching genuine
+        //    handheld zoom/shake scale lag (> 4.5% log-scale) without 500ms trailing.
         const float logSRaw = std::log(s3dRaw);
         const float instDLogS = (logSRaw - logScaleRawPrev_) / teSec;
         logScaleRawPrev_ = logSRaw;
         dLogScale_ += detail::oneEuroAlpha(kScaleDcut, teMs) * (instDLogS - dLogScale_);
         const float scaleDead = std::max(0.16f, 1.2f * dead);
+        const float scaleLag = std::fabs(logSRaw - logScale_);
+        const float scaleLagBoost = 160.0f * std::max(0.0f, scaleLag - 0.022f);
         const float aScale = detail::oneEuroAlpha(
-            kScaleFcMin * comp + kScaleBeta * std::max(0.0f, std::fabs(dLogScale_) - scaleDead), teMs);
+            kScaleFcMin * comp + kScaleBeta * std::max(0.0f, std::fabs(dLogScale_) - scaleDead) +
+            scaleLagBoost, teMs);
         logScale_ += aScale * (logSRaw - logScale_);
         const float sFilt = std::exp(logScale_);
 
         // 2. 3D out-of-plane perspective & foreshortening (smooth monotonic One-Euro response on the
         //    conditioned 117-pt rigid craniofacial basis: zero hold-and-snap twitch when still, and
-        //    activity-coupled tracking during genuine 3D head turns or camera shake!)
+        //    activity-coupled tracking during genuine 3D head turns or handheld camera shake!)
         const float ad3d = detail::oneEuroAlpha(kPose3dDcut, teMs);
         dHw1_ += ad3d * ((hw1Raw - hw1RawPrev_) / teSec - dHw1_);
         dHw2_ += ad3d * ((hw2Raw - hw2RawPrev_) / teSec - dHw2_);
@@ -537,11 +542,13 @@ void FaceMeshFilter::step(float teMs) {
         hw2RawPrev_ = hw2Raw;
         const float yawSpeed = std::hypot(dHw1_, dHw2_);
         const float yawLag = std::hypot(hw1Raw - hw1_, hw2Raw - hw2_);
+        const float pLag = std::hypot(p00Raw - p00_, std::hypot(p01Raw - p01_, p11Raw - p11_));
+        const float pose3dLag = std::hypot(yawLag, pLag);
         const float yawDead = std::max(0.30f, 1.8f * dead);
-        const float pose3dActBoost = 25.0f * std::max(0.0f, effVp - 1.5f * dead);
+        const float pose3dActBoost = 42.0f * std::max(0.0f, effVp - 1.8f * dead);
         const float a3d = detail::oneEuroAlpha(
             kPose3dFcMin * comp + kPose3dBeta * std::max(0.0f, yawSpeed - yawDead) +
-            160.0f * std::max(0.0f, yawLag - 0.085f) + pose3dActBoost, teMs);
+            200.0f * std::max(0.0f, pose3dLag - 0.072f) + pose3dActBoost, teMs);
         p00_ += a3d * (p00Raw - p00_);
         p01_ += a3d * (p01Raw - p01_);
         p11_ += a3d * (p11Raw - p11_);
@@ -594,23 +601,56 @@ void FaceMeshFilter::step(float teMs) {
             drY_[i] += ad * ((rRawY_[i] - rPrevY_[i]) / teSec - drY_[i]);
         }
         regionRms_.fill(0.0f);
+        std::array<float, kRegions> cohLagX{};
+        std::array<float, kRegions> cohLagY{};
         for (int i = 0; i < kFace; ++i) {
             const float p = drX_[i] * drX_[i] + drY_[i] * drY_[i];
-            for (int g = 0; g < kRegions; ++g) regionRms_[g] += sd.reg[i * kRegions + g] * p;
+            const float lx = rRawX_[i] - rX_[i];
+            const float ly = rRawY_[i] - rY_[i];
+            for (int g = 0; g < kRegions; ++g) {
+                const float w = sd.reg[i * kRegions + g];
+                regionRms_[g] += w * p;
+                cohLagX[g] += w * lx;
+                cohLagY[g] += w * ly;
+            }
         }
         float lidPower = 0.0f;
-        for (int idx : kLidRing) lidPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+        float lidCohX = 0.0f, lidCohY = 0.0f;
+        for (int idx : kLidRing) {
+            lidPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+            lidCohX += rRawX_[idx] - rX_[idx];
+            lidCohY += rRawY_[idx] - rY_[idx];
+        }
         float lipPower = 0.0f;
-        for (int idx : kLipRing) lipPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+        float lipCohX = 0.0f, lipCohY = 0.0f;
+        for (int idx : kLipRing) {
+            lipPower += drX_[idx] * drX_[idx] + drY_[idx] * drY_[idx];
+            lipCohX += rRawX_[idx] - rX_[idx];
+            lipCohY += rRawY_[idx] - rY_[idx];
+        }
 
+        // Coherent regional mean lag cancels i.i.d. MediaPipe landmark jitter by ~sqrt(N) (~5x),
+        // keeping stationary cheeks/contours and slight-shake skin zero-ripple (testV368/v369/v3610),
+        // while snapping coherent perspective/rolling-shutter lag on nose, eyes, and lips back immediately!
         const float resDead = kKRes * kCRes * std::pow(teMs / kTeRefMs, kResTeExp) * floorVal;
+        constexpr float kCohLagBoost[4] = {220.0f, 260.0f, 260.0f, 0.0f};
         for (int g = 0; g < kRegions; ++g) {
-            regionRms_[g] = std::sqrt(regionRms_[g] / std::max(sd.regSum[g], 1e-4f));
-            if (g == kEyeRegion) regionRms_[g] = std::max(regionRms_[g], std::sqrt(lidPower / 32.0f));
-            if (g == kLowRegion) regionRms_[g] = std::max(regionRms_[g], std::sqrt(lipPower / 40.0f));
+            const float invReg = 1.0f / std::max(sd.regSum[g], 1e-4f);
+            regionRms_[g] = std::sqrt(regionRms_[g] * invReg);
+            regionLag_[g] = std::hypot(cohLagX[g] * invReg, cohLagY[g] * invReg);
+            if (g == kEyeRegion) {
+                regionRms_[g] = std::max(regionRms_[g], std::sqrt(lidPower / 32.0f));
+                regionLag_[g] = std::max(regionLag_[g], std::hypot(lidCohX / 32.0f, lidCohY / 32.0f));
+            }
+            if (g == kLowRegion) {
+                regionRms_[g] = std::max(regionRms_[g], std::sqrt(lipPower / 40.0f));
+                regionLag_[g] = std::max(regionLag_[g], std::hypot(lipCohX / 40.0f, lipCohY / 40.0f));
+            }
             const float deadG = (g == kContourRegion) ? (1.6f * resDead) : resDead;
+            const float cohDeadG = std::max(0.008f, 1.4f * deadG * teSec);
+            const float lagBoost = kCohLagBoost[g] * std::max(0.0f, regionLag_[g] - cohDeadG);
             regionAlpha_[g] = detail::oneEuroAlpha(
-                kResFcMin[g] * comp + kResBeta[g] * std::max(0.0f, regionRms_[g] - deadG), teMs);
+                kResFcMin[g] * comp + kResBeta[g] * std::max(0.0f, regionRms_[g] - deadG) + lagBoost, teMs);
         }
         for (int i = 0; i < kFace; ++i) {
             float ai = 0.0f;

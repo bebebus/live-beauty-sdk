@@ -210,4 +210,16 @@ class FrameDelayTest {
         assertEquals(0, schedule.delay)
         assertFalse(schedule.lock.locked)
     }
+
+    @Test fun previewAdaptsUpwardWhenInferenceSlowsDownAfterLock() {
+        val feed = Feed()
+        feed.lock.engage(PacingLock.PRIOR_GPU)
+        // 初始静止预览快速推理锁定 delay=1。
+        feed.frames(120, latency = 15, streaming = false)
+        assertTrue(feed.lock.locked)
+        assertEquals(1, feed.lock.delay)
+        // 晃动 / CPU 回退导致推理持续升至 55 ms（want=2）：预览态在 ~30 帧内自动上调到 2 保持零滞后对齐。
+        feed.frames(45, latency = 55, streaming = false)
+        assertEquals(2, feed.lock.delay)
+    }
 }

@@ -351,6 +351,8 @@ internal class LiveBeautyCppEngine(
         val wantSeg = segHealthy && (needsSegmentation(cfg) || (cfg.enabled && !cfg.compareOriginal && wantVirtualBg))
         val wantHair = hairHealthy && HairMaskTuning.wants(hairHealthy, true, wantFace, cfg)
         val wantMakeup = cfg.enabled && !cfg.compareOriginal && cfg.hasMakeup()
+        val wantBlendshapes = cfg.enabled && !cfg.compareOriginal && (hasStickers || hasAr3d)
+        faceWorker?.setOutputBlendshapes(wantBlendshapes)
 
         consumeFaceResult(h, wantFace)
         consumeBodyResult(h, wantBody)
@@ -358,7 +360,7 @@ internal class LiveBeautyCppEngine(
         val (activeHairTex, activeHairStamp) = consumeHairMask(wantHair, frameTsMs, nowMs)
 
         if (!isOes) {
-            driveSampling(h, texId, width, height, frameTsMs, nowMs, wantFace, wantBody, wantSeg, wantHair)
+            driveSampling(h, texId, width, height, frameTsMs, nowMs, wantFace, wantBody, wantSeg, wantHair, wantBlendshapes)
         }
 
         val activeLutTex = updateLutTexture(cfg, nowMs)
@@ -606,14 +608,16 @@ internal class LiveBeautyCppEngine(
         wantBody: Boolean,
         wantSeg: Boolean,
         wantHair: Boolean,
+        wantBlendshapes: Boolean,
     ) {
         val ctx = appContext ?: return
         if (wantFace && faceWorker == null) {
-            faceWorker = RawFaceWorker(ctx, maxFaces) {
+            faceWorker = RawFaceWorker(ctx, maxFaces, wantBlendshapes) {
                 faceHealthy = false
                 if (faceFailureSent.compareAndSet(false, true)) onFaceFailure()
             }
         }
+        faceWorker?.setOutputBlendshapes(wantBlendshapes)
         if (wantBody && bodyWorker == null) {
             bodyWorker = RawBodyWorker(ctx) { bodyHealthy = false }
         }
@@ -626,7 +630,11 @@ internal class LiveBeautyCppEngine(
             hairSegmenter?.state?.enable(true)
         }
 
-        val faceInterval = if (faceWorker?.gpu == true) FACE_GPU_INTERVAL_MS else FACE_CPU_INTERVAL_MS
+        val faceInterval = resolveFaceSampleIntervalMs(
+            gpu = faceWorker?.gpu == true,
+            deferred = faceSampler.deferred,
+            loadLevel = cachedStats.loadLevel,
+        )
         val doFace = wantFace && faceWorker?.canAccept() == true &&
             (lastFaceSampleMs == Long.MIN_VALUE || frameTsMs - lastFaceSampleMs >= faceInterval)
         val doBody = wantBody && bodyWorker?.canAccept() == true &&
@@ -823,7 +831,12 @@ internal class LiveBeautyCppEngine(
         return tex
     }
 
-    private class RawFaceWorker(context: Context, initialMaxFaces: Int, private val onFailure: () -> Unit) {
+    private class RawFaceWorker(
+        context: Context,
+        initialMaxFaces: Int,
+        initialBlendshapes: Boolean,
+        private val onFailure: () -> Unit,
+    ) {
         class Result(
             val epoch: Long,
             val sampleTsMs: Long,
@@ -840,17 +853,28 @@ internal class LiveBeautyCppEngine(
         private val inFlight = AtomicBoolean(false)
         private val epoch = AtomicLong(0L)
         private val latest = AtomicReference<Result?>(null)
-        private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "lb-sdk-face").apply { isDaemon = true } }
+        private val worker = Executors.newSingleThreadExecutor { r ->
+            Thread({
+                try { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) } catch (_: Throwable) {}
+                r.run()
+            }, "lb-sdk-face").apply { isDaemon = true }
+        }
         private var detector: FaceLandmarker? = null
-        private var detectorNumFaces = initialMaxFaces.coerceIn(1, 2)
-        @Volatile private var desiredNumFaces = detectorNumFaces
+        private var detectorNumFaces = resolveFaceDetectorNumFaces(initialMaxFaces)
+        private var detectorBlendshapes = initialBlendshapes
+        @Volatile private var desiredNumFaces = initialMaxFaces.coerceIn(1, 2)
+        @Volatile private var desiredBlendshapes = initialBlendshapes
+        private var hasAnchor = false
+        private var anchorCx = 0.5f
+        private var anchorCy = 0.5f
         private val policy = sharedGpuPolicy(appContext)
         @Volatile var gpu = policy.allowGpu(); private set
         private var gpuConfirmed = false
 
         fun setMaxFaces(n: Int) { desiredNumFaces = n.coerceIn(1, 2) }
+        fun setOutputBlendshapes(enabled: Boolean) { desiredBlendshapes = enabled }
         fun canAccept() = !closed.get() && !inFlight.get()
-        fun reset() { epoch.incrementAndGet(); latest.set(null) }
+        fun reset() { epoch.incrementAndGet(); latest.set(null); hasAnchor = false }
         fun pollResult(): Result? = latest.getAndSet(null)?.takeIf { it.epoch == epoch.get() }
         fun submit(sample: FaceTextureSampler.Sample, sampleTsMs: Long, w: Int, h: Int) {
             if (closed.get() || !inFlight.compareAndSet(false, true)) return
@@ -873,9 +897,43 @@ internal class LiveBeautyCppEngine(
                     }
                     val faces = mpRes.faceLandmarks()
                     if (gpu && !gpuConfirmed) { gpuConfirmed = true; policy.onGpuSuccess() }
+                    val crop = sample.crop
+                    val wantedFaces = desiredNumFaces
+                    var primaryIdx = 0
+                    if (faces.isNotEmpty() && wantedFaces == 1) {
+                        val n = faces.size
+                        val cxs = FloatArray(n)
+                        val cys = FloatArray(n)
+                        val fws = FloatArray(n)
+                        for (fi in 0 until n) {
+                            val f = faces[fi]
+                            if (f.size >= 468) {
+                                val x234 = if (crop.isFullFrame) f[234].x() else crop.unprojectX(f[234].x())
+                                val y234 = if (crop.isFullFrame) f[234].y() else crop.unprojectY(f[234].y())
+                                val x454 = if (crop.isFullFrame) f[454].x() else crop.unprojectX(f[454].x())
+                                val y454 = if (crop.isFullFrame) f[454].y() else crop.unprojectY(f[454].y())
+                                val x10 = if (crop.isFullFrame) f[10].x() else crop.unprojectX(f[10].x())
+                                val y10 = if (crop.isFullFrame) f[10].y() else crop.unprojectY(f[10].y())
+                                val x152 = if (crop.isFullFrame) f[152].x() else crop.unprojectX(f[152].x())
+                                val y152 = if (crop.isFullFrame) f[152].y() else crop.unprojectY(f[152].y())
+                                cxs[fi] = 0.25f * (x234 + x454 + x10 + x152)
+                                cys[fi] = 0.25f * (y234 + y454 + y10 + y152)
+                                fws[fi] = kotlin.math.hypot(x454 - x234, y454 - y234)
+                            }
+                        }
+                        primaryIdx = selectPrimaryFaceIndex(cxs, cys, fws, n, anchorCx, anchorCy, hasAnchor)
+                        if (fws[primaryIdx] > 0.01f) {
+                            anchorCx = cxs[primaryIdx]
+                            anchorCy = cys[primaryIdx]
+                            hasAnchor = true
+                        }
+                    } else if (faces.isEmpty()) {
+                        hasAnchor = false
+                    }
                     val bsOpt = mpRes.faceBlendshapes()
                     if (bsOpt.isPresent && bsOpt.get().isNotEmpty()) {
-                        val cats = bsOpt.get()[0]
+                        val bsIdx = primaryIdx.coerceIn(0, bsOpt.get().size - 1)
+                        val cats = bsOpt.get()[bsIdx]
                         var smileL = 0f; var smileR = 0f; var jawOpen = 0f
                         var browUp = 0f; var blinkL = 0f; var blinkR = 0f
                         var cheekPuff = 0f; var tongueOut = 0f
@@ -896,15 +954,15 @@ internal class LiveBeautyCppEngine(
                             0.5f * (smileL + smileR), jawOpen, browUp, maxOf(blinkL, blinkR), cheekPuff, tongueOut,
                         )
                     }
-                    val crop = sample.crop
-                    val takeFaces = minOf(faces.size, desiredNumFaces)
+                    val takeFaces = minOf(faces.size, wantedFaces)
                     if (takeFaces > 0) {
-                        val ptsPer = faces[0].size
+                        val firstFace = if (wantedFaces == 1) faces[primaryIdx] else faces[0]
+                        val ptsPer = firstFace.size
                         if (ptsPer >= 468) {
                             val flat = FloatArray(takeFaces * ptsPer * 2)
                             var validFaces = 0
                             for (fi in 0 until takeFaces) {
-                                val f = faces[fi]
+                                val f = if (wantedFaces == 1) faces[primaryIdx] else faces[fi]
                                 if (f.size < ptsPer) continue
                                 val base = validFaces * ptsPer * 2
                                 for (i in 0 until ptsPer) {
@@ -928,25 +986,29 @@ internal class LiveBeautyCppEngine(
             } catch (_: Throwable) { if (!closed.get()) onFailure() } finally { inFlight.set(false) }
         }
         private fun task(): FaceLandmarker {
-            val wanted = desiredNumFaces
-            if (detector != null && detectorNumFaces != wanted) {
+            val wantedDetFaces = resolveFaceDetectorNumFaces(desiredNumFaces)
+            val wantedBs = desiredBlendshapes
+            if (detector != null && (detectorNumFaces != wantedDetFaces || detectorBlendshapes != wantedBs)) {
                 try { detector?.close() } catch (_: Throwable) {}
                 detector = null
             }
             detector?.let { return it }
-            detectorNumFaces = wanted
+            detectorNumFaces = wantedDetFaces
+            detectorBlendshapes = wantedBs
             if (gpu && policy.allowGpu()) {
                 policy.beforeGpuAttempt()
-                try { return create(Delegate.GPU, wanted).also { detector = it } } catch (_: Throwable) { gpu = false; policy.onGpuJavaFailure() }
+                try { return create(Delegate.GPU, wantedDetFaces, wantedBs).also { detector = it } } catch (_: Throwable) { gpu = false; policy.onGpuJavaFailure() }
             }
-            gpu = false; return create(Delegate.CPU, wanted).also { detector = it }
+            gpu = false; return create(Delegate.CPU, wantedDetFaces, wantedBs).also { detector = it }
         }
-        private fun create(d: Delegate, numFaces: Int) = FaceLandmarker.createFromOptions(appContext,
+        // numFaces >= 2 disables MediaPipe's un-configurable internal OneEuroFilter(min_cutoff=0.05, beta=80, d_cutoff=1.0)
+        // in face_landmarker_graph.cc while keeping PreviousLoopback smooth ROI + per-frame BlazeFace whip-pan recovery!
+        private fun create(d: Delegate, numFaces: Int, blendshapes: Boolean) = FaceLandmarker.createFromOptions(appContext,
             FaceLandmarker.FaceLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setModelAssetPath("face_landmarker.task").setDelegate(d).build())
                 .setRunningMode(RunningMode.VIDEO).setNumFaces(numFaces)
-                .setOutputFaceBlendshapes(true)
-                .setMinFaceDetectionConfidence(0.6f).setMinFacePresenceConfidence(0.6f).setMinTrackingConfidence(0.5f).build())
+                .setOutputFaceBlendshapes(blendshapes)
+                .setMinFaceDetectionConfidence(0.5f).setMinFacePresenceConfidence(0.5f).setMinTrackingConfidence(0.35f).build())
         fun close() {
             if (!closed.compareAndSet(false, true)) return
             epoch.incrementAndGet(); latest.set(null)
@@ -1166,5 +1228,46 @@ internal class LiveBeautyCppEngine(
                 cfg.shoulderSlim > 0f || cfg.neckLengthen > 0f)
 
         fun needsSegmentation(cfg: VideoEffectsConfig) = cfg.enabled && cfg.backgroundBlur > 0f
+
+        /** MediaPipe `numFaces >= 2` disables hardcoded internal `OneEuroFilter(0.05, 80, 1.0)` double-filtering. */
+        internal fun resolveFaceDetectorNumFaces(desiredMaxFaces: Int): Int = maxOf(2, desiredMaxFaces.coerceIn(1, 2))
+
+        /** Avoid 100ms beat-frequency stall in deferred PBO or normal CPU mode: single-in-flight worker self-paces cleanly. */
+        internal fun resolveFaceSampleIntervalMs(gpu: Boolean, deferred: Boolean, loadLevel: Int = 0): Long =
+            if (gpu || deferred || loadLevel <= 0) FACE_GPU_INTERVAL_MS else FACE_CPU_INTERVAL_MS
+
+        /** Sticky single-face selector when detector returns 2 faces: prefers fresh BlazeFace duplicate on shake, else nearest anchor. */
+        internal fun selectPrimaryFaceIndex(
+            centersX: FloatArray,
+            centersY: FloatArray,
+            widths: FloatArray,
+            count: Int,
+            anchorCx: Float,
+            anchorCy: Float,
+            hasAnchor: Boolean,
+        ): Int {
+            if (count <= 1) return 0
+            if (widths[0] > 0.01f && widths[1] > 0.01f) {
+                val overlapDist = kotlin.math.hypot(centersX[1] - centersX[0], centersY[1] - centersY[0])
+                if (overlapDist < 0.45f * minOf(widths[0], widths[1])) return 1
+            }
+            if (hasAnchor) {
+                var bestIdx = 0
+                var bestD2 = Float.POSITIVE_INFINITY
+                for (i in 0 until count) {
+                    if (widths[i] <= 0.01f) continue
+                    val dx = centersX[i] - anchorCx
+                    val dy = centersY[i] - anchorCy
+                    val d2 = dx * dx + dy * dy
+                    if (d2 < bestD2) { bestD2 = d2; bestIdx = i }
+                }
+                return bestIdx
+            }
+            var largestIdx = 0
+            for (i in 1 until count) {
+                if (widths[i] > widths[largestIdx]) largestIdx = i
+            }
+            return largestIdx
+        }
     }
 }
