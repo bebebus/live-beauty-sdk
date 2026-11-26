@@ -513,6 +513,11 @@ bool EffectBundleParser::parseJson(
         if (b->find("hairDyeColor")) c.hairDyeColor = parseHairDyeColor(optStr(*b, "hairDyeColor"));
         c.hairShine = optFloat(*b, "hairShine", c.hairShine, 0.0f, 1.0f);
 
+        c.bloom = optFloat(*b, "bloom", c.bloom, 0.0f, 1.0f);
+        c.filmGrain = optFloat(*b, "filmGrain", c.filmGrain, 0.0f, 1.0f);
+        c.colorTemp = optFloat(*b, "colorTemp", c.colorTemp, -1.0f, 1.0f);
+        c.colorTint = optFloat(*b, "colorTint", c.colorTint, -1.0f, 1.0f);
+
         c.waistSlim = optFloat(*b, "waistSlim", c.waistSlim, 0.0f, 1.0f);
         c.bustEnhance = optFloat(*b, "bustEnhance", c.bustEnhance, 0.0f, 1.0f);
         c.legLengthen = optFloat(*b, "legLengthen", c.legLengthen, 0.0f, 1.0f);

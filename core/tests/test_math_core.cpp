@@ -1884,6 +1884,102 @@ void testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard() {
     EXPECT_TRUE(narrowLatDisp < 0.0025f && narrowLatDisp < wideLatDisp * 0.25f);
 }
 
+void testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion() {
+    // 1. Exact CIE D65 CAT02 chromatic adaptation matrix
+    float id[9]{};
+    BeautyQualityTuning::cat02WhiteBalanceMatrix(0.0f, 0.0f, id);
+    EXPECT_NEAR(id[0], 1.0f, 1e-6f); EXPECT_NEAR(id[4], 1.0f, 1e-6f); EXPECT_NEAR(id[8], 1.0f, 1e-6f);
+    EXPECT_NEAR(id[1], 0.0f, 1e-6f); EXPECT_NEAR(id[2], 0.0f, 1e-6f); EXPECT_NEAR(id[3], 0.0f, 1e-6f);
+
+    auto applyMat = [](const float m[9], float r, float g, float b, float& oR, float& oG, float& oB) {
+        oR = m[0] * r + m[1] * g + m[2] * b;
+        oG = m[3] * r + m[4] * g + m[5] * b;
+        oB = m[6] * r + m[7] * g + m[8] * b;
+    };
+    float warmM[9]{}, coolM[9]{}, magM[9]{}, grnM[9]{};
+    BeautyQualityTuning::cat02WhiteBalanceMatrix(0.60f, 0.0f, warmM);
+    BeautyQualityTuning::cat02WhiteBalanceMatrix(-0.60f, 0.0f, coolM);
+    BeautyQualityTuning::cat02WhiteBalanceMatrix(0.0f, 0.60f, magM);
+    BeautyQualityTuning::cat02WhiteBalanceMatrix(0.0f, -0.60f, grnM);
+
+    float r, g, b;
+    applyMat(warmM, 0.5f, 0.5f, 0.5f, r, g, b);
+    EXPECT_TRUE(r > b + 0.06f);
+    applyMat(coolM, 0.5f, 0.5f, 0.5f, r, g, b);
+    EXPECT_TRUE(b > r + 0.06f);
+    applyMat(magM, 0.5f, 0.5f, 0.5f, r, g, b);
+    EXPECT_TRUE(0.5f * (r + b) > g + 0.03f);
+    applyMat(grnM, 0.5f, 0.5f, 0.5f, r, g, b);
+    EXPECT_TRUE(g > 0.5f * (r + b) + 0.03f);
+
+    // 2. Style-coupled atmosphere resolver
+    float bl = 0.0f, gr = 0.0f;
+    BeautyQualityTuning::resolveStyleAtmosphere("asset://luts/night_vibe.png", 1.0f, 0, 0.0f, bl, gr);
+    EXPECT_NEAR(bl, 0.30f, 1e-4f); EXPECT_NEAR(gr, 0.14f, 1e-4f);
+    BeautyQualityTuning::resolveStyleAtmosphere("asset://luts/pure_pink.png", 0.8f, 0, 0.0f, bl, gr);
+    EXPECT_NEAR(bl, 0.16f, 1e-4f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
+    BeautyQualityTuning::resolveStyleAtmosphere("asset://luts/natural_studio.png", 1.0f, 0, 0.0f, bl, gr);
+    EXPECT_NEAR(bl, 0.0f, 1e-5f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
+    BeautyQualityTuning::resolveStyleAtmosphere("", 0.0f, 0, 0.0f, bl, gr);
+    EXPECT_NEAR(bl, 0.0f, 1e-5f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
+
+    // 3. Lower-face makeup occlusion mute curve
+    EXPECT_NEAR(BeautyQualityTuning::lowerFaceMakeupKeep(std::numeric_limits<float>::quiet_NaN()), 1.0f, 1e-5f);
+    EXPECT_NEAR(BeautyQualityTuning::lowerFaceMakeupKeep(0.30f), 1.0f, 1e-5f);
+    const float midKeep = BeautyQualityTuning::lowerFaceMakeupKeep(0.615f);
+    EXPECT_TRUE(midKeep > 0.35f && midKeep < 0.65f);
+    EXPECT_NEAR(BeautyQualityTuning::lowerFaceMakeupKeep(0.82f), 0.0f, 1e-5f);
+
+    // 4. FaceOcclusionSolver lowerFaceOcclusion() distinguishes clean skin vs large cup covering lower face
+    constexpr int kS = 128;
+    std::vector<uint8_t> rgba(kS * kS * 4, 255);
+    for (int y = 0; y < kS; ++y) {
+        for (int x = 0; x < kS; ++x) {
+            const int o = (y * kS + x) * 4;
+            rgba[o] = 212; rgba[o + 1] = 172; rgba[o + 2] = 150;
+        }
+    }
+    CropRect fb{0.15f, 0.15f, 0.70f, 0.70f};
+    std::array<uint8_t, FaceOcclusionSolver::kMaskPixels> mask{};
+    FaceOcclusionSolver occ;
+    occ.compute(rgba.data(), kS, kS, &fb, mask.data());
+    EXPECT_TRUE(occ.lowerFaceOcclusion() < 0.05f);
+
+    // Cover lower half of face with a large blue/cyan bottle
+    for (int y = 58; y <= 112; ++y) {
+        for (int x = 22; x <= 106; ++x) {
+            const int o = (y * kS + x) * 4;
+            rgba[o] = 20; rgba[o + 1] = 145; rgba[o + 2] = 210;
+        }
+    }
+    occ.reset();
+    occ.compute(rgba.data(), kS, kS, &fb, mask.data());
+    EXPECT_TRUE(occ.lowerFaceOcclusion() > 0.72f);
+    EXPECT_TRUE(BeautyQualityTuning::lowerFaceMakeupKeep(occ.lowerFaceOcclusion()) < 0.15f);
+
+    // 5. FaceParsingMapper::estimateLowerFaceOcclusion()
+    std::array<uint8_t, FaceParsingMapper::kOutPixels> pOcc{};
+    pOcc.fill(255);
+    EXPECT_NEAR(FaceParsingMapper::estimateLowerFaceOcclusion(pOcc.data(), FaceParsingMapper::kOutSize, fb), 0.0f, 1e-5f);
+    for (int y = 60; y < FaceParsingMapper::kOutSize; ++y) {
+        for (int x = 0; x < FaceParsingMapper::kOutSize; ++x) {
+            pOcc[y * FaceParsingMapper::kOutSize + x] = 0;
+        }
+    }
+    EXPECT_TRUE(FaceParsingMapper::estimateLowerFaceOcclusion(pOcc.data(), FaceParsingMapper::kOutSize, fb) > 0.90f);
+
+    // 6. EffectBundleParser parses bloom/filmGrain/colorTemp/colorTint
+    bundle::EffectBundleManifest mf{};
+    EXPECT_TRUE(bundle::EffectBundleParser::parseJson(
+        R"({"schemaVersion":1,"id":"atm","beauty":{"bloom":0.35,"filmGrain":0.12,"colorTemp":0.25,"colorTint":-0.15}})",
+        mf, nullptr));
+    EXPECT_NEAR(mf.beauty.bloom, 0.35f, 1e-5f);
+    EXPECT_NEAR(mf.beauty.filmGrain, 0.12f, 1e-5f);
+    EXPECT_NEAR(mf.beauty.colorTemp, 0.25f, 1e-5f);
+    EXPECT_NEAR(mf.beauty.colorTint, -0.15f, 1e-5f);
+    EXPECT_TRUE(mf.beauty.isProcessing());
+}
+
 }  // namespace
 
 int main() {
@@ -1912,6 +2008,7 @@ int main() {
     testV3613HairCoverageGhostFreeEmaAndAffineMargin();
     testV3615DouyinAmbientSceneLiftCurve();
     testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard();
+    testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

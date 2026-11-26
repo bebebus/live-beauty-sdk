@@ -403,6 +403,8 @@ uniform sampler2D uTex2;
 uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
+uniform vec4 uU3;
+uniform vec4 uU4;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
 vec3 fitLipGamut(vec3 c, float y) {
@@ -419,16 +421,34 @@ void main() {
     vec2 uv = clamp(vScreenUv, 0.0, 1.0);
     float vis = clamp(texture2D(uTex2, uv).a * 1.04 - 0.02, 0.0, 1.0);
     if (vis <= 0.002) { discard; }
+    // v3.8.0 Open-mouth geometric inner-mouth cavity cutout (exact screen-space inner lip ellipse)
+    float mouthOpen = clamp(uU4.x, 0.0, 1.0);
+    float openCavityGate = 1.0;
+    if (mouthOpen > 0.001 && uU3.z > 0.0005 && uU3.w > 0.0005) {
+        float asp = max(uU4.y, 0.1);
+        vec2 md = vec2(uv.x - uU3.x, (uv.y - uU3.y) / asp);
+        vec2 ax = uU4.zw;
+        float axLen = length(ax);
+        vec2 uAxis = (axLen > 0.0001) ? (ax / axLen) : vec2(1.0, 0.0);
+        vec2 vAxis = vec2(-uAxis.y, uAxis.x);
+        float a = dot(md, uAxis) / max(uU3.z, 0.0005);
+        float b = dot(md, vAxis) / max(uU3.w, 0.0005);
+        float e2 = a * a + b * b;
+        openCavityGate = 1.0 - mouthOpen * (1.0 - smoothstep(0.68, 1.18, e2));
+        if (openCavityGate <= 0.002) { discard; }
+    }
     vec3 base = texture2D(uTex0, uv).rgb;
     float baseY = dot(base, vec3(0.299, 0.587, 0.114));
     float darkGate = smoothstep(0.125, 0.20, baseY);
     float redExcess = base.r - max(base.g, base.b);
-    float teethLike = smoothstep(0.42, 0.66, baseY) * (1.0 - smoothstep(0.025, 0.095, redExcess));
+    float teethRedLo = mix(0.025, 0.055, mouthOpen);
+    float teethRedHi = mix(0.095, 0.130, mouthOpen);
+    float teethLike = smoothstep(0.42, 0.66, baseY) * (1.0 - smoothstep(teethRedLo, teethRedHi, redExcess));
     float teethGate = 1.0 - teethLike;
     float lipHue = (base.r - base.g) - 0.75 * max(base.g - base.b, 0.0);
     float rimZone = 1.0 - smoothstep(0.35, 0.92, feather);
     float skinRimGate = mix(1.0, smoothstep(0.045, 0.155, lipHue), rimZone * 0.92);
-    float effFeather = feather * darkGate * teethGate * skinRimGate * vis;
+    float effFeather = feather * darkGate * teethGate * skinRimGate * vis * openCavityGate;
     float alpha = clamp(effFeather * uU0.a, 0.0, 0.90);
     if (alpha <= 0.001) { discard; }
     float smoothY = baseY;
@@ -1612,6 +1632,67 @@ void main() {
 }
 )";
 
+// v3.8.0 Soft-knee bright-pass extractor (anti-flicker 5-tap cross filter)
+constexpr const char* kPostBloomExtractFrag = LB_GLSL_PREC R"(
+uniform sampler2D uTex0;
+uniform vec4 uU0;  // (threshold, knee, invW, invH)
+varying vec2 vTextureCoord;
+void main() {
+    vec2 d = uU0.zw * 0.75;
+    vec3 c0 = texture2D(uTex0, vTextureCoord).rgb;
+    vec3 c1 = texture2D(uTex0, clamp(vTextureCoord + vec2(-d.x, -d.y), 0.0, 1.0)).rgb;
+    vec3 c2 = texture2D(uTex0, clamp(vTextureCoord + vec2( d.x, -d.y), 0.0, 1.0)).rgb;
+    vec3 c3 = texture2D(uTex0, clamp(vTextureCoord + vec2(-d.x,  d.y), 0.0, 1.0)).rgb;
+    vec3 c4 = texture2D(uTex0, clamp(vTextureCoord + vec2( d.x,  d.y), 0.0, 1.0)).rgb;
+    vec3 c = c0 * 0.36 + (c1 + c2 + c3 + c4) * 0.16;
+    float br = max(max(c.r, c.g), c.b);
+    float thresh = max(uU0.x, 0.05);
+    float knee = max(uU0.y, 0.01);
+    float rq = clamp(br - thresh + knee, 0.0, 2.0 * knee);
+    rq = (rq * rq) / (4.0 * knee);
+    float w = max(rq, br - thresh) / max(br, 0.0001);
+    gl_FragColor = vec4(clamp(c * w, 0.0, 1.0), 1.0);
+}
+)";
+
+// v3.8.0 Cinematic Atmosphere Composite: CIE D65 CAT02 WB + Multi-Scale Soft-Knee Bloom + Non-Darkening Filmic Grain
+constexpr const char* kPostAtmosphereFrag = LB_GLSL_PREC R"(
+uniform sampler2D uTex0;
+uniform sampler2D uTex1;
+uniform sampler2D uTex2;
+uniform vec4 uU0;  // (bloomStrength, grainStrength, grainPhase01, hasCat02)
+uniform vec4 uU1;  // (cat02Row0.xyz, gridW)
+uniform vec4 uU2;  // (cat02Row1.xyz, gridH)
+uniform vec4 uU3;  // (cat02Row2.xyz, 0)
+varying vec2 vTextureCoord;
+void main() {
+    vec4 src = texture2D(uTex0, vTextureCoord);
+    vec3 c = src.rgb;
+    if (uU0.w > 0.5) {
+        c = clamp(vec3(dot(c, uU1.xyz), dot(c, uU2.xyz), dot(c, uU3.xyz)), 0.0, 1.0);
+    }
+    if (uU0.x > 0.0001) {
+        vec3 bTight = texture2D(uTex1, vTextureCoord).rgb;
+        vec3 bWide  = texture2D(uTex2, vTextureCoord).rgb;
+        vec3 glow   = (bTight * 0.62 + bWide * 0.38) * (uU0.x * 0.72);
+        vec3 bloomed = clamp(c + glow * (1.0 - c * 0.42), 0.0, 1.0);
+        c = max(c, bloomed);
+    }
+    if (uU0.y > 0.0001) {
+        vec2 grid = max(vec2(uU1.w, uU2.w), vec2(64.0));
+        vec2 p = mod(floor(vTextureCoord * grid) + vec2(uU0.z * 37.0, uU0.z * 73.0), 256.0);
+        float h = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+        float s = clamp(uU0.y, 0.0, 0.50);
+        float grainExp = mix(1.0, 0.72 + 0.28 * h, s);
+        vec3 lifted = pow(max(c, vec3(0.0001)), vec3(grainExp));
+        float y = dot(c, vec3(0.299, 0.587, 0.114));
+        float midW = smoothstep(0.04, 0.20, y) * (1.0 - 0.55 * smoothstep(0.82, 0.98, y));
+        c = max(c, mix(c, lifted, s * 0.65 * midW));
+    }
+    gl_FragColor = vec4(clamp(c, 0.0, 1.0), src.a);
+}
+)";
+
 }  // namespace
 
 ShaderSourcePair getShaderSources(ShaderId id) {
@@ -1647,10 +1728,12 @@ ShaderSourcePair getShaderSources(ShaderId id) {
         case ShaderId::kHeadDepthShell:  return {kAr3dVert, kHeadDepthShellFrag};
         case ShaderId::kAr3dMesh:        return {kAr3dVert, kAr3dMeshFrag};
         case ShaderId::kHairDye:         return {kQuadVert, kHairDyeFrag};
-        case ShaderId::kChromaKey:       return {kQuadVert, kChromaKeyFrag};
-        case ShaderId::kParticleBurst:   return {kRetouchVert, kParticleBurstFrag};
+        case ShaderId::kChromaKey:        return {kQuadVert, kChromaKeyFrag};
+        case ShaderId::kParticleBurst:    return {kRetouchVert, kParticleBurstFrag};
+        case ShaderId::kPostBloomExtract: return {kQuadVert, kPostBloomExtractFrag};
+        case ShaderId::kPostAtmosphere:   return {kQuadVert, kPostAtmosphereFrag};
         case ShaderId::kPassThrough:
-        default:                         return {kQuadVert, kPassThroughFrag};
+        default:                          return {kQuadVert, kPassThroughFrag};
     }
 }
 

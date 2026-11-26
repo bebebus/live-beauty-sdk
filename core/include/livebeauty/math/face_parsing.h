@@ -84,6 +84,12 @@ public:
         uint8_t* outHairR8 = nullptr,
         uint8_t* outPersonR8 = nullptr);
 
+    /** Estimate occluded fraction [0..1] inside the lower/mid face region of a top-down R8 visibility mask. */
+    static float estimateLowerFaceOcclusion(
+        const uint8_t* occMaskR8,
+        int maskSize,
+        const CropRect& faceBounds);
+
 private:
     std::array<uint8_t, kOutPixels> rawOcc_{};
     std::array<uint8_t, kOutPixels> rawHair_{};

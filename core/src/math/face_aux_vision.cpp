@@ -130,6 +130,7 @@ FaceOcclusionSolver::FaceOcclusionSolver() {
 
 void FaceOcclusionSolver::reset() {
     hasHistory_ = false;
+    lowerFaceOcc_ = 0.0f;
     emaMask_.fill(255.0f);
 }
 
@@ -191,6 +192,7 @@ void FaceOcclusionSolver::fillNeutral(uint8_t* outMaskR8) {
     }
 #endif
     hasHistory_ = true;
+    lowerFaceOcc_ *= (1.0f - alpha);
 }
 
 void FaceOcclusionSolver::compute(
@@ -377,6 +379,31 @@ void FaceOcclusionSolver::compute(
         outMaskR8[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(sm)), 0, 255));
     }
 #endif
+    // Compute lower/mid-face occlusion fraction (cheeks, nose tip, lips, chin; strictly below eyes/brows)
+    float lowerOccSum = 0.0f;
+    int lowerCount = 0;
+    for (int my = y0; my <= y1; ++my) {
+        const float v = (static_cast<float>(my) + 0.5f) / static_cast<float>(kMaskSize);
+        const float rawRelY = (v - fT) / fH;
+        const int rowOff = my * kMaskSize;
+        for (int mx = x0; mx <= x1; ++mx) {
+            const float u = (static_cast<float>(mx) + 0.5f) / static_cast<float>(kMaskSize);
+            const float rawRelX = (u - fL) / fW;
+            const float cx = rawRelX - 0.5f;
+            const float cy = rawRelY - 0.5f;
+            const float relX = 0.5f + cx * cosR - cy * sinR;
+            const float relY = 0.5f + cx * sinR + cy * cosR;
+            const float ex = (relX - 0.5f) / 0.44f;
+            const float ey = (relY - 0.50f) / 0.46f;
+            if (ex * ex + ey * ey <= 1.0f && relY >= 0.48f && relY <= 0.92f) {
+                lowerOccSum += 1.0f - static_cast<float>(outMaskR8[rowOff + mx]) * kInv255;
+                ++lowerCount;
+            }
+        }
+    }
+    const float rawLowerOcc = (lowerCount > 0) ? (lowerOccSum / static_cast<float>(lowerCount)) : 0.0f;
+    const float occAlpha = hasHistory_ ? 0.45f : 1.0f;
+    lowerFaceOcc_ += occAlpha * (rawLowerOcc - lowerFaceOcc_);
     hasHistory_ = true;
 }
 

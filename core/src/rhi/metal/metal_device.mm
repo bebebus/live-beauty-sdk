@@ -189,8 +189,10 @@ struct MetalDevice::Impl {
             case ShaderId::kHeadDepthShell:  vsName = @"vs_ar3d";      fsName = @"fs_head_depth_shell"; break;
             case ShaderId::kAr3dMesh:        vsName = @"vs_ar3d";      fsName = @"fs_ar3d_mesh"; break;
             case ShaderId::kHairDye:         vsName = @"vs_quad";      fsName = @"fs_hair_dye"; break;
-            case ShaderId::kChromaKey:       vsName = @"vs_quad";      fsName = @"fs_chroma_key"; break;
-            case ShaderId::kParticleBurst:   vsName = @"vs_retouch";   fsName = @"fs_particle_burst"; break;
+            case ShaderId::kChromaKey:        vsName = @"vs_quad";      fsName = @"fs_chroma_key"; break;
+            case ShaderId::kParticleBurst:    vsName = @"vs_retouch";   fsName = @"fs_particle_burst"; break;
+            case ShaderId::kPostBloomExtract: vsName = @"vs_quad";      fsName = @"fs_post_bloom_extract"; break;
+            case ShaderId::kPostAtmosphere:   vsName = @"vs_quad";      fsName = @"fs_post_atmosphere"; break;
             case ShaderId::kPassThrough:
             default:                         vsName = @"vs_quad";      fsName = @"fs_pass_through"; break;
         }

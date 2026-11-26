@@ -65,6 +65,8 @@ enum class ShaderId : uint8_t {
     kHairDye,
     kChromaKey,
     kParticleBurst,
+    kPostBloomExtract,
+    kPostAtmosphere,
     kCount,
 };
 

@@ -251,6 +251,7 @@ bool LiveBeautyEngine::submitAuxRgbaSample(
         occlusionSolver_.compute(rgbaTopDown, srcWidth, srcHeight, &bounds, stagedOccMask_.data(), rollRad);
         stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
         stagedOccTsMs_ = kTimeInvalid;
+        stagedLowerFaceOcc_ = occlusionSolver_.lowerFaceOcclusion();
         stagedOccDirty_ = true;
     }
     const float clampedStrength = detail::clampf(retouchStrength, 0.0f, 1.0f);
@@ -290,6 +291,9 @@ bool LiveBeautyEngine::submitFaceParsingClassMap(
     semanticOccActive_ = true;
     stagedOccSize_ = math::FaceParsingMapper::kOutSize;
     stagedOccTsMs_ = sampleTsMs;
+    stagedLowerFaceOcc_ = hasLatestFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
+        : 0.0f;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -307,6 +311,9 @@ bool LiveBeautyEngine::submitFaceParsingLogits(
     semanticOccActive_ = true;
     stagedOccSize_ = math::FaceParsingMapper::kOutSize;
     stagedOccTsMs_ = sampleTsMs;
+    stagedLowerFaceOcc_ = hasLatestFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
+        : 0.0f;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -325,6 +332,9 @@ bool LiveBeautyEngine::submitMulticlass6Logits(
     semanticOccActive_ = true;
     stagedOccSize_ = math::FaceParsingMapper::kOutSize;
     stagedOccTsMs_ = sampleTsMs;
+    stagedLowerFaceOcc_ = hasLatestFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
+        : 0.0f;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -539,6 +549,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
                 device_.updateTexture2D(autoOccTex_, occS, occS, rhi::TextureFormat::kR8, stagedOccMask_.data());
             }
             autoOccTsMs_ = stagedOccTsMs_;
+            lowerFaceOcc_ = stagedLowerFaceOcc_;
         }
         if (stagedParseHairDirty_) {
             stagedParseHairDirty_ = false;
@@ -751,6 +762,9 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         const float occMotionKeep = (affineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
         in.occlusionShown = detail::clampf(occFresh * occMotionKeep, 0.0f, 1.0f);
         in.occlusionMaskTex = (in.occlusionShown > 1e-4f) ? autoOccTex_ : rhi::kInvalidTexture;
+        if (in.occlusionShown > 1e-4f) {
+            in.lowerMakeupKeep = math::BeautyQualityTuning::lowerFaceMakeupKeep(lowerFaceOcc_ * in.occlusionShown);
+        }
     }
     in.hairShown = effHairShown;
     in.hairBgShown = effHairBgShown;

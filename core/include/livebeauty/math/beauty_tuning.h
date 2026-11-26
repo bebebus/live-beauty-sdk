@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include "livebeauty/types.h"
 
 namespace livebeauty::math {
@@ -25,6 +26,11 @@ struct BeautyQualityTuning {
     static float twoStageSmoothMix(float smoothing);
     static float twoStageDetailKeep(float smoothing);
     static float mouthOpenGate(float openRatio);
+    static float lowerFaceMakeupKeep(float lowerFaceOccRatio);
+    static void cat02WhiteBalanceMatrix(float colorTemp, float colorTint, float outRowMajor3x3[9]);
+    static void resolveStyleAtmosphere(const std::string& lutUrl, float lutIntensity,
+                                       int filterStyleId, float filterIntensity,
+                                       float& outBloom, float& outGrain);
 };
 
 class GuidedSpread {

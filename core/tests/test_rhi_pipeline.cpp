@@ -1394,6 +1394,156 @@ void testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise() {
     pipe.releaseGpuResources();
 }
 
+void testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute() {
+    MockRhiDevice dev;
+    RenderPipeline pipe(dev);
+    const TextureId inTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId atlas = dev.createTexture2D(64, 64, TextureFormat::kRgba8, nullptr);
+    const TextureId lutTex = dev.createTexture2D(512, 512, TextureFormat::kRgba8, nullptr);
+
+    PipelineAssets assets{};
+    assets.blushAtlas = atlas;
+    assets.contourHighlightAtlas = atlas;
+    assets.eyeMakeupAtlas = atlas;
+    assets.eyebrowAtlas = atlas;
+    assets.lutTex = lutTex;
+    pipe.setAssets(assets);
+
+    std::array<float, math::FaceMeshFrame::kCoordCount> lm{};
+    const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 720.0f / 1280.0f;
+    const float scale = 0.40f / math::FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+        lm[i * 2] = 0.50f + xyz[i * 3] * scale;
+        lm[i * 2 + 1] = 0.50f + xyz[i * 3 + 1] * scale * aspect;
+    }
+    math::FaceMeshFrame::synthesizeIris(lm.data(), 468, 33, 133, 159, 145, aspect);
+    math::FaceMeshFrame::synthesizeIris(lm.data(), 473, 362, 263, 386, 374, aspect);
+    float meta[math::FaceMeshFrame::kMetaSize]{};
+    EXPECT_TRUE(math::FaceMeshFrame::fillMeta(lm.data(), math::FaceMeshFrame::kCoordCount, aspect, meta));
+
+    FrameInputs in{};
+    in.inputTexture = inTex;
+    in.width = 720;
+    in.height = 1280;
+    in.nowMs = 1000;
+    in.hasFaceMesh = true;
+    in.landmarks478x2 = lm.data();
+    in.faceMeta15 = meta;
+    in.facePresence = 1.0f;
+    in.steadyFace = 1.0f;
+    in.steadyEye = 1.0f;
+    in.eyeMakeupKeep = 1.0f;
+    in.lowerMakeupKeep = 1.0f;
+    in.loadFadeBody = 1.0f;
+    in.loadFadeFace = 1.0f;
+    in.loadFadeSmooth = 1.0f;
+
+    // 1. Natural mode (no LUT, bloom=0, filmGrain=0, colorTemp=0): kPassAtmosphere == 0 (zero cost!)
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.smoothing = 0.50f;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassAtmosphere) == 0);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+
+    // 2. Cinema LUT (night_vibe.png) automatically engages multi-scale bloom + filmic grain without feedback loop
+    cfg.lutUrl = "asset://luts/night_vibe.png";
+    cfg.lutIntensity = 0.80f;
+    dev.calls.clear();
+    const TextureId cinemaOut = pipe.render(cfg, in);
+    EXPECT_TRUE(cinemaOut != inTex);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassAtmosphere) != 0);
+    bool sawBloomExtract = false;
+    bool sawAtmosphere = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kPostBloomExtract) sawBloomExtract = true;
+        if (c.shader == ShaderId::kPostAtmosphere && c.uniforms.count >= 1) {
+            sawAtmosphere = (c.uniforms.v[0].x > 0.20f && c.uniforms.v[0].y > 0.08f);
+        }
+    }
+    EXPECT_TRUE(sawBloomExtract);
+    EXPECT_TRUE(sawAtmosphere);
+
+    // 3. Lite tier throttles multi-pass bloom extract off while preserving lightweight grain / CAT02 WB
+    in.tierCaps.resolvedTier = math::PerformanceTier::kLite;
+    cfg.colorTemp = 0.35f;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    bool sawLiteExtract = false;
+    bool sawLiteCat02 = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kPostBloomExtract) sawLiteExtract = true;
+        if (c.shader == ShaderId::kPostAtmosphere && c.uniforms.count >= 1) {
+            sawLiteCat02 = (c.uniforms.v[0].x == 0.0f && c.uniforms.v[0].w > 0.5f);
+        }
+    }
+    EXPECT_TRUE(!sawLiteExtract);
+    EXPECT_TRUE(sawLiteCat02);
+    in.tierCaps.resolvedTier = math::PerformanceTier::kStandard;
+    cfg.lutUrl.clear();
+    cfg.colorTemp = 0.0f;
+
+    // 4. Open-mouth geometric cutout uniforms wired to kMakeupLip (closed -> 0, open -> ~1)
+    cfg.lipstick = 0.65f;
+    const float midLipY = 0.5f * (lm[13 * 2 + 1] + lm[14 * 2 + 1]);
+    lm[13 * 2 + 1] = midLipY;
+    lm[14 * 2 + 1] = midLipY;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    float openUniformClosed = -1.0f;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kMakeupLip && c.uniforms.count >= 5) {
+            openUniformClosed = c.uniforms.v[4].x;
+        }
+    }
+    EXPECT_TRUE(openUniformClosed >= 0.0f && openUniformClosed < 0.01f);
+
+    const float mw = std::hypot(lm[291 * 2] - lm[61 * 2], (lm[291 * 2 + 1] - lm[61 * 2 + 1]) / aspect);
+    lm[13 * 2 + 1] = midLipY + 0.09f * mw * aspect;
+    lm[14 * 2 + 1] = midLipY - 0.09f * mw * aspect;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    float openUniformOpen = 0.0f;
+    float mouthRy = 0.0f;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kMakeupLip && c.uniforms.count >= 5) {
+            mouthRy = c.uniforms.v[3].w;
+            openUniformOpen = c.uniforms.v[4].x;
+        }
+    }
+    EXPECT_TRUE(openUniformOpen >= 0.95f && mouthRy > 0.005f);
+
+    // 5. Heavy lower-face occlusion mute (lowerMakeupKeep = 0): mutes blush/contour/lipstick/teeth
+    //    while keeping eyeshadow & eyeliner 100% active!
+    cfg.blush = 0.50f;
+    cfg.contour = 0.45f;
+    cfg.highlight = 0.40f;
+    cfg.eyeshadow = 0.55f;
+    cfg.eyeliner = 0.50f;
+    cfg.teethWhiten = 0.80f;
+    in.lowerMakeupKeep = 0.0f;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    bool sawLipMuted = false;
+    bool sawTeethMuted = false;
+    int makeupLayerDraws = 0;  // Only eyeshadow (2 draws) + eyeliner (1 draw) = 3 draws (blush/contour/highlight muted!)
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kMakeupLip) sawLipMuted = true;
+        if (c.shader == ShaderId::kRetouchEyeTeeth && c.uniforms.count >= 1 && c.uniforms.v[0].y > 0.5f) {
+            sawTeethMuted = true;
+        }
+        if (c.shader == ShaderId::kMakeupLayer) ++makeupLayerDraws;
+    }
+    EXPECT_TRUE(!sawLipMuted);
+    EXPECT_TRUE(!sawTeethMuted);
+    EXPECT_TRUE(makeupLayerDraws == 3);
+
+    pipe.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -1410,6 +1560,7 @@ int main() {
     testV3610CheekMakeupSteadyFaceAndAutoOccDecoupling();
     testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1();
     testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise();
+    testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

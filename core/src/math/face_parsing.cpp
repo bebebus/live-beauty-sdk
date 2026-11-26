@@ -266,6 +266,33 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
     return true;
 }
 
+float FaceParsingMapper::estimateLowerFaceOcclusion(
+    const uint8_t* occMaskR8,
+    int maskSize,
+    const CropRect& faceBounds) {
+    if (!occMaskR8 || maskSize <= 0 || faceBounds.width < 0.04f || faceBounds.height < 0.04f) {
+        return 0.0f;
+    }
+    const float xLo = detail::clampf(faceBounds.left + faceBounds.width * 0.18f, 0.0f, 1.0f);
+    const float xHi = detail::clampf(faceBounds.left + faceBounds.width * 0.82f, xLo, 1.0f);
+    const float yLo = detail::clampf(faceBounds.top + faceBounds.height * 0.48f, 0.0f, 1.0f);
+    const float yHi = detail::clampf(faceBounds.top + faceBounds.height * 0.92f, yLo, 1.0f);
+    const int ix0 = std::clamp(static_cast<int>(xLo * maskSize), 0, maskSize - 1);
+    const int ix1 = std::clamp(static_cast<int>(xHi * maskSize), ix0, maskSize - 1);
+    const int iy0 = std::clamp(static_cast<int>(yLo * maskSize), 0, maskSize - 1);
+    const int iy1 = std::clamp(static_cast<int>(yHi * maskSize), iy0, maskSize - 1);
+    float occSum = 0.0f;
+    int cnt = 0;
+    for (int y = iy0; y <= iy1; ++y) {
+        const int row = y * maskSize;
+        for (int x = ix0; x <= ix1; ++x) {
+            occSum += 1.0f - static_cast<float>(occMaskR8[row + x]) * kInv255;
+            ++cnt;
+        }
+    }
+    return (cnt > 0) ? detail::clampf(occSum / static_cast<float>(cnt), 0.0f, 1.0f) : 0.0f;
+}
+
 // ============================================================================
 // NeuralSkinResidualAdapter
 // ============================================================================

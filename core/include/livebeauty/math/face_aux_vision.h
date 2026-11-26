@@ -90,12 +90,16 @@ public:
         uint8_t* outMaskR8,
         float headRollRad = 0.0f);
 
+    /** Smoothed fraction [0..1] of the lower/mid face (cheeks/mouth/chin) covered by a foreign occluder. */
+    float lowerFaceOcclusion() const { return lowerFaceOcc_; }
+
 private:
     void fillNeutral(uint8_t* outMaskR8);
 
     std::array<uint8_t, kMaskPixels> rawOcc_{};
     std::array<uint8_t, kMaskPixels> openedOcc_{};
     std::array<float, kMaskPixels> emaMask_{};
+    float lowerFaceOcc_ = 0.0f;
     bool hasHistory_ = false;
 };
 

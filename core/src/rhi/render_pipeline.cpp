@@ -614,7 +614,7 @@ void RenderPipeline::renderMakeup(
     const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,
     const float* landmarks478x2, const float* meta15,
     bool hasIris, bool frontFaceCw, float presence, float steadyFace, float steadyEye, float eyeMakeupKeep,
-    bool copyBaseFirst) {
+    float lowerMakeupKeep, bool copyBaseFirst) {
     math::FaceMakeupUv::packVertices(landmarks478x2, math::FaceMeshFrame::kCoordCount, makeupVerts_.data());
     device_.updateVertexBuffer(vbMakeup_, makeupVerts_.data(), sizeof(float) * makeupVerts_.size());
 
@@ -641,9 +641,11 @@ void RenderPipeline::renderMakeup(
     layerState.cullBack = true;
     layerState.frontFaceCw = frontFaceCw;
 
-    // Broad cheek/face makeup (blush, contour, highlight, eyebrow, lipstick) follows steadyFace so brief
-    // eye-radius extrapolation never pumps cheek beauty; corneal lens/catchlight keeps strict steadyEye.
+    // Broad cheek/face makeup (blush, contour, highlight, lipstick) follows steadyFace * lowerMakeupKeep so brief
+    // eye-radius extrapolation never pumps cheek beauty while heavy hand/cup lower-face occlusion mutes cleanly;
+    // eyebrow follows steadyFace, eye makeup follows eyeMakeupKeep, and corneal lens/catchlight keeps strict steadyEye.
     const float faceGain = presence * steadyFace;
+    const float lowerGain = faceGain * detail::clampf(lowerMakeupKeep, 0.0f, 1.0f);
     const float irisGain = presence * steadyEye;
     const float eyeGain = presence * eyeMakeupKeep;
     const int skinIdxCount = static_cast<int>(math::FaceMakeupUv::skinFaceIndices().size());
@@ -669,18 +671,18 @@ void RenderPipeline::renderMakeup(
     // 1. Blush (SoftLight mode=0, preserves micro-pore texture)
     if (cfg.blush > 0.0f) {
         drawSkinLayer(assets_.blushAtlas, math::FaceMakeupUv::blushRgb(cfg.blushColor),
-                      cfg.blush * 0.72f * faceGain, math::FaceMakeupUv::blushChannel(cfg.blushStyle),
+                      cfg.blush * 0.72f * lowerGain, math::FaceMakeupUv::blushChannel(cfg.blushStyle),
                       {0.0f, 0.0f, 0.0f, 0.0f}, 0.55f, 0.0f);
     }
     // 2. Contour & Highlight (contour_highlight R=contour, G=highlight; mode.z=2 guards dark eye-socket/nose/beard shadows)
     if (cfg.contour > 0.0f) {
         drawSkinLayer(assets_.contourHighlightAtlas, {0.42f, 0.30f, 0.24f},
-                      cfg.contour * 0.55f * faceGain, {1.0f, 0.0f, 0.0f, 0.0f},
+                      cfg.contour * 0.55f * lowerGain, {1.0f, 0.0f, 0.0f, 0.0f},
                       {1.0f, 0.0f, 2.0f, 0.0f}, 0.50f, 0.0f);
     }
     if (cfg.highlight > 0.0f) {
         drawSkinLayer(assets_.contourHighlightAtlas, {1.0f, 0.97f, 0.92f},
-                      cfg.highlight * 0.60f * faceGain, {0.0f, 1.0f, 0.0f, 0.0f},
+                      cfg.highlight * 0.60f * lowerGain, {0.0f, 1.0f, 0.0f, 0.0f},
                       {2.0f, 0.0f, 0.0f, 0.0f}, 0.45f, 0.0f);
     }
     // 3. Eyebrow (split-eye HD UV mode.y=1)
@@ -709,13 +711,28 @@ void RenderPipeline::renderMakeup(
                       cfg.aegyoSal * 0.62f * eyeGain, {0.0f, 0.0f, 0.0f, 1.0f},
                       {2.0f, 1.0f, 0.0f, 0.0f}, 0.35f, 0.0f);
     }
-    // 6. Physically-based Beer-Lambert Lipstick (120 lip-band triangles only, occlusion-gated, ambient WB & 6-DoF yaw glaze)
+    // 6. Physically-based Translucent Lipstick (120 lip-band triangles, open-mouth geometric cavity cutout, ambient WB & 6-DoF yaw glaze)
     const float rawSignedYaw = meta15 ? detail::clampf(meta15[math::FaceMeshFrame::kMetaSignedYaw], -1.0f, 1.0f) : 0.0f;
     const float uvLipYaw = (frontFaceCw ? 1.0f : -1.0f) * rawSignedYaw;
     if (cfg.lipstick > 0.0f && assets_.contourHighlightAtlas != kInvalidTexture) {
         const Vec3 lipRgb = math::FaceMakeupUv::lipstickRgb(cfg.lipstickColor);
-        const float lipAlpha = cfg.lipstick * 0.75f * faceGain;
+        const float lipAlpha = cfg.lipstick * 0.75f * lowerGain;
         if (lipAlpha > 1e-4f) {
+            const float aspect = static_cast<float>(width) / static_cast<float>(std::max(height, 1));
+            const float mw = std::hypot(landmarks478x2[291 * 2] - landmarks478x2[61 * 2],
+                                        (landmarks478x2[291 * 2 + 1] - landmarks478x2[61 * 2 + 1]) / aspect);
+            const float mh = std::hypot(landmarks478x2[14 * 2] - landmarks478x2[13 * 2],
+                                        (landmarks478x2[14 * 2 + 1] - landmarks478x2[13 * 2 + 1]) / aspect);
+            const float openGate = math::BeautyQualityTuning::mouthOpenGate(mh / std::max(mw, 1e-3f));
+            const float mCx = 0.5f * (landmarks478x2[13 * 2] + landmarks478x2[14 * 2]);
+            const float mCy = 0.5f * (landmarks478x2[13 * 2 + 1] + landmarks478x2[14 * 2 + 1]);
+            const float innerW = std::hypot(landmarks478x2[308 * 2] - landmarks478x2[78 * 2],
+                                            (landmarks478x2[308 * 2 + 1] - landmarks478x2[78 * 2 + 1]) / aspect);
+            const float mRx = std::max(innerW * 0.46f, 0.002f);
+            const float mRy = std::max(mh * 0.48f, 0.001f);
+            const float ax = meta15 ? meta15[math::FaceMeshFrame::kMetaAxisX] : 1.0f;
+            const float ay = meta15 ? meta15[math::FaceMeshFrame::kMetaAxisY] : 0.0f;
+
             TextureBindings tb{};
             UniformBlock ub{};
             tb.bind(0, baseTex);
@@ -724,6 +741,8 @@ void RenderPipeline::renderMakeup(
             ub.push(lipRgb.x, lipRgb.y, lipRgb.z, lipAlpha);
             ub.push(cfg.lipstickFinish == LipstickFinish::kGlossy ? 1.0f : 0.0f, invW, invH, uvLipYaw);
             ub.push(ambientRgb.x, ambientRgb.y, ambientRgb.z, ambW);
+            ub.push(mCx, mCy, mRx, mRy);
+            ub.push(openGate, aspect, ax, ay);
             device_.drawIndexed(
                 ShaderId::kMakeupLip, layerState, vbMakeup_, ibLipBand_,
                 0, math::FaceMeshTopology::kLipBandIndexCount, VertexLayout::kMakeupPos2Uv2Uv2, tb, ub);
@@ -1417,7 +1436,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             const float nf = detail::clampf(baseNf * effFacePresence * in.steadyFace, 0.0f, 1.0f);
             const float be = detail::clampf(baseBe * effFacePresence * in.steadyEye, 0.0f, 1.0f);
             const float mouthGate = (config.teethWhiten > 1e-4f) ? computeMouthOpenGate(postWarpLandmarks) : 0.0f;
-            const float tw = detail::clampf(config.teethWhiten * mouthGate * effFacePresence * in.steadyEye, 0.0f, 1.0f);
+            const float tw = detail::clampf(
+                config.teethWhiten * mouthGate * effFacePresence * in.steadyEye * detail::clampf(in.lowerMakeupKeep, 0.0f, 1.0f),
+                0.0f, 1.0f);
             const float ax = in.faceMeta15[math::FaceMeshFrame::kMetaAxisX];
             const float ay = in.faceMeta15[math::FaceMeshFrame::kMetaAxisY];
             const float norm = std::hypot(ax, ay);
@@ -1813,7 +1834,8 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postWarpLandmarks, in.faceMeta15,
-            in.hasIris, frontFaceCw, effFacePresence, in.steadyFace, in.steadyEye, in.eyeMakeupKeep, /*copyBaseFirst=*/true);
+            in.hasIris, frontFaceCw, effFacePresence, in.steadyFace, in.steadyEye, in.eyeMakeupKeep,
+            in.lowerMakeupKeep, /*copyBaseFirst=*/true);
         currentTex = device_.textureOf(rtMakeup_);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
@@ -1823,7 +1845,8 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postSecLandmarks, sec.meta15,
-            sec.hasIris, secFrontCw, effSecPresence, sec.steadyFace, sec.steadyEye, sec.eyeMakeupKeep, /*copyBaseFirst=*/!makeupRendered);
+            sec.hasIris, secFrontCw, effSecPresence, sec.steadyFace, sec.steadyEye, sec.eyeMakeupKeep,
+            1.0f, /*copyBaseFirst=*/!makeupRendered);
         currentTex = device_.textureOf(rtMakeup_);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
@@ -1869,6 +1892,105 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         currentTex = device_.textureOf(rtMakeup_);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassParticles;
+    }
+
+    // 8. v3.8: Cinematic Atmosphere Post-Processing (Soft-Knee Multi-Scale Bloom + Non-Darkening Filmic Grain + CIE CAT02 WB)
+    //    Reuses existing 1/4-res rtBg_[0..1] and 1/9-res rtMacro_[0..1] (zero extra FBO allocations, zero cost when inactive).
+    if (config.enabled && !config.compareOriginal) {
+        float autoBloom = 0.0f, autoGrain = 0.0f;
+        const bool lutBound = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty());
+        const float activeLutStrength = lutBound ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
+        math::BeautyQualityTuning::resolveStyleAtmosphere(
+            lutBound ? config.lutUrl : std::string(), activeLutStrength,
+            static_cast<int>(config.filter), config.filterIntensity,
+            autoBloom, autoGrain);
+        const bool allowBloom = (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
+        const float effBloom = allowBloom
+            ? detail::clampf(std::max(config.bloom, autoBloom) * in.loadFadeBody, 0.0f, 1.0f)
+            : 0.0f;
+        const float effGrain = detail::clampf(std::max(config.filmGrain, autoGrain) * in.loadFadeSmooth, 0.0f, 0.50f);
+        const float effTemp = detail::clampf(config.colorTemp, -1.0f, 1.0f);
+        const float effTint = detail::clampf(config.colorTint, -1.0f, 1.0f);
+        const bool hasCat02 = (std::fabs(effTemp) > 1e-4f || std::fabs(effTint) > 1e-4f);
+
+        if (effBloom > 1e-4f || effGrain > 1e-4f || hasCat02) {
+            TextureId tightBloomTex = currentTex;
+            TextureId wideBloomTex = currentTex;
+            if (effBloom > 1e-4f) {
+                RenderState st{};
+                TextureBindings tb{};
+                UniformBlock ub{};
+                // 8a. Soft-knee bright extract at 1/4 res (rtBg_[0])
+                tb.bind(0, currentTex);
+                ub.push(0.62f, 0.28f, 1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height));
+                device_.beginPass(rtBg_[0], bgW_, bgH_, false);
+                device_.drawFullScreenQuad(ShaderId::kPostBloomExtract, st, tb, ub);
+                device_.endPass();
+
+                // 8b. Tight glow separable H+V blur at 1/4 res (rtBg_[0] -> rtBg_[1] -> rtBg_[0])
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtBg_[0]));
+                ub.push(1.45f / static_cast<float>(bgW_), 0.0f, 0.0f, 0.0f);
+                device_.beginPass(rtBg_[1], bgW_, bgH_, false);
+                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                device_.endPass();
+
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtBg_[1]));
+                ub.push(0.0f, 1.45f / static_cast<float>(bgH_), 0.0f, 0.0f);
+                device_.beginPass(rtBg_[0], bgW_, bgH_, false);
+                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                device_.endPass();
+
+                // 8c. Wide halo pyramid level at 1/9 res (rtBg_[0] -> rtMacro_[0] -> H+V blur)
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtBg_[0]));
+                ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_), 0.0f, 0.0f);
+                device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
+                device_.drawFullScreenQuad(ShaderId::kDownsample, st, tb, ub);
+                device_.endPass();
+
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtMacro_[0]));
+                ub.push(1.85f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
+                device_.beginPass(rtMacro_[1], macroW_, macroH_, false);
+                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                device_.endPass();
+
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtMacro_[1]));
+                ub.push(0.0f, 1.85f / static_cast<float>(macroH_), 0.0f, 0.0f);
+                device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
+                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                device_.endPass();
+
+                tightBloomTex = device_.textureOf(rtBg_[0]);
+                wideBloomTex = device_.textureOf(rtMacro_[0]);
+            }
+
+            float cat02[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+            if (hasCat02) {
+                math::BeautyQualityTuning::cat02WhiteBalanceMatrix(effTemp, effTint, cat02);
+            }
+            // Ping-pong into a full-res RGBA8 target guaranteed != currentTex (strictly zero feedback loop)
+            const RenderTargetId postDstRt = (currentTex == device_.textureOf(rtBgOut_)) ? rtComposite_ : rtBgOut_;
+            const float grainPhase = std::fmod(static_cast<float>(std::max<int64_t>(0, in.nowMs) % 60000LL) * 0.018f, 1.0f);
+            RenderState st{};
+            TextureBindings tb{};
+            UniformBlock ub{};
+            tb.bind(0, currentTex);
+            tb.bind(1, tightBloomTex);
+            tb.bind(2, wideBloomTex);
+            ub.push(effBloom, effGrain, grainPhase, hasCat02 ? 1.0f : 0.0f);
+            ub.push(cat02[0], cat02[1], cat02[2], static_cast<float>(in.width) * 0.5f);
+            ub.push(cat02[3], cat02[4], cat02[5], static_cast<float>(in.height) * 0.5f);
+            ub.push(cat02[6], cat02[7], cat02[8], 0.0f);
+            device_.beginPass(postDstRt, in.width, in.height, false);
+            device_.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, tb, ub);
+            device_.endPass();
+            currentTex = device_.textureOf(postDstRt);
+            lastActivePassesMask_ |= kPassAtmosphere;
+        }
     }
 
     return currentTex;

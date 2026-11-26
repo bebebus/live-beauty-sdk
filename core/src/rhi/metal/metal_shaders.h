@@ -505,21 +505,41 @@ fragment float4 fs_makeup_lip(MakeupOut in [[stage_in]],
     float4 uLipColor = uni.u[0];
     float4 uLipStyle = uni.u[1];
     float4 uAmbient = uni.u[2];
+    float4 uMouthEll = uni.u[3];
+    float4 uMouthMeta = uni.u[4];
     float feather = tex1.sample(kLinearClamp, in.makeupUv).b;
     if (feather * uLipColor.a <= 0.001f) discard_fragment();
     float2 uv = clamp(in.screenUv, 0.0f, 1.0f);
     float vis = clamp(tex2.sample(kLinearClamp, toMtlUv(uv)).a * 1.04f - 0.02f, 0.0f, 1.0f);
     if (vis <= 0.002f) discard_fragment();
+    // v3.8.0 Open-mouth geometric inner-mouth cavity cutout (exact screen-space inner lip ellipse)
+    float mouthOpen = clamp(uMouthMeta.x, 0.0f, 1.0f);
+    float openCavityGate = 1.0f;
+    if (mouthOpen > 0.001f && uMouthEll.z > 0.0005f && uMouthEll.w > 0.0005f) {
+        float asp = max(uMouthMeta.y, 0.1f);
+        float2 md = float2(uv.x - uMouthEll.x, (uv.y - uMouthEll.y) / asp);
+        float2 ax = uMouthMeta.zw;
+        float axLen = length(ax);
+        float2 uAxis = (axLen > 0.0001f) ? (ax / axLen) : float2(1.0f, 0.0f);
+        float2 vAxis = float2(-uAxis.y, uAxis.x);
+        float a = dot(md, uAxis) / max(uMouthEll.z, 0.0005f);
+        float b = dot(md, vAxis) / max(uMouthEll.w, 0.0005f);
+        float e2 = a * a + b * b;
+        openCavityGate = 1.0f - mouthOpen * (1.0f - smoothstep(0.68f, 1.18f, e2));
+        if (openCavityGate <= 0.002f) discard_fragment();
+    }
     float3 base = tex0.sample(kLinearClamp, toMtlUv(uv)).rgb;
     float baseY = luma601(base);
     float darkGate = smoothstep(0.125f, 0.20f, baseY);
     float redExcess = base.r - max(base.g, base.b);
-    float teethLike = smoothstep(0.42f, 0.66f, baseY) * (1.0f - smoothstep(0.025f, 0.095f, redExcess));
+    float teethRedLo = mix(0.025f, 0.055f, mouthOpen);
+    float teethRedHi = mix(0.095f, 0.130f, mouthOpen);
+    float teethLike = smoothstep(0.42f, 0.66f, baseY) * (1.0f - smoothstep(teethRedLo, teethRedHi, redExcess));
     float teethGate = 1.0f - teethLike;
     float lipHue = (base.r - base.g) - 0.75f * max(base.g - base.b, 0.0f);
     float rimZone = 1.0f - smoothstep(0.35f, 0.92f, feather);
     float skinRimGate = mix(1.0f, smoothstep(0.045f, 0.155f, lipHue), rimZone * 0.92f);
-    float effFeather = feather * darkGate * teethGate * skinRimGate * vis;
+    float effFeather = feather * darkGate * teethGate * skinRimGate * vis * openCavityGate;
     float alpha = clamp(effFeather * uLipColor.a, 0.0f, 0.90f);
     if (alpha <= 0.001f) discard_fragment();
     float smoothY = baseY;
@@ -1470,6 +1490,56 @@ fragment float4 fs_particle_burst(RetouchOut in [[stage_in]]) {
     float core = smoothstep(-0.02f, -0.32f, sd) * 0.55f;
     float3 outRgb = clamp(mix(in.attr.rgb, float3(1.0f, 0.99f, 0.96f), core), 0.0f, 1.0f);
     return float4(outRgb, finalA);
+}
+
+fragment float4 fs_post_bloom_extract(QuadOut in [[stage_in]],
+                                      texture2d<float> tex0 [[texture(0)]],
+                                      constant Uniforms& uni [[buffer(1)]]) {
+    float2 d = uni.u[0].zw * 0.75f;
+    float3 c0 = tex0.sample(kLinearClamp, toMtlUv(in.uv)).rgb;
+    float3 c1 = tex0.sample(kLinearClamp, toMtlUv(clamp(in.uv + float2(-d.x, -d.y), 0.0f, 1.0f))).rgb;
+    float3 c2 = tex0.sample(kLinearClamp, toMtlUv(clamp(in.uv + float2( d.x, -d.y), 0.0f, 1.0f))).rgb;
+    float3 c3 = tex0.sample(kLinearClamp, toMtlUv(clamp(in.uv + float2(-d.x,  d.y), 0.0f, 1.0f))).rgb;
+    float3 c4 = tex0.sample(kLinearClamp, toMtlUv(clamp(in.uv + float2( d.x,  d.y), 0.0f, 1.0f))).rgb;
+    float3 c = c0 * 0.36f + (c1 + c2 + c3 + c4) * 0.16f;
+    float br = max(max(c.r, c.g), c.b);
+    float thresh = max(uni.u[0].x, 0.05f);
+    float knee = max(uni.u[0].y, 0.01f);
+    float rq = clamp(br - thresh + knee, 0.0f, 2.0f * knee);
+    rq = (rq * rq) / (4.0f * knee);
+    float w = max(rq, br - thresh) / max(br, 0.0001f);
+    return float4(clamp(c * w, 0.0f, 1.0f), 1.0f);
+}
+
+fragment float4 fs_post_atmosphere(QuadOut in [[stage_in]],
+                                   texture2d<float> tex0 [[texture(0)]],
+                                   texture2d<float> tex1 [[texture(1)]],
+                                   texture2d<float> tex2 [[texture(2)]],
+                                   constant Uniforms& uni [[buffer(1)]]) {
+    float4 src = tex0.sample(kLinearClamp, toMtlUv(in.uv));
+    float3 c = src.rgb;
+    if (uni.u[0].w > 0.5f) {
+        c = clamp(float3(dot(c, uni.u[1].xyz), dot(c, uni.u[2].xyz), dot(c, uni.u[3].xyz)), 0.0f, 1.0f);
+    }
+    if (uni.u[0].x > 0.0001f) {
+        float3 bTight = tex1.sample(kLinearClamp, toMtlUv(in.uv)).rgb;
+        float3 bWide  = tex2.sample(kLinearClamp, toMtlUv(in.uv)).rgb;
+        float3 glow   = (bTight * 0.62f + bWide * 0.38f) * (uni.u[0].x * 0.72f);
+        float3 bloomed = clamp(c + glow * (1.0f - c * 0.42f), 0.0f, 1.0f);
+        c = max(c, bloomed);
+    }
+    if (uni.u[0].y > 0.0001f) {
+        float2 grid = max(float2(uni.u[1].w, uni.u[2].w), float2(64.0f));
+        float2 p = fmod(floor(in.uv * grid) + float2(uni.u[0].z * 37.0f, uni.u[0].z * 73.0f), 256.0f);
+        float h = fract(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f);
+        float s = clamp(uni.u[0].y, 0.0f, 0.50f);
+        float grainExp = mix(1.0f, 0.72f + 0.28f * h, s);
+        float3 lifted = pow(max(c, float3(0.0001f)), float3(grainExp));
+        float y = luma601(c);
+        float midW = smoothstep(0.04f, 0.20f, y) * (1.0f - 0.55f * smoothstep(0.82f, 0.98f, y));
+        c = max(c, mix(c, lifted, s * 0.65f * midW));
+    }
+    return float4(clamp(c, 0.0f, 1.0f), src.a);
 }
 )MSL";
 

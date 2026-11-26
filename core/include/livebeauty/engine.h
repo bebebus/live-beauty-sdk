@@ -246,6 +246,8 @@ private:
     rhi::TextureId autoOccTex_ = rhi::kInvalidTexture;
     int autoOccTexSize_ = 0;
     int64_t autoOccTsMs_ = kTimeInvalid;
+    float stagedLowerFaceOcc_ = 0.0f;
+    float lowerFaceOcc_ = 0.0f;
     std::atomic<bool> cameraShaking_{false};
     rhi::TextureId autoParseHairTex_ = rhi::kInvalidTexture;
     bool autoParseHairValid_ = false;

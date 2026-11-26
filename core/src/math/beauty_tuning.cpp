@@ -65,6 +65,135 @@ float BeautyQualityTuning::mouthOpenGate(float openRatio) {
     return detail::smoothstep(0.055f, 0.135f, openRatio);
 }
 
+float BeautyQualityTuning::lowerFaceMakeupKeep(float lowerFaceOccRatio) {
+    if (!std::isfinite(lowerFaceOccRatio)) return 1.0f;
+    // Smoothly mute lower-face makeup (lipstick/blush/contour/highlight/teeth) when a hand, cup, or mic
+    // covers >= 45%..78% of the lower/mid face, while leaving eye/brow makeup unaffected.
+    return 1.0f - detail::smoothstep(0.45f, 0.78f, lowerFaceOccRatio);
+}
+
+void BeautyQualityTuning::cat02WhiteBalanceMatrix(float colorTemp, float colorTint, float outRowMajor3x3[9]) {
+    if (!outRowMajor3x3) return;
+    const float t = std::isfinite(colorTemp) ? detail::clampf(colorTemp, -1.0f, 1.0f) : 0.0f;
+    const float g = std::isfinite(colorTint) ? detail::clampf(colorTint, -1.0f, 1.0f) : 0.0f;
+    if (std::fabs(t) <= 1e-5f && std::fabs(g) <= 1e-5f) {
+        outRowMajor3x3[0] = 1.0f; outRowMajor3x3[1] = 0.0f; outRowMajor3x3[2] = 0.0f;
+        outRowMajor3x3[3] = 0.0f; outRowMajor3x3[4] = 1.0f; outRowMajor3x3[5] = 0.0f;
+        outRowMajor3x3[6] = 0.0f; outRowMajor3x3[7] = 0.0f; outRowMajor3x3[8] = 1.0f;
+        return;
+    }
+
+    // Textbook CIE 1931 sRGB (D65) <-> XYZ and CIECAM02 CAT02 von Kries chromatic adaptation
+    static constexpr double kSrgbToXyz[9] = {
+        0.4124564, 0.3575761, 0.1804375,
+        0.2126729, 0.7151522, 0.0721750,
+        0.0193339, 0.1191920, 0.9503041,
+    };
+    static constexpr double kXyzToSrgb[9] = {
+         3.2404542, -1.5371385, -0.4985314,
+        -0.9692660,  1.8760108,  0.0415560,
+         0.0556434, -0.2040259,  1.0572252,
+    };
+    static constexpr double kCat02[9] = {
+         0.7328,  0.4296, -0.1624,
+        -0.7036,  1.6975,  0.0061,
+         0.0030,  0.0136,  0.9834,
+    };
+    static constexpr double kCat02Inv[9] = {
+         1.0961238208, -0.2788690002,  0.1827451794,
+         0.4543690419,  0.4735331543,  0.0720978038,
+        -0.0096276087, -0.0056980312,  1.0153256399,
+    };
+
+    // Shift source illuminant along the CIE daylight/Planckian locus around D65 (0.31271, 0.32902).
+    // Positive colorTemp -> cooler assumed source white -> warming adaptation; negative -> cooling adaptation.
+    const double x0 = 0.31271;
+    const double x = x0 - static_cast<double>(t) * (t < 0.0f ? 0.065 : 0.045);
+    const double y = std::clamp(2.87 * x - 3.0 * x * x - 0.2750951 + static_cast<double>(g) * 0.045, 0.20, 0.48);
+    const double srcX = x / y;
+    const double srcY = 1.0;
+    const double srcZ = (1.0 - x - y) / y;
+    const double d65[3] = {0.95047, 1.0, 1.08883};
+    const double src[3] = {srcX, srcY, srcZ};
+
+    double lmsD65[3]{}, lmsSrc[3]{};
+    for (int r = 0; r < 3; ++r) {
+        lmsD65[r] = kCat02[r * 3 + 0] * d65[0] + kCat02[r * 3 + 1] * d65[1] + kCat02[r * 3 + 2] * d65[2];
+        lmsSrc[r] = kCat02[r * 3 + 0] * src[0] + kCat02[r * 3 + 1] * src[1] + kCat02[r * 3 + 2] * src[2];
+    }
+    const double scale[3] = {
+        lmsD65[0] / std::max(lmsSrc[0], 0.05),
+        lmsD65[1] / std::max(lmsSrc[1], 0.05),
+        lmsD65[2] / std::max(lmsSrc[2], 0.05),
+    };
+
+    auto mul3 = [](const double a[9], const double b[9], double out[9]) {
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                out[r * 3 + c] = a[r * 3 + 0] * b[0 * 3 + c] +
+                                 a[r * 3 + 1] * b[1 * 3 + c] +
+                                 a[r * 3 + 2] * b[2 * 3 + c];
+            }
+        }
+    };
+
+    double scaledCat[9]{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            scaledCat[r * 3 + c] = scale[r] * kCat02[r * 3 + c];
+        }
+    }
+    double m1[9]{}, m2[9]{}, m3[9]{};
+    mul3(kCat02Inv, scaledCat, m1);
+    mul3(m1, kSrgbToXyz, m2);
+    mul3(kXyzToSrgb, m2, m3);
+    for (int i = 0; i < 9; ++i) {
+        outRowMajor3x3[i] = static_cast<float>(m3[i]);
+    }
+}
+
+void BeautyQualityTuning::resolveStyleAtmosphere(
+    const std::string& lutUrl, float lutIntensity,
+    int filterStyleId, float filterIntensity,
+    float& outBloom, float& outGrain) {
+    outBloom = 0.0f;
+    outGrain = 0.0f;
+    const float ls = std::isfinite(lutIntensity) ? detail::clampf(lutIntensity, 0.0f, 1.0f) : 0.0f;
+    if (!lutUrl.empty() && ls > 1e-4f) {
+        if (lutUrl.find("night_vibe") != std::string::npos) {
+            outBloom = 0.30f * ls;
+            outGrain = 0.14f * ls;
+        } else if (lutUrl.find("soft_film") != std::string::npos) {
+            outBloom = 0.24f * ls;
+            outGrain = 0.10f * ls;
+        } else if (lutUrl.find("champagne_glam") != std::string::npos ||
+                   lutUrl.find("sweet_berry") != std::string::npos) {
+            outBloom = 0.26f * ls;
+            outGrain = 0.06f * ls;
+        } else if (lutUrl.find("pure_pink") != std::string::npos ||
+                   lutUrl.find("korean_glow") != std::string::npos ||
+                   lutUrl.find("peach_milk") != std::string::npos ||
+                   lutUrl.find("japanese_airy") != std::string::npos) {
+            outBloom = 0.20f * ls;
+            outGrain = 0.0f;
+        } else if (lutUrl.find("clear_white") != std::string::npos) {
+            outBloom = 0.12f * ls;
+            outGrain = 0.0f;
+        }
+        return;
+    }
+    const float fs = std::isfinite(filterIntensity) ? detail::clampf(filterIntensity, 0.0f, 1.0f) : 0.0f;
+    if (fs > 1e-4f) {
+        if (filterStyleId == 4) {  // kSepia fallback
+            outBloom = 0.18f * fs;
+            outGrain = 0.08f * fs;
+        } else if (filterStyleId == 1 || filterStyleId == 5) {  // kWarm / kRose fallback
+            outBloom = 0.14f * fs;
+            outGrain = 0.0f;
+        }
+    }
+}
+
 void GuidedSpread::reset() {
     value_ = kDefault;
     smoothed_ = kDefault;

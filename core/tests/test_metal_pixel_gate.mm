@@ -2483,6 +2483,159 @@ void testV370MetalCommercialBeautyPixelInvariants(MetalDevice& dev) {
     }
 }
 
+void testV380MetalAtmosphereBloomGrainCat02AndOpenMouthLipProbes(MetalDevice& dev) {
+    // 1. Soft-knee bright extract: dim shadows -> exact 0/255, bright highlights -> clean positive glow
+    {
+        constexpr int kSz = 16;
+        std::vector<uint8_t> img(kSz * kSz * 4, 255);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const int i = (y * kSz + x) * 4;
+                if (x < 8) { img[i] = 40; img[i + 1] = 38; img[i + 2] = 36; }
+                else       { img[i] = 245; img[i + 1] = 240; img[i + 2] = 232; }
+            }
+        }
+        const TextureId srcTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, img.data());
+        const RenderTargetId rtExt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        RenderState st{};
+        TextureBindings tb{}; tb.bind(0, srcTex);
+        UniformBlock ub{}; ub.push(0.62f, 0.28f, 1.0f / kSz, 1.0f / kSz);
+        dev.beginPass(rtExt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kPostBloomExtract, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> extOut(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rtExt), extOut.data(), kSz, kSz));
+        const int dimIdx = (8 * kSz + 2) * 4;
+        const int hiIdx = (8 * kSz + 13) * 4;
+        EXPECT_TRUE(extOut[dimIdx] == 0 && extOut[dimIdx + 1] == 0 && extOut[dimIdx + 2] == 0);
+        EXPECT_TRUE(extOut[hiIdx] >= 70 && extOut[hiIdx + 1] >= 65);
+
+        // Composite bloom onto mid-tone base: strictly non-darkening (out >= base) and lifts highlights
+        const RenderTargetId rtOut = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        const TextureId midTex = makeSolidTex(dev, kSz, kSz, 120, 115, 110, 255);
+        TextureBindings ctb{};
+        ctb.bind(0, midTex);
+        ctb.bind(1, dev.textureOf(rtExt));
+        ctb.bind(2, dev.textureOf(rtExt));
+        UniformBlock cub{};
+        cub.push(0.45f, 0.0f, 0.0f, 0.0f);  // bloom=0.45, grain=0, cat02=0
+        cub.push(1.0f, 0.0f, 0.0f, 64.0f);
+        cub.push(0.0f, 1.0f, 0.0f, 64.0f);
+        cub.push(0.0f, 0.0f, 1.0f, 0.0f);
+        dev.beginPass(rtOut, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, ctb, cub);
+        dev.endPass();
+        std::vector<uint8_t> compOut(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rtOut), compOut.data(), kSz, kSz));
+        EXPECT_TRUE(compOut[dimIdx] == 120 && compOut[dimIdx + 1] == 115 && compOut[dimIdx + 2] == 110);
+        EXPECT_TRUE(compOut[hiIdx] >= 120 + 12 && compOut[hiIdx + 1] >= 115 + 10);
+
+        dev.destroyRenderTarget(rtOut);
+        dev.destroyTexture(midTex);
+        dev.destroyRenderTarget(rtExt);
+        dev.destroyTexture(srcTex);
+    }
+
+    // 2. Non-darkening organic filmic grain: never darkens any mid-tone pixel, varies spatially & across phases, keeps blacks crisp
+    {
+        constexpr int kSz = 32;
+        const TextureId midTex = makeSolidTex(dev, kSz, kSz, 128, 128, 128, 255);
+        const TextureId blkTex = makeSolidTex(dev, kSz, kSz, 4, 4, 4, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        auto runGrain = [&](TextureId tex, float phase, std::vector<uint8_t>& out) {
+            RenderState st{};
+            TextureBindings tb{}; tb.bind(0, tex); tb.bind(1, tex); tb.bind(2, tex);
+            UniformBlock ub{};
+            ub.push(0.0f, 0.30f, phase, 0.0f);
+            ub.push(1.0f, 0.0f, 0.0f, 64.0f);
+            ub.push(0.0f, 1.0f, 0.0f, 64.0f);
+            ub.push(0.0f, 0.0f, 1.0f, 0.0f);
+            dev.beginPass(rt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, tb, ub);
+            dev.endPass();
+            out.assign(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        };
+        std::vector<uint8_t> g0, g1, gBlk;
+        runGrain(midTex, 0.12f, g0);
+        runGrain(midTex, 0.67f, g1);
+        runGrain(blkTex, 0.12f, gBlk);
+
+        int darkened = 0;
+        int minV = 255, maxV = 0;
+        int phaseDiffs = 0;
+        for (int i = 0; i < kSz * kSz; ++i) {
+            const int r0 = g0[i * 4];
+            if (r0 < 128 || g0[i * 4 + 1] < 128 || g0[i * 4 + 2] < 128) ++darkened;
+            minV = std::min(minV, r0);
+            maxV = std::max(maxV, r0);
+            if (r0 != int(g1[i * 4])) ++phaseDiffs;
+        }
+        EXPECT_TRUE(darkened == 0);
+        EXPECT_TRUE(maxV > minV);           // genuine spatial grain texture
+        EXPECT_TRUE(phaseDiffs > 100);      // genuine temporal variation (not frozen)
+        EXPECT_TRUE(gBlk[0] <= 5 && gBlk[1] <= 5 && gBlk[2] <= 5);  // pitch-black stays crisp
+
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(blkTex);
+        dev.destroyTexture(midTex);
+    }
+
+    // 3. CIE D65 CAT02 White Balance in kPostAtmosphere: exact identity at (0,0), warm(+0.5) & cool(-0.5) verified
+    {
+        constexpr int kSz = 8;
+        const TextureId grayTex = makeSolidTex(dev, kSz, kSz, 140, 140, 140, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        auto evalCat02 = [&](float temp, float tint) -> Rgba {
+            float m[9]{};
+            BeautyQualityTuning::cat02WhiteBalanceMatrix(temp, tint, m);
+            RenderState st{};
+            TextureBindings tb{}; tb.bind(0, grayTex); tb.bind(1, grayTex); tb.bind(2, grayTex);
+            UniformBlock ub{};
+            ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+            ub.push(m[0], m[1], m[2], 64.0f);
+            ub.push(m[3], m[4], m[5], 64.0f);
+            ub.push(m[6], m[7], m[8], 0.0f);
+            dev.beginPass(rt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, tb, ub);
+            dev.endPass();
+            std::vector<uint8_t> out(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+            return {out[0], out[1], out[2], out[3]};
+        };
+        const Rgba idOut = evalCat02(0.0f, 0.0f);
+        const Rgba warmOut = evalCat02(0.50f, 0.0f);
+        const Rgba coolOut = evalCat02(-0.50f, 0.0f);
+        EXPECT_TRUE(idOut.r == 140 && idOut.g == 140 && idOut.b == 140);
+        EXPECT_TRUE(int(warmOut.r) > int(warmOut.b) + 12);
+        EXPECT_TRUE(int(coolOut.b) > int(coolOut.r) + 12);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(grayTex);
+    }
+
+    // 4. Open-mouth geometric inner-mouth cavity cutout in kMakeupLip:
+    //    Center pixel inside open inner-mouth ellipse (0.5, 0.5) stays exact 0/255 even on pink tongue (190, 115, 115),
+    //    while closed mouth (uU4.x = 0) or outer lip vermilion gets stained normally!
+    {
+        const Vec3 cherry = FaceMakeupUv::lipstickRgb(LipstickColor::kCherryRed);
+        UniformBlock ubOpen{};
+        ubOpen.push(cherry.x, cherry.y, cherry.z, 0.80f);
+        ubOpen.push(0.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);
+        ubOpen.push(1.0f, 1.0f, 1.0f, 0.0f);
+        ubOpen.push(0.50f, 0.50f, 0.25f, 0.20f);  // inner-mouth ellipse covering screen center (0.5, 0.5)
+        ubOpen.push(1.0f, 1.0f, 1.0f, 0.0f);      // mouthOpen = 1.0, aspect = 1.0, axis = (1, 0)
+        const Rgba cavityOut = evalMakeupShader(dev, ShaderId::kMakeupLip, {190, 115, 115, 255}, {0, 0, 255, 255}, ubOpen, 0.5f, 0.70f);
+        EXPECT_TRUE(cavityOut.r == 190 && cavityOut.g == 115 && cavityOut.b == 115);
+
+        // Shift ellipse far away (outer vermilion pixel outside open mouth cavity) -> cleanly stained!
+        UniformBlock ubOuter = ubOpen;
+        ubOuter.v[3] = {0.10f, 0.10f, 0.10f, 0.08f};
+        const Rgba outerOut = evalMakeupShader(dev, ShaderId::kMakeupLip, {165, 112, 105, 255}, {0, 0, 255, 255}, ubOuter, 0.5f, 0.72f);
+        EXPECT_TRUE(int(outerOut.r) > int(outerOut.g) + 60);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2512,6 +2665,7 @@ int main() {
         testV3614TikTokExposureCoupledNonDarkeningLips(dev);
         testV3615MetalDouyinAmbientSceneBrightnessLift(dev);
         testV370MetalCommercialBeautyPixelInvariants(dev);
+        testV380MetalAtmosphereBloomGrainCat02AndOpenMouthLipProbes(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

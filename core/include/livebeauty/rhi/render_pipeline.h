@@ -44,6 +44,7 @@ enum PassBit : uint32_t {
     kPassHairDye     = 1u << 18,  // v3.4: real-time strand-preserving hair dyeing & crown Angel-Ring sheen
     kPassChromaKey   = 1u << 19,  // v3.6: studio YCbCr green/blue screen chroma key + edge despill
     kPassParticles   = 1u << 20,  // v3.6: batched 2D SDF interactive gesture particle bursts
+    kPassAtmosphere  = 1u << 21,  // v3.8: soft-knee pyramid bloom, non-darkening filmic grain & CIE CAT02 WB
 };
 
 /** Static makeup atlases, virtual background & 3D LUT texture handles uploaded once by platform host. */
@@ -78,6 +79,7 @@ struct FrameInputs {
     float steadyFace = 1.0f;
     float steadyEye = 1.0f;
     float eyeMakeupKeep = 1.0f;
+    float lowerMakeupKeep = 1.0f;  // v3.8: smooth occlusion mute for lower-face makeup (keeps eye makeup active)
     float denoiseKeep = 1.0f;
 
     // Optional body geometry (7-D state) + v3.6 hand-waist anti-distortion shield (bottom-up UV, <0 when inactive)
@@ -193,7 +195,7 @@ private:
         const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,
         const float* landmarks478x2, const float* meta15,
         bool hasIris, bool frontFaceCw, float presence, float steadyFace, float steadyEye, float eyeMakeupKeep,
-        bool copyBaseFirst = true);
+        float lowerMakeupKeep = 1.0f, bool copyBaseFirst = true);
     void renderStickers(RenderTargetId targetRt, TextureId baseTex, bool copyBaseFirst,
                         int width, int height, const FrameInputs& in,
                         const float* landmarks478x2, const float* meta15, float presence);

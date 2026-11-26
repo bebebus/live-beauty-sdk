@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.8.0] - 2026-11-27
+
+### Added & Improved
+- **Cinematic Atmosphere Post-Processing (`BeautyQualityTuning`, `RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Added Stage 8 zero-extra-FBO post-processing (`ShaderId::kPostBloomExtract` + `ShaderId::kPostAtmosphere`, reusing existing 1/4-res `rtBg_` and 1/9-res `rtMacro_` scratch buffers):
+    - **Multi-Scale Soft-Knee Pyramid Bloom**: Anti-flicker 5-tap bright extraction (`thresh=0.62, knee=0.28`) with 1/4-res tight glow + 1/9-res wide halo composited via highlight-safe, strictly non-darkening addition (`out >= src`); automatically skipped on `kLite` tier or when inactive (`0` GPU cost).
+    - **Non-Darkening Organic Filmic Grain**: Bounded modular phase hash avoiding `mediump` float16 time-freeze, strictly non-darkening lift curve (`exponent ∈ [0.72, 1.0]`, shadow/highlight tapered so blacks stay crisp).
+    - **Exact CIE D65 CAT02 Chromatic Adaptation White Balance**: `BeautyQualityTuning::cat02WhiteBalanceMatrix(colorTemp, colorTint)` computes exact linear von Kries CAT02 adaptation in double precision (exact identity at `0, 0`), applied in 3 dot products per pixel.
+  - Added `BeautyConfig` fields (`bloom`, `filmGrain`, `colorTemp`, `colorTint`, supported in `.lbfx` bundles) plus automatic style-coupled atmosphere synergy (`BeautyQualityTuning::resolveStyleAtmosphere`) for cinematic/glam/soft presets (`night_vibe`, `soft_film`, `champagne_glam`, `pure_pink`, `peach_milk`, `korean_glow`, `clear_white`, while keeping `natural` crisp at `0/0`).
+- **Open-Mouth Geometric Inner-Lip Cutout for Lipstick (`RenderPipeline`, `kMakeupLip`, `fs_makeup_lip`)**:
+  - Passed live post-warp inner-mouth opening ellipse (`lm[13]/14/78/308`) and `mouthOpenGate` into `kMakeupLip` (`uU3`/`uU4`), cleanly cutting out the open oral cavity and exposed teeth during smiling/speaking while keeping seamless full-lip coverage when closed.
+- **Lower-Face Heavy Occlusion Makeup Auto-Mute (`FaceOcclusionSolver`, `FaceParsingMapper`, `LiveBeautyEngine`, `RenderPipeline`)**:
+  - Computed smoothed lower/mid-face occlusion ratio (`lowerFaceOcclusion()` / `estimateLowerFaceOcclusion()`) and mapped it via `BeautyQualityTuning::lowerFaceMakeupKeep` (`smoothstep(0.45, 0.78)`) to smoothly mute lower-face makeup (`lipstick`, `blush`, `contour`, `highlight`, `teethWhiten`) when hands, cups, or microphones cover the lower face — while keeping `eyebrow`, `eyeshadow`, `eyeliner`, `aegyoSal`, and `contactLens` 100% active.
+
 ## [3.7.0] - 2026-11-27
 
 ### Added & Improved
