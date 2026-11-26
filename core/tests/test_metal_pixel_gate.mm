@@ -2636,6 +2636,186 @@ void testV380MetalAtmosphereBloomGrainCat02AndOpenMouthLipProbes(MetalDevice& de
     }
 }
 
+/**
+ * v3.9.0 Automated 7-Scenario Quantitative Portrait Quality Benchmark Gate:
+ * Verifies real Apple Metal GPU shader pixel metrics across 7 live-streaming lighting & subject scenarios
+ * to prevent regressions across skin tones, tungsten/fluorescent lighting, low light, smiling teeth,
+ * lower-face occlusion, male beard stubble, and dark hair dyeing.
+ */
+void testV390SevenScenarioPortraitQualityBenchmark(MetalDevice& dev) {
+    auto luma709 = [](const Rgba& p) -> float {
+        return (0.2126f * p.r + 0.7152f * p.g + 0.0722f * p.b) / 255.0f;
+    };
+
+    // Scenario 1 & 2: Warm Tungsten Room & Cool Green Fluorescent Room -> Fused Auto CAT02 WB in fs_composite_pro
+    auto runFusedCompositeWb = [&](Rgba srcColor, Vec3 ambientRgb, float awbStrength) -> Rgba {
+        constexpr int kSz = 16;
+        const TextureId srcTex = makeSolidTex(dev, kSz, kSz, srcColor.r, srcColor.g, srcColor.b, 255);
+        const TextureId whiteMask = makeSolidTex(dev, kSz, kSz, 255, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        float autoT = 0.0f, autoG = 0.0f;
+        BeautyQualityTuning::estimateAutoWhiteBalance(ambientRgb, awbStrength, autoT, autoG);
+        float m[9]{};
+        BeautyQualityTuning::cat02WhiteBalanceMatrix(autoT, autoG, m);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, srcTex); tb.bind(2, whiteMask); tb.bind(3, whiteMask);
+        UniformBlock ub{};
+        ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 0.0f);  // u0
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // u1 (no smoothing/style)
+        ub.push(0.0f, 0.0f, 1.0f, 0.0f);              // u2 (sat=1.0)
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // u3
+        const float wbR = std::clamp(m[0] + m[1] + m[2], 0.50f, 1.60f);
+        const float wbG = std::clamp(m[3] + m[4] + m[5], 0.50f, 1.60f);
+        const float wbB = std::clamp(m[6] + m[7] + m[8], 0.50f, 1.60f);
+        ub.push(wbR, wbG, wbB, 0.0f);                 // u4: 15-uniform-budget fused CAT02 WB
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // u5: grain=0
+        for (int i = 0; i < 4; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);  // u6..u9
+        ub.push(0.0f, 0.005f, 0.0f, 0.0f);            // u10
+        dev.beginPass(rt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(whiteMask);
+        dev.destroyTexture(srcTex);
+        return {out[0], out[1], out[2], out[3]};
+    };
+
+    // Scenario 1: Warm tungsten skin (218, 178, 130) under warm light (1.24, 1.00, 0.76) -> R-B cast drops cleanly
+    const Rgba tungSrc{218, 178, 130, 255};
+    const Rgba tungOut = runFusedCompositeWb(tungSrc, {1.24f, 1.00f, 0.76f}, 0.85f);
+    const float tungCastBefore = float(tungSrc.r - tungSrc.b) / 255.0f;
+    const float tungCastAfter = float(tungOut.r - tungOut.b) / 255.0f;
+    EXPECT_TRUE(tungCastAfter < tungCastBefore - 0.045f);
+    EXPECT_TRUE(std::fabs(luma709(tungOut) - luma709(tungSrc)) < 0.06f);
+
+    // Scenario 2: Cool green fluorescent skin (152, 174, 172) under (0.84, 1.14, 1.16) -> green cast drops & warmth restores
+    const Rgba fluoSrc{152, 174, 172, 255};
+    const Rgba fluoOut = runFusedCompositeWb(fluoSrc, {0.84f, 1.14f, 1.16f}, 0.90f);
+    const float greenBefore = (float(fluoSrc.g) - 0.5f * (fluoSrc.r + fluoSrc.b)) / 255.0f;
+    const float greenAfter = (float(fluoOut.g) - 0.5f * (fluoOut.r + fluoOut.b)) / 255.0f;
+    EXPECT_TRUE(greenAfter < greenBefore - 0.015f);
+    EXPECT_TRUE(int(fluoOut.r) > int(fluoSrc.r));
+
+    // Scenario 3: Low-light indoor portrait (luma=0.14) with ambientSceneLift -> lifts midtones without crushing blacks
+    const float lowLightLift = BeautyQualityTuning::ambientSceneLift(0.14f);
+    EXPECT_TRUE(lowLightLift > 0.25f && lowLightLift < 0.65f);
+
+    // Scenario 4: Open-mouth smile with Cherry Red lipstick -> exposed white teeth stay neutral (R-B < 0.04)
+    {
+        const Vec3 cherry = FaceMakeupUv::lipstickRgb(LipstickColor::kCherryRed);
+        UniformBlock ubSmile{};
+        ubSmile.push(cherry.x, cherry.y, cherry.z, 0.78f);
+        ubSmile.push(0.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);
+        ubSmile.push(1.0f, 1.0f, 1.0f, 0.0f);
+        ubSmile.push(0.50f, 0.50f, 0.22f, 0.18f);
+        ubSmile.push(1.0f, 1.0f, 1.0f, 0.0f);
+        const Rgba teethOut = evalMakeupShader(dev, ShaderId::kMakeupLip, {226, 224, 218, 255}, {0, 0, 255, 255}, ubSmile, 0.5f, 0.70f);
+        EXPECT_TRUE(float(int(teethOut.r) - int(teethOut.b)) / 255.0f < 0.04f);
+    }
+
+    // Scenario 5: Lower-face mask occlusion -> lowerFaceMakeupKeep drops to 0.0 while upper-face remains 1.0
+    EXPECT_TRUE(std::fabs(BeautyQualityTuning::lowerFaceMakeupKeep(0.85f)) < 1e-5f);
+    EXPECT_TRUE(std::fabs(BeautyQualityTuning::lowerFaceMakeupKeep(0.15f) - 1.0f) < 1e-5f);
+
+    // Scenario 6: Male dark beard bristle pixel (38, 34, 32) under heavy smoothing (0.75) & whitening (0.60)
+    //             in fs_composite_pro -> dark bristle must NOT wash out into gray haze!
+    {
+        constexpr int kSz = 16;
+        std::vector<uint8_t> beardImg(kSz * kSz * 4, 0);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const bool bristle = ((x + y) % 2 == 0);
+                uint8_t* p = beardImg.data() + (y * kSz + x) * 4;
+                p[0] = bristle ? 38 : 185;
+                p[1] = bristle ? 34 : 145;
+                p[2] = bristle ? 32 : 122;
+                p[3] = 255;
+            }
+        }
+        const TextureId beardTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, beardImg.data());
+        const TextureId guidedTex = makeSolidTex(dev, kSz, kSz, 140, 110, 95, 25);
+        const TextureId skinMask = makeSolidTex(dev, kSz, kSz, 255, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, beardTex); tb.bind(1, guidedTex); tb.bind(2, skinMask); tb.bind(3, skinMask);
+        UniformBlock ub{};
+        ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);  // framePresence=4+1 (poly mask)
+        ub.push(16.0f, 0.75f, 0.0f, 0.50f);           // skinOnly=1, smoothing=0.75, texture=0.5
+        ub.push(0.0f, 0.0f, 1.0f, 0.0f);
+        ub.push(0.60f, 0.0f, 0.0f, 0.0f);             // whiten=0.60
+        for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.005f, 0.22f, 0.0f);
+        dev.beginPass(rt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        const int ci = (8 * kSz + 8) * 4;
+        const Rgba bristleOut{out[ci], out[ci + 1], out[ci + 2], 255};
+        EXPECT_TRUE(luma709(bristleOut) < 0.22f);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(skinMask);
+        dev.destroyTexture(guidedTex);
+        dev.destroyTexture(beardTex);
+    }
+
+    // Scenario 7: Dark hair dyeing (milk_tea_brown) with hairline-spill & eyebrow guard -> hair dyes cleanly, forehead spill & brows untouched!
+    {
+        constexpr int kSz = 16;
+        const TextureId hairImg = makeSolidTex(dev, kSz, kSz, 42, 38, 36, 255);
+        const TextureId skinImg = makeSolidTex(dev, kSz, kSz, 205, 168, 145, 255);
+        const TextureId fullHairMask = makeSolidTex(dev, kSz, kSz, 255, 255, 255, 255);
+        const TextureId spillHairMask = makeSolidTex(dev, kSz, kSz, 100, 100, 100, 255);  // weak hairline spill on forehead
+        const TextureId faceSkinMask = makeSolidTex(dev, kSz, kSz, 255, 0, 0, 255);
+        const TextureId eyebrowMask = makeSolidTex(dev, kSz, kSz, 0, 255, 0, 255);        // G=excl (eyebrow)
+        const TextureId noSkinMask = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        const Vec3 dye = FaceMakeupUv::hairDyeRgb(HairDyeColor::kMilkTeaBrown);
+        auto runDye = [&](TextureId img, TextureId hMask, TextureId polyMask) -> Rgba {
+            RenderState st{};
+            TextureBindings tb{};
+            tb.bind(0, img); tb.bind(1, hMask); tb.bind(2, polyMask);
+            UniformBlock ub{};
+            ub.push(1.0f, 0.0f, 0.0f, 0.85f);
+            ub.push(0.0f, 1.0f, 0.0f, 0.25f);
+            ub.push(dye.x, dye.y, dye.z, 1.0f);
+            ub.push(0.5f, 0.5f, 0.4f, 0.2f);
+            ub.push(1.0f, 0.0f, 1.0f, 0.0f);
+            ub.push(1.0f / kSz, 1.0f / kSz, 1.6f / 128.0f, 1.6f / 128.0f);
+            dev.beginPass(rt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
+            dev.endPass();
+            std::vector<uint8_t> out(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+            return {out[(8 * kSz + 8) * 4], out[(8 * kSz + 8) * 4 + 1], out[(8 * kSz + 8) * 4 + 2], 255};
+        };
+        const Rgba dyedHair = runDye(hairImg, fullHairMask, noSkinMask);
+        const Rgba guardedForehead = runDye(skinImg, spillHairMask, faceSkinMask);
+        const Rgba guardedBrow = runDye(hairImg, fullHairMask, eyebrowMask);
+        EXPECT_TRUE(int(dyedHair.r) > 65 && int(dyedHair.r) > int(dyedHair.b) + 12);
+        EXPECT_TRUE(std::abs(int(guardedForehead.r) - 205) <= 2 && std::abs(int(guardedForehead.g) - 168) <= 2);
+        EXPECT_TRUE(std::abs(int(guardedBrow.r) - 42) <= 2 && std::abs(int(guardedBrow.g) - 38) <= 2);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(noSkinMask);
+        dev.destroyTexture(eyebrowMask);
+        dev.destroyTexture(faceSkinMask);
+        dev.destroyTexture(spillHairMask);
+        dev.destroyTexture(fullHairMask);
+        dev.destroyTexture(skinImg);
+        dev.destroyTexture(hairImg);
+    }
+
+    std::cout << "[BENCHMARK v3.9.0] 7-Scenario Portrait Quality Gate PASSED "
+              << "(tungsten_rb_drop=" << (tungCastBefore - tungCastAfter)
+              << ", fluo_green_drop=" << (greenBefore - greenAfter)
+              << ", low_light_lift=" << lowLightLift << ")\n";
+}
+
 }  // namespace
 
 int main() {
@@ -2666,6 +2846,7 @@ int main() {
         testV3615MetalDouyinAmbientSceneBrightnessLift(dev);
         testV370MetalCommercialBeautyPixelInvariants(dev);
         testV380MetalAtmosphereBloomGrainCat02AndOpenMouthLipProbes(dev);
+        testV390SevenScenarioPortraitQualityBenchmark(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

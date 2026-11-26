@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.0] - 2026-11-27
+
+### Added
+- **Automatic Ambient Illuminant CAT02 White Balance (`autoWhiteBalance`)**: Computes damped CIE D65 CAT02 chromatic adaptation temperature/tint offsets directly from live face-skin ROI `ambientRgb` (`BeautyQualityTuning::estimateAutoWhiteBalance`), neutralizing indoor warm tungsten and greenish fluorescent casts with zero shift on neutral daylight.
+- **Direct 6-Class Planar Probability Ingestion (`submitMulticlass6Planar`)**: Adds `FaceParsingMapper::mapMulticlass6PlanarProbabilities` and `LiveBeautyEngine::submitMulticlass6Planar` for zero-interleave iOS/Android MediaPipe `ImageSegmenter` (`selfie_multiclass_256x256.tflite`) 6-plane confidence mask ingestion.
+- **Full JNI / Android / iOS Atmosphere & Auto-WB Config Bridging**: Extends `NativeBeautyBridge` flat scalar transport to 58 slots and updates `VideoEffectsConfig` & iOS `parseObjcConfig` to pass `bloom`, `filmGrain`, `colorTemp`, `colorTint`, and `autoWhiteBalance`.
+- **Dual-Face Independent Lower-Face Occlusion Gating**: Tracks secondary face bounds independently in `submitMultiFaceLandmarks` and drives per-face `secondaryFace.lowerMakeupKeep` so masking one co-host never mutes the other.
+- **7-Scenario Automated Portrait Quality Benchmark Gate**: Adds quantitative Apple Metal GPU regression benchmarks covering warm tungsten, cool green fluorescent, low-light ambient lift, open-mouth teeth-safe lipstick, lower-face mask occlusion, dark male beard preservation, and dark hair dyeing with skin guard.
+
+### Changed
+- **GPU Pass Fusion & Fast-Path Bloom**: Fuses CAT02 white balance and non-darkening filmic grain directly into Stage 6 `kCompositePro` when Bloom is inactive and no post-composite layers follow (saving 1 full-resolution render pass), and skips the 1/9-res wide halo pyramid on mild bloom or non-Ultra tiers (cutting Bloom from 7 passes to 4 passes).
+
 ## [3.8.0] - 2026-11-27
 
 ### Added & Improved

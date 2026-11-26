@@ -42,6 +42,7 @@ bool BeautyConfig::isProcessing() const {
            neckTone > 0.0f || blemishRemove > 0.0f || hairDye > 0.0f || hairShine > 0.0f ||
            bloom > 0.0f || filmGrain > 0.0f ||
            std::fabs(colorTemp) > 1e-4f || std::fabs(colorTint) > 1e-4f ||
+           autoWhiteBalance > 0.0f ||
            backgroundBlur > 0.0f ||
            backgroundMode == BackgroundMode::kVirtualImage ||
            backgroundMode == BackgroundMode::kVirtualBlur ||

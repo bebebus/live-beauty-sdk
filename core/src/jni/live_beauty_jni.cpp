@@ -254,6 +254,13 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetConfig(
     cfg.hairDye = (n >= 52) ? s[51] : handle->hairDyeOverride;
     cfg.hairDyeColor = handle->hairDyeColorOverride;
     cfg.hairShine = (n >= 53) ? s[52] : handle->hairShineOverride;
+    if (n >= 58) {
+        cfg.bloom = s[53];
+        cfg.filmGrain = s[54];
+        cfg.colorTemp = s[55];
+        cfg.colorTint = s[56];
+        cfg.autoWhiteBalance = s[57];
+    }
     cfg.preferHalfFloat = handle->preferHalfFloatOverride;
 
     handle->engine.setConfig(cfg);

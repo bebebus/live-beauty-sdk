@@ -912,6 +912,23 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         float3 high = tex3.sample(kLinearClamp, lutCell(ceil(level), color.rg)).rgb;
         color = mix(color, mix(low, high, level - floor(level)), uGrade.x);
     }
+    // v3.9.0 Fused zero-extra-pass CAT02 white balance & non-darkening filmic grain (reuses unused uEye0.xyz & uEye1.x -> 15 active uniforms)
+    if (uEye0.x > 0.0001f) {
+        color = clamp(color * uEye0.xyz, 0.0f, 1.0f);
+    }
+    float fusedGrain = fract(uEye1.x);
+    if (fusedGrain > 0.0001f) {
+        float grainPhase = floor(uEye1.x) / 63.0f;
+        float2 grid = max(0.5f / max(uFrame.xy, float2(0.00001f)), float2(64.0f));
+        float2 p = fmod(floor(uv * grid) + float2(grainPhase * 37.0f, grainPhase * 73.0f), 256.0f);
+        float h = fract(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f);
+        float s = clamp(fusedGrain, 0.0f, 0.50f);
+        float grainExp = mix(1.0f, 0.72f + 0.28f * h, s);
+        float3 lifted = pow(max(color, float3(0.0001f)), float3(grainExp));
+        float yg = luma601(color);
+        float midW = smoothstep(0.04f, 0.20f, yg) * (1.0f - 0.55f * smoothstep(0.82f, 0.98f, yg));
+        color = max(color, mix(color, lifted, s * 0.65f * midW));
+    }
     return float4(color, original.a);
 }
 

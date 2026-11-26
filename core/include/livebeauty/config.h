@@ -186,10 +186,12 @@ struct BeautyConfig {
     bool preferHalfFloat = true;
 
     // v3.8: Cinematic atmosphere post-processing (soft-knee pyramid bloom, non-darkening filmic grain, CIE D65 CAT02 WB)
-    float bloom = 0.0f;       // [0..1] soft-knee highlight glow
-    float filmGrain = 0.0f;   // [0..1] organic non-darkening filmic grain
-    float colorTemp = 0.0f;   // [-1..+1] CAT02 chromatic adaptation temperature
-    float colorTint = 0.0f;   // [-1..+1] CAT02 green/magenta tint
+    float bloom = 0.0f;            // [0..1] soft-knee highlight glow
+    float filmGrain = 0.0f;        // [0..1] organic non-darkening filmic grain
+    float colorTemp = 0.0f;        // [-1..+1] CAT02 chromatic adaptation temperature
+    float colorTint = 0.0f;        // [-1..+1] CAT02 green/magenta tint
+    // v3.9: Automatic ambient illuminant CAT02 white-balance correction driven by live face-skin ROI
+    float autoWhiteBalance = 0.0f; // [0..1] damped auto correction for tungsten/fluorescent room lighting
 
     bool hasFaceReshape() const;
     bool hasBodyReshape() const;

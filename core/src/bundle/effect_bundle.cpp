@@ -517,6 +517,7 @@ bool EffectBundleParser::parseJson(
         c.filmGrain = optFloat(*b, "filmGrain", c.filmGrain, 0.0f, 1.0f);
         c.colorTemp = optFloat(*b, "colorTemp", c.colorTemp, -1.0f, 1.0f);
         c.colorTint = optFloat(*b, "colorTint", c.colorTint, -1.0f, 1.0f);
+        c.autoWhiteBalance = optFloat(*b, "autoWhiteBalance", c.autoWhiteBalance, 0.0f, 1.0f);
 
         c.waistSlim = optFloat(*b, "waistSlim", c.waistSlim, 0.0f, 1.0f);
         c.bustEnhance = optFloat(*b, "bustEnhance", c.bustEnhance, 0.0f, 1.0f);

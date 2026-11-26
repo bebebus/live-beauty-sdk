@@ -876,6 +876,23 @@ void main() {
         vec3 high = texture2D(uTex3, lutCell(ceil(level), color.rg)).rgb;
         color = mix(color, mix(low, high, level - floor(level)), uU10.x);
     }
+    // v3.9.0 Fused zero-extra-pass CAT02 white balance & non-darkening filmic grain (reuses unused uU4.xyz & uU5.x -> 15 active uniforms)
+    if (uU4.x > 0.0001) {
+        color = clamp(color * uU4.xyz, 0.0, 1.0);
+    }
+    float fusedGrain = fract(uU5.x);
+    if (fusedGrain > 0.0001) {
+        float grainPhase = floor(uU5.x) / 63.0;
+        vec2 grid = max(0.5 / max(uU0.xy, vec2(0.00001)), vec2(64.0));
+        vec2 p = mod(floor(uv * grid) + vec2(grainPhase * 37.0, grainPhase * 73.0), 256.0);
+        float h = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+        float s = clamp(fusedGrain, 0.0, 0.50);
+        float grainExp = mix(1.0, 0.72 + 0.28 * h, s);
+        vec3 lifted = pow(max(color, vec3(0.0001)), vec3(grainExp));
+        float yg = dot(color, vec3(0.299, 0.587, 0.114));
+        float midW = smoothstep(0.04, 0.20, yg) * (1.0 - 0.55 * smoothstep(0.82, 0.98, yg));
+        color = max(color, mix(color, lifted, s * 0.65 * midW));
+    }
     gl_FragColor = vec4(color, original.a);
 }
 )";

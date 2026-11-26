@@ -132,6 +132,7 @@ struct FrameInputs {
         float steadyFace = 1.0f;
         float steadyEye = 1.0f;
         float eyeMakeupKeep = 1.0f;
+        float lowerMakeupKeep = 1.0f;
     } secondaryFace{};
 
     // Load fades & tuning

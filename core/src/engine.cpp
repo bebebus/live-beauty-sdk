@@ -294,6 +294,9 @@ bool LiveBeautyEngine::submitFaceParsingClassMap(
     stagedLowerFaceOcc_ = hasLatestFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
         : 0.0f;
+    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
+        : 0.0f;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -313,6 +316,9 @@ bool LiveBeautyEngine::submitFaceParsingLogits(
     stagedOccTsMs_ = sampleTsMs;
     stagedLowerFaceOcc_ = hasLatestFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
+        : 0.0f;
+    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
         : 0.0f;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
@@ -334,6 +340,34 @@ bool LiveBeautyEngine::submitMulticlass6Logits(
     stagedOccTsMs_ = sampleTsMs;
     stagedLowerFaceOcc_ = hasLatestFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
+        : 0.0f;
+    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
+        : 0.0f;
+    stagedOccDirty_ = true;
+    stagedParseHairDirty_ = true;
+    stagedParseHairTsMs_ = sampleTsMs;
+    stagedParsePersonDirty_ = true;
+    return true;
+}
+
+bool LiveBeautyEngine::submitMulticlass6Planar(
+    const float* const planes[6], int srcWidth, int srcHeight, int64_t sampleTsMs) {
+    if (!planes || srcWidth <= 0 || srcHeight <= 0) return false;
+    std::lock_guard<std::mutex> lock(auxMutex_);
+    if (!faceParsingMapper_.mapMulticlass6PlanarProbabilities(
+            planes, srcWidth, srcHeight,
+            stagedOccMask_.data(), stagedParseHair_.data(), stagedParsePerson_.data())) {
+        return false;
+    }
+    semanticOccActive_ = true;
+    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
+    stagedOccTsMs_ = sampleTsMs;
+    stagedLowerFaceOcc_ = hasLatestFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
+        : 0.0f;
+    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
+        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
         : 0.0f;
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
@@ -439,10 +473,24 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
                 latestFaceRollRad_ = roll;
                 hasLatestFaceBounds_ = true;
             }
+            // Track secondary face bounds independently for dual-face lower-face occlusion gating
+            bool foundSec = false;
+            CropRect secFb{};
+            for (int i = 0; i < cappedCount; ++i) {
+                if (i == bestIdx || !faces[i].mpXy || faces[i].pointCount < 468) continue;
+                if (math::FaceOcclusionSolver::boundsFromLandmarks(faces[i].mpXy, faces[i].pointCount, secFb)) {
+                    foundSec = true;
+                    break;
+                }
+            }
+            std::lock_guard<std::mutex> lock(auxMutex_);
+            hasLatestSecFaceBounds_ = foundSec;
+            if (foundSec) latestSecFaceBounds_ = secFb;
         }
     } else if (valid == 0) {
         std::lock_guard<std::mutex> lock(auxMutex_);
         hasLatestFaceBounds_ = false;
+        hasLatestSecFaceBounds_ = false;
         latestFaceRollRad_ = 0.0f;
         expressionBus_.update(nullptr);
     }
@@ -460,6 +508,9 @@ void LiveBeautyEngine::submitFaceMiss(int64_t sampleTsMs) {
     roiSelector_.onMiss();
     std::lock_guard<std::mutex> lock(auxMutex_);
     hasLatestFaceBounds_ = false;
+    hasLatestSecFaceBounds_ = false;
+    stagedLowerFaceOcc_ = 0.0f;
+    stagedSecLowerFaceOcc_ = 0.0f;
     expressionBus_.update(nullptr);
 }
 
@@ -550,6 +601,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             }
             autoOccTsMs_ = stagedOccTsMs_;
             lowerFaceOcc_ = stagedLowerFaceOcc_;
+            secLowerFaceOcc_ = stagedSecLowerFaceOcc_;
         }
         if (stagedParseHairDirty_) {
             stagedParseHairDirty_ = false;
@@ -764,6 +816,11 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         in.occlusionMaskTex = (in.occlusionShown > 1e-4f) ? autoOccTex_ : rhi::kInvalidTexture;
         if (in.occlusionShown > 1e-4f) {
             in.lowerMakeupKeep = math::BeautyQualityTuning::lowerFaceMakeupKeep(lowerFaceOcc_ * in.occlusionShown);
+            if (hasSecMesh && effectiveMaxFaces >= 2) {
+                const float secOccShown = detail::clampf(occFresh * shakeGate * in.secondaryFace.steadyFace, 0.0f, 1.0f);
+                in.secondaryFace.lowerMakeupKeep =
+                    math::BeautyQualityTuning::lowerFaceMakeupKeep(secLowerFaceOcc_ * secOccShown);
+            }
         }
     }
     in.hairShown = effHairShown;

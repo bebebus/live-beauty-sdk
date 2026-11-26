@@ -84,6 +84,18 @@ public:
         uint8_t* outHairR8 = nullptr,
         uint8_t* outPersonR8 = nullptr);
 
+    /**
+     * v3.9: Direct planar probability ingestion for iOS/Android MediaPipe `ImageSegmenter`
+     * `selfie_multiclass_256x256.tflite` 6 confidence mask planes `[0=bg..5=accessories]` in `[0..1]`.
+     */
+    bool mapMulticlass6PlanarProbabilities(
+        const float* const planes[6],
+        int srcW,
+        int srcH,
+        uint8_t* outOcclusionR8,
+        uint8_t* outHairR8 = nullptr,
+        uint8_t* outPersonR8 = nullptr);
+
     /** Estimate occluded fraction [0..1] inside the lower/mid face region of a top-down R8 visibility mask. */
     static float estimateLowerFaceOcclusion(
         const uint8_t* occMaskR8,

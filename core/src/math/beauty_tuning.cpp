@@ -152,6 +152,35 @@ void BeautyQualityTuning::cat02WhiteBalanceMatrix(float colorTemp, float colorTi
     }
 }
 
+void BeautyQualityTuning::estimateAutoWhiteBalance(
+    const Vec3& ambientRgb, float strength, float& outTemp, float& outTint) {
+    outTemp = 0.0f;
+    outTint = 0.0f;
+    const float str = std::isfinite(strength) ? detail::clampf(strength, 0.0f, 1.0f) : 0.0f;
+    if (str <= 1e-4f) return;
+
+    const float r = std::isfinite(ambientRgb.x) ? detail::clampf(ambientRgb.x, 0.65f, 1.35f) : 1.0f;
+    const float g = std::isfinite(ambientRgb.y) ? detail::clampf(ambientRgb.y, 0.65f, 1.35f) : 1.0f;
+    const float b = std::isfinite(ambientRgb.z) ? detail::clampf(ambientRgb.z, 0.65f, 1.35f) : 1.0f;
+
+    // Warmth cast: positive under tungsten/yellow light (r > b) -> cool down (negative CAT02 temp);
+    // negative under cool blue LED (b > r) -> warm up (positive CAT02 temp).
+    const float warmCast = (r - b) / std::max(r + b, 1e-4f);
+    // Green/magenta cast: positive under fluorescent green cast (g > 0.5*(r+b)) -> positive CAT02 tint (magenta shift).
+    const float greenCast = (g - 0.5f * (r + b)) / std::max(r + g + b, 1e-4f);
+
+    auto softDeadzone = [](float v, float dz) {
+        const float av = std::fabs(v);
+        if (av <= dz) return 0.0f;
+        return (v > 0.0f ? 1.0f : -1.0f) * (av - dz);
+    };
+
+    const float dzWarm = softDeadzone(warmCast, 0.025f);
+    const float dzGreen = softDeadzone(greenCast, 0.014f);
+    outTemp = detail::clampf(-dzWarm * 1.95f * str, -0.42f, 0.42f);
+    outTint = detail::clampf(dzGreen * 4.60f * str, -0.26f, 0.26f);
+}
+
 void BeautyQualityTuning::resolveStyleAtmosphere(
     const std::string& lutUrl, float lutIntensity,
     int filterStyleId, float filterIntensity,

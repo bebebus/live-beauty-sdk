@@ -1150,7 +1150,7 @@ internal class LiveBeautyCppEngine(
     }
 
     companion object {
-        const val SCALAR_COUNT = 51
+        const val SCALAR_COUNT = 58
         const val MAX_STICKERS = 4
         private const val FACE_GPU_INTERVAL_MS = 1L
         private const val FACE_CPU_INTERVAL_MS = 45L

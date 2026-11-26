@@ -89,6 +89,12 @@ data class VideoEffectsConfig @JvmOverloads constructor(
     val hairDye: Float = 0f,
     val hairDyeColor: String = "milk_tea_brown",
     val hairShine: Float = 0f,
+    /** v3.8/v3.9: 电影感氛围后处理（柔光泛光、非压暗胶片颗粒、CIE CAT02 色温/色调与环境光自动白平衡）。 */
+    val bloom: Float = 0f,
+    val filmGrain: Float = 0f,
+    val colorTemp: Float = 0f,
+    val colorTint: Float = 0f,
+    val autoWhiteBalance: Float = 0f,
 ) {
     /** 任意一项面部与颅顶网格微整处于非零状态。 */
     fun hasFaceReshape(): Boolean =
@@ -194,7 +200,12 @@ data class VideoEffectsConfig @JvmOverloads constructor(
                 performanceTier = enumStr("performanceTier", "auto", PERFORMANCE_TIERS),
                 hairDye = unit("hairDye", 0f),
                 hairDyeColor = enumStr("hairDyeColor", "milk_tea_brown", HAIR_DYE_COLORS),
-                hairShine = unit("hairShine", 0f))
+                hairShine = unit("hairShine", 0f),
+                bloom = unit("bloom", 0f),
+                filmGrain = unit("filmGrain", 0f),
+                colorTemp = signed("colorTemp"),
+                colorTint = signed("colorTint"),
+                autoWhiteBalance = unit("autoWhiteBalance", 0f))
         }
     }
 }

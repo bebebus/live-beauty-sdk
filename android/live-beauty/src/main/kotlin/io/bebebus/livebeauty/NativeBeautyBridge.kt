@@ -300,8 +300,8 @@ object NativeBeautyBridge {
     /** v3.6.2: 上报宿主陀螺仪/加速度计快速晃动状态，瞬时清空时域帧/人像遮罩历史并抑制过期异步掩码拖影。 */
     @JvmStatic external fun nativeSetCameraShaking(handle: Long, shaking: Boolean)
 
-    /** 将 [VideoEffectsConfig] 的 51 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
-    fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(51)): FloatArray {
+    /** 将 [VideoEffectsConfig] 的 58 个标量打包为扁平数组，供 [nativeSetConfig] 单次 JNI 传参。 */
+    fun packConfigScalars(cfg: VideoEffectsConfig, out: FloatArray = FloatArray(58)): FloatArray {
         out[0] = cfg.smoothing
         out[1] = cfg.brightness
         out[2] = cfg.sharpness
@@ -354,6 +354,15 @@ object NativeBeautyBridge {
             out[48] = cfg.ambientMakeupBlend
             out[49] = cfg.matteTemporal
             out[50] = cfg.blemishRemove
+        }
+        if (out.size >= 58) {
+            out[51] = cfg.hairDye
+            out[52] = cfg.hairShine
+            out[53] = cfg.bloom
+            out[54] = cfg.filmGrain
+            out[55] = cfg.colorTemp
+            out[56] = cfg.colorTint
+            out[57] = cfg.autoWhiteBalance
         }
         return out
     }

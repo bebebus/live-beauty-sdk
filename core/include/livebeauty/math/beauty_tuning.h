@@ -28,6 +28,8 @@ struct BeautyQualityTuning {
     static float mouthOpenGate(float openRatio);
     static float lowerFaceMakeupKeep(float lowerFaceOccRatio);
     static void cat02WhiteBalanceMatrix(float colorTemp, float colorTint, float outRowMajor3x3[9]);
+    static void estimateAutoWhiteBalance(const Vec3& ambientRgb, float strength,
+                                         float& outTemp, float& outTint);
     static void resolveStyleAtmosphere(const std::string& lutUrl, float lutIntensity,
                                        int filterStyleId, float filterIntensity,
                                        float& outBloom, float& outGrain);

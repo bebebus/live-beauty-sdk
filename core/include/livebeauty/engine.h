@@ -126,6 +126,12 @@ public:
     bool submitMulticlass6Logits(const float* logitsNhwc6, int srcWidth, int srcHeight, int64_t sampleTsMs);
 
     /**
+     * v3.9: Submit 6 planar confidence mask buffers `[0=bg..5=accessories]` in `[0..1]`
+     * (e.g. from iOS/Android MediaPipe `ImageSegmenter` `selfie_multiclass_256x256.tflite`).
+     */
+    bool submitMulticlass6Planar(const float* const planes[6], int srcWidth, int srcHeight, int64_t sampleTsMs);
+
+    /**
      * v3.6: Trigger an interactive 2D SDF particle burst (`heart`, `thumbs_up`, `victory`, `open_palm`)
      * at normalized top-down `(normX, normY)` in `[0..1]` and latch gesture-reactive `.lbfx` layers.
      */
@@ -230,6 +236,8 @@ private:
     bool hasLatestFaceBounds_ = false;
     CropRect latestFaceBounds_ = CropRect::full();
     float latestFaceRollRad_ = 0.0f;
+    bool hasLatestSecFaceBounds_ = false;
+    CropRect latestSecFaceBounds_ = CropRect::full();
     bool semanticOccActive_ = false;
     bool stagedOccDirty_ = false;
     int stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
@@ -248,6 +256,8 @@ private:
     int64_t autoOccTsMs_ = kTimeInvalid;
     float stagedLowerFaceOcc_ = 0.0f;
     float lowerFaceOcc_ = 0.0f;
+    float stagedSecLowerFaceOcc_ = 0.0f;
+    float secLowerFaceOcc_ = 0.0f;
     std::atomic<bool> cameraShaking_{false};
     rhi::TextureId autoParseHairTex_ = rhi::kInvalidTexture;
     bool autoParseHairValid_ = false;

@@ -1980,6 +1980,74 @@ void testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion() {
     EXPECT_TRUE(mf.beauty.isProcessing());
 }
 
+void testV390AutoWhiteBalanceAndMulticlass6PlanarProbabilities() {
+    // 1. Neutral D65 ambientRgb=(1,1,1) produces exact (0,0) correction
+    float t = 99.0f, g = 99.0f;
+    BeautyQualityTuning::estimateAutoWhiteBalance({1.0f, 1.0f, 1.0f}, 1.0f, t, g);
+    EXPECT_NEAR(t, 0.0f, 1e-6f);
+    EXPECT_NEAR(g, 0.0f, 1e-6f);
+
+    // 2. Warm tungsten room (r=1.24, g=1.00, b=0.76) -> negative CAT02 temp (cooling)
+    BeautyQualityTuning::estimateAutoWhiteBalance({1.24f, 1.00f, 0.76f}, 0.85f, t, g);
+    EXPECT_TRUE(t < -0.25f && t >= -0.42f);
+    EXPECT_TRUE(std::fabs(g) < 0.05f);
+
+    // 3. Cool greenish fluorescent room (r=0.84, g=1.14, b=1.16) -> warming temp > 0 & magenta tint > 0
+    BeautyQualityTuning::estimateAutoWhiteBalance({0.84f, 1.14f, 1.16f}, 0.90f, t, g);
+    EXPECT_TRUE(t > 0.15f && t <= 0.42f);
+    EXPECT_TRUE(g > 0.08f && g <= 0.26f);
+
+    // 4. Zero strength & NaN safety
+    BeautyQualityTuning::estimateAutoWhiteBalance({1.3f, 0.9f, 0.7f}, 0.0f, t, g);
+    EXPECT_NEAR(t, 0.0f, 1e-6f);
+    BeautyQualityTuning::estimateAutoWhiteBalance({std::numeric_limits<float>::quiet_NaN(), 1.0f, 1.0f}, 1.0f, t, g);
+    EXPECT_TRUE(std::isfinite(t) && std::isfinite(g));
+
+    // 5. FaceParsingMapper::mapMulticlass6PlanarProbabilities (iOS MPPImageSegmenter 6-plane direct path)
+    FaceParsingMapper mapper;
+    constexpr int kW = 32, kH = 32;
+    std::vector<float> p0(kW * kH, 0.0f), p1(kW * kH, 0.0f), p2(kW * kH, 0.0f);
+    std::vector<float> p3(kW * kH, 0.0f), p4(kW * kH, 0.0f), p5(kW * kH, 0.0f);
+    for (int y = 0; y < kH; ++y) {
+        for (int x = 0; x < kW; ++x) {
+            const int i = y * kW + x;
+            if (y < 8) {
+                p1[i] = 0.96f; p0[i] = 0.04f;       // Top band: hair
+            } else if (y < 20) {
+                p3[i] = 0.95f; p0[i] = 0.05f;       // Middle band: bare face skin
+            } else {
+                p5[i] = 0.94f; p0[i] = 0.06f;       // Lower band: mask/hand occluder (accessories)
+            }
+        }
+    }
+    const float* planes[6] = {p0.data(), p1.data(), p2.data(), p3.data(), p4.data(), p5.data()};
+    std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+    EXPECT_TRUE(mapper.mapMulticlass6PlanarProbabilities(planes, kW, kH, occ.data(), hair.data(), person.data()));
+    // Top hair row -> high hair mask, occluded for makeup; middle face row -> visible (255), hair=0; bottom row -> occluded (0)
+    const int kS = FaceParsingMapper::kOutSize;
+    EXPECT_TRUE(hair[16 * kS + 64] > 200);
+    EXPECT_TRUE(hair[56 * kS + 64] < 20);
+    EXPECT_TRUE(occ[56 * kS + 64] > 235);
+    EXPECT_TRUE(occ[104 * kS + 64] < 30);
+    EXPECT_TRUE(person[56 * kS + 64] > 220);
+
+    // Lower-face occlusion estimator reports > 0.70 on lower-masked face box
+    const CropRect fb{0.10f, 0.20f, 0.80f, 0.75f};
+    EXPECT_TRUE(FaceParsingMapper::estimateLowerFaceOcclusion(occ.data(), kS, fb) > 0.65f);
+
+    // Null plane guard
+    const float* badPlanes[6] = {p0.data(), nullptr, p2.data(), p3.data(), p4.data(), p5.data()};
+    EXPECT_TRUE(!mapper.mapMulticlass6PlanarProbabilities(badPlanes, kW, kH, occ.data()));
+
+    // 6. EffectBundleParser parses autoWhiteBalance
+    bundle::EffectBundleManifest mf{};
+    EXPECT_TRUE(bundle::EffectBundleParser::parseJson(
+        R"({"schemaVersion":1,"id":"awb","beauty":{"autoWhiteBalance":0.75}})",
+        mf, nullptr));
+    EXPECT_NEAR(mf.beauty.autoWhiteBalance, 0.75f, 1e-5f);
+    EXPECT_TRUE(mf.beauty.isProcessing());
+}
+
 }  // namespace
 
 int main() {
@@ -2009,6 +2077,7 @@ int main() {
     testV3615DouyinAmbientSceneLiftCurve();
     testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard();
     testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion();
+    testV390AutoWhiteBalanceAndMulticlass6PlanarProbabilities();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

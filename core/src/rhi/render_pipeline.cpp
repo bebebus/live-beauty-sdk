@@ -1746,19 +1746,72 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         const float ambientLift = wantAmbientLift
             ? math::BeautyQualityTuning::ambientSceneLift(in.lightLuma)
             : 0.0f;
+        // v3.9: Pre-resolve atmosphere + Auto CAT02 WB. When Bloom is inactive and no post-composite
+        // layers (hairDye / makeup / stickers / AR3D / particles) follow, pack CAT02 WB + filmic grain
+        // into unused uU4.xyz & uU5.x inside kCompositePro (keeping exact 15 active uniforms & 0 extra passes!).
+        float preAutoBloom = 0.0f, preAutoGrain = 0.0f;
+        const bool preLutBound = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty());
+        const float preLutStr = preLutBound ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
+        math::BeautyQualityTuning::resolveStyleAtmosphere(
+            preLutBound ? config.lutUrl : std::string(), preLutStr,
+            static_cast<int>(config.filter), config.filterIntensity,
+            preAutoBloom, preAutoGrain);
+        const bool preAllowBloom = (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
+        const float preEffBloom = preAllowBloom
+            ? detail::clampf(std::max(config.bloom, preAutoBloom) * in.loadFadeBody, 0.0f, 1.0f)
+            : 0.0f;
+        const float preEffGrain = detail::clampf(std::max(config.filmGrain, preAutoGrain) * in.loadFadeSmooth, 0.0f, 0.50f);
+        float autoTemp = 0.0f, autoTint = 0.0f;
+        math::BeautyQualityTuning::estimateAutoWhiteBalance(in.ambientRgb, config.autoWhiteBalance, autoTemp, autoTint);
+        const float preEffTemp = detail::clampf(config.colorTemp + autoTemp, -1.0f, 1.0f);
+        const float preEffTint = detail::clampf(config.colorTint + autoTint, -1.0f, 1.0f);
+        const bool preHasCat02 = (std::fabs(preEffTemp) > 1e-4f || std::fabs(preEffTint) > 1e-4f);
+
+        const float willHairDye = detail::clampf(config.hairDye * in.loadFadeSmooth, 0.0f, 1.0f);
+        const float willHairShine = detail::clampf(config.hairShine * in.loadFadeSmooth, 0.0f, 1.0f);
+        const bool hasPostCompositeLayers =
+            ((willHairDye > 1e-4f || willHairShine > 1e-4f) &&
+             in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) ||
+            (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f && config.hasMakeup()) ||
+            (secActive && postSecLandmarks && config.hasMakeup()) ||
+            (hasAnySticker && ((in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) ||
+                               (secActive && postSecLandmarks))) ||
+            (in.tierCaps.enableAr3d && hasAnyAr3d && in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) ||
+            hasParticles;
+
+        float fusedWbR = 0.0f, fusedWbG = 0.0f, fusedWbB = 0.0f, fusedPackedGrain = 0.0f;
+        const bool fuseAtmInComposite = config.enabled && !config.compareOriginal &&
+            preEffBloom <= 1e-4f && (preEffGrain > 1e-4f || preHasCat02) && !hasPostCompositeLayers;
+        if (fuseAtmInComposite) {
+            if (preHasCat02) {
+                float cat02[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+                math::BeautyQualityTuning::cat02WhiteBalanceMatrix(preEffTemp, preEffTint, cat02);
+                fusedWbR = detail::clampf(cat02[0] + cat02[1] + cat02[2], 0.50f, 1.60f);
+                fusedWbG = detail::clampf(cat02[3] + cat02[4] + cat02[5], 0.50f, 1.60f);
+                fusedWbB = detail::clampf(cat02[6] + cat02[7] + cat02[8], 0.50f, 1.60f);
+            }
+            const float grainPhase = std::fmod(static_cast<float>(std::max<int64_t>(0, in.nowMs) % 60000LL) * 0.018f, 1.0f);
+            fusedPackedGrain = (preEffGrain > 1e-4f)
+                ? (std::floor(grainPhase * 63.0f) + detail::clampf(preEffGrain, 0.0f, 0.50f))
+                : 0.0f;
+            lastActivePassesMask_ |= kPassAtmosphere;
+        }
+
         ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), aspect, framePresence);
         ub.push(stylePacked, effSmooth, config.brightness, effTexture);
         ub.push(config.radiance, effSharpness, config.saturation, activeFilterIntensity);
         ub.push(config.whiten, config.rosy, effOilControl, effRelight);
         if (fallbackEllipseState) {
-            ub.push(fallbackEllipseState[16], fallbackEllipseState[17], fallbackEllipseState[18], fallbackEllipseState[26]);
-            ub.push(fallbackEllipseState[19], fallbackEllipseState[20], fallbackEllipseState[21], fallbackEllipseState[27]);
+            ub.push(fusedWbR, fusedWbG, fusedWbB, fallbackEllipseState[26]);
+            ub.push(fusedPackedGrain, 0.0f, 0.0f, fallbackEllipseState[27]);
             ub.push(fallbackEllipseState[22], fallbackEllipseState[23], fallbackEllipseState[24], fallbackEllipseState[25]);
             ub.push(fallbackEllipseState[28], fallbackEllipseState[29], fallbackEllipseState[30], fallbackEllipseState[31]);
             ub.push(fallbackEllipseState[32], fallbackEllipseState[33], fallbackEllipseState[34], fallbackEllipseState[35]);
             ub.push(fallbackEllipseState[36], fallbackEllipseState[37], fallbackEllipseState[38], fallbackEllipseState[39]);
         } else {
-            for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            ub.push(fusedWbR, fusedWbG, fusedWbB, 0.0f);
+            ub.push(fusedPackedGrain, 0.0f, 0.0f, 0.0f);
+            for (int i = 0; i < 4; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
         }
         ub.push(lutStrength, coreThresh, microDetailKeep, ambientLift);
 
@@ -1846,7 +1899,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postSecLandmarks, sec.meta15,
             sec.hasIris, secFrontCw, effSecPresence, sec.steadyFace, sec.steadyEye, sec.eyeMakeupKeep,
-            1.0f, /*copyBaseFirst=*/!makeupRendered);
+            sec.lowerMakeupKeep, /*copyBaseFirst=*/!makeupRendered);
         currentTex = device_.textureOf(rtMakeup_);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
@@ -1894,9 +1947,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         lastActivePassesMask_ |= kPassParticles;
     }
 
-    // 8. v3.8: Cinematic Atmosphere Post-Processing (Soft-Knee Multi-Scale Bloom + Non-Darkening Filmic Grain + CIE CAT02 WB)
-    //    Reuses existing 1/4-res rtBg_[0..1] and 1/9-res rtMacro_[0..1] (zero extra FBO allocations, zero cost when inactive).
-    if (config.enabled && !config.compareOriginal) {
+    // 8. v3.8/v3.9: Cinematic Atmosphere Post-Processing (Soft-Knee Multi-Scale Bloom + Non-Darkening Filmic Grain + CIE CAT02 WB)
+    //    Reuses existing 1/4-res rtBg_[0..1] and 1/9-res rtMacro_[0..1] (zero extra FBO allocations, zero cost when inactive or fused in Stage 6).
+    if (config.enabled && !config.compareOriginal && (lastActivePassesMask_ & kPassAtmosphere) == 0u) {
         float autoBloom = 0.0f, autoGrain = 0.0f;
         const bool lutBound = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty());
         const float activeLutStrength = lutBound ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
@@ -1909,8 +1962,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             ? detail::clampf(std::max(config.bloom, autoBloom) * in.loadFadeBody, 0.0f, 1.0f)
             : 0.0f;
         const float effGrain = detail::clampf(std::max(config.filmGrain, autoGrain) * in.loadFadeSmooth, 0.0f, 0.50f);
-        const float effTemp = detail::clampf(config.colorTemp, -1.0f, 1.0f);
-        const float effTint = detail::clampf(config.colorTint, -1.0f, 1.0f);
+        float autoTemp = 0.0f, autoTint = 0.0f;
+        math::BeautyQualityTuning::estimateAutoWhiteBalance(in.ambientRgb, config.autoWhiteBalance, autoTemp, autoTint);
+        const float effTemp = detail::clampf(config.colorTemp + autoTemp, -1.0f, 1.0f);
+        const float effTint = detail::clampf(config.colorTint + autoTint, -1.0f, 1.0f);
         const bool hasCat02 = (std::fabs(effTemp) > 1e-4f || std::fabs(effTint) > 1e-4f);
 
         if (effBloom > 1e-4f || effGrain > 1e-4f || hasCat02) {
@@ -1942,30 +1997,38 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
                 device_.endPass();
 
-                // 8c. Wide halo pyramid level at 1/9 res (rtBg_[0] -> rtMacro_[0] -> H+V blur)
-                tb.clear(); ub.clear();
-                tb.bind(0, device_.textureOf(rtBg_[0]));
-                ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_), 0.0f, 0.0f);
-                device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
-                device_.drawFullScreenQuad(ShaderId::kDownsample, st, tb, ub);
-                device_.endPass();
-
-                tb.clear(); ub.clear();
-                tb.bind(0, device_.textureOf(rtMacro_[0]));
-                ub.push(1.85f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
-                device_.beginPass(rtMacro_[1], macroW_, macroH_, false);
-                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
-                device_.endPass();
-
-                tb.clear(); ub.clear();
-                tb.bind(0, device_.textureOf(rtMacro_[1]));
-                ub.push(0.0f, 1.85f / static_cast<float>(macroH_), 0.0f, 0.0f);
-                device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
-                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
-                device_.endPass();
-
                 tightBloomTex = device_.textureOf(rtBg_[0]);
-                wideBloomTex = device_.textureOf(rtMacro_[0]);
+                // v3.9 GPU pass reduction: run 1/9-res wide halo pyramid only on strong bloom at Ultra tier
+                // without thermal throttling; otherwise reuse 1/4-res Gaussian bloom to save 3 extra passes.
+                const bool useWidePyramid = (effBloom > 0.22f) &&
+                    (in.tierCaps.resolvedTier == math::PerformanceTier::kUltra) &&
+                    (in.loadFadeBody >= 0.99f);
+                if (useWidePyramid) {
+                    tb.clear(); ub.clear();
+                    tb.bind(0, device_.textureOf(rtBg_[0]));
+                    ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_), 0.0f, 0.0f);
+                    device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
+                    device_.drawFullScreenQuad(ShaderId::kDownsample, st, tb, ub);
+                    device_.endPass();
+
+                    tb.clear(); ub.clear();
+                    tb.bind(0, device_.textureOf(rtMacro_[0]));
+                    ub.push(1.85f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
+                    device_.beginPass(rtMacro_[1], macroW_, macroH_, false);
+                    device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                    device_.endPass();
+
+                    tb.clear(); ub.clear();
+                    tb.bind(0, device_.textureOf(rtMacro_[1]));
+                    ub.push(0.0f, 1.85f / static_cast<float>(macroH_), 0.0f, 0.0f);
+                    device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
+                    device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                    device_.endPass();
+
+                    wideBloomTex = device_.textureOf(rtMacro_[0]);
+                } else {
+                    wideBloomTex = tightBloomTex;
+                }
             }
 
             float cat02[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};

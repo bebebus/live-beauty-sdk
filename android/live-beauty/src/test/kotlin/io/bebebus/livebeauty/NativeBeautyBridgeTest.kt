@@ -5,7 +5,7 @@ import org.junit.Test
 
 class NativeBeautyBridgeTest {
     @Test
-    fun packConfigScalarsMapsAll51Fields() {
+    fun packConfigScalarsMapsAll58Fields() {
         val cfg = LiveBeautyPresets.koreanWaterGlow.copy(
             cranialTop = 0.65f,
             nasolabial = 0.35f,
@@ -15,9 +15,16 @@ class NativeBeautyBridgeTest {
             ambientMakeupBlend = 0.75f,
             matteTemporal = 0.80f,
             blemishRemove = 0.50f,
+            hairDye = 0.68f,
+            hairShine = 0.42f,
+            bloom = 0.32f,
+            filmGrain = 0.14f,
+            colorTemp = -0.22f,
+            colorTint = 0.11f,
+            autoWhiteBalance = 0.78f,
         )
         val arr = NativeBeautyBridge.packConfigScalars(cfg)
-        assertEquals(51, arr.size)
+        assertEquals(58, arr.size)
         assertEquals(cfg.smoothing, arr[0], 1e-6f)
         assertEquals(cfg.cranialTop, arr[26], 1e-6f)
         assertEquals(cfg.nasolabial, arr[30], 1e-6f)
@@ -30,6 +37,13 @@ class NativeBeautyBridgeTest {
         assertEquals(cfg.ambientMakeupBlend, arr[48], 1e-6f)
         assertEquals(cfg.matteTemporal, arr[49], 1e-6f)
         assertEquals(cfg.blemishRemove, arr[50], 1e-6f)
+        assertEquals(cfg.hairDye, arr[51], 1e-6f)
+        assertEquals(cfg.hairShine, arr[52], 1e-6f)
+        assertEquals(cfg.bloom, arr[53], 1e-6f)
+        assertEquals(cfg.filmGrain, arr[54], 1e-6f)
+        assertEquals(cfg.colorTemp, arr[55], 1e-6f)
+        assertEquals(cfg.colorTint, arr[56], 1e-6f)
+        assertEquals(cfg.autoWhiteBalance, arr[57], 1e-6f)
     }
 
     @Test

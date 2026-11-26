@@ -266,6 +266,74 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
     return true;
 }
 
+bool FaceParsingMapper::mapMulticlass6PlanarProbabilities(
+    const float* const planes[6],
+    int srcW,
+    int srcH,
+    uint8_t* outOcclusionR8,
+    uint8_t* outHairR8,
+    uint8_t* outPersonR8) {
+    if (!planes || srcW <= 0 || srcH <= 0 || srcW > 4096 || srcH > 4096 || !outOcclusionR8) {
+        return false;
+    }
+    for (int c = 0; c < 6; ++c) {
+        if (!planes[c]) return false;
+    }
+
+    for (int y = 0; y < kOutSize; ++y) {
+        const int sy = std::clamp(static_cast<int>((static_cast<int64_t>(y) * srcH) / kOutSize), 0, srcH - 1);
+        const size_t srcRow = static_cast<size_t>(sy) * static_cast<size_t>(srcW);
+        const int dstRow = y * kOutSize;
+        for (int x = 0; x < kOutSize; ++x) {
+            const int sx = std::clamp(static_cast<int>((static_cast<int64_t>(x) * srcW) / kOutSize), 0, srcW - 1);
+            const size_t sIdx = srcRow + static_cast<size_t>(sx);
+            float p[6];
+            float sumP = 0.0f;
+            bool finiteAll = true;
+            for (int c = 0; c < 6; ++c) {
+                const float v = planes[c][sIdx];
+                if (!std::isfinite(v)) {
+                    finiteAll = false;
+                    break;
+                }
+                p[c] = detail::clampf(v, 0.0f, 1.0f);
+                sumP += p[c];
+            }
+            const int idx = dstRow + x;
+            if (!finiteAll || sumP <= 1e-5f) {
+                rawOcc_[idx] = 255;
+                rawHair_[idx] = 0;
+                rawPerson_[idx] = 0;
+                continue;
+            }
+            const float invSum = 1.0f / sumP;
+            for (int c = 0; c < 6; ++c) p[c] *= invSum;
+
+            const float pSkin = p[2] + p[3];
+            const float rawOccluder = p[1] + p[4] + p[5];
+            const float pOcc = detail::smoothstep(0.62f, 0.90f, rawOccluder - 0.90f * pSkin);
+            const float pHair = detail::smoothstep(0.32f, 0.72f, p[1] - 0.75f * pSkin);
+            const float pPerson = detail::clampf(1.0f - p[0], 0.0f, 1.0f);
+
+            rawOcc_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround((1.0f - pOcc) * 255.0f)), 0, 255));
+            rawHair_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(pHair * 255.0f)), 0, 255));
+            rawPerson_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(pPerson * 255.0f)), 0, 255));
+        }
+    }
+
+    boxBlur3x3AndEma(rawOcc_.data(), emaOcc_.data(), hasOccHistory_ ? kParseEmaAlpha : 1.0f, outOcclusionR8, kOutSize);
+    hasOccHistory_ = true;
+    if (outHairR8) {
+        gaussian3x3AndHairEma(rawHair_.data(), emaHair_.data(), hasHairHistory_ ? kHairEmaAlpha : 1.0f, outHairR8, kOutSize);
+        hasHairHistory_ = true;
+    }
+    if (outPersonR8) {
+        boxBlur3x3AndEma(rawPerson_.data(), emaPerson_.data(), hasPersonHistory_ ? kParseEmaAlpha : 1.0f, outPersonR8, kOutSize);
+        hasPersonHistory_ = true;
+    }
+    return true;
+}
+
 float FaceParsingMapper::estimateLowerFaceOcclusion(
     const uint8_t* occMaskR8,
     int maskSize,

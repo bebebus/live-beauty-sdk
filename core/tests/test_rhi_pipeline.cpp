@@ -1478,6 +1478,9 @@ void testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute() {
         if (c.shader == ShaderId::kPostBloomExtract) sawLiteExtract = true;
         if (c.shader == ShaderId::kPostAtmosphere && c.uniforms.count >= 1) {
             sawLiteCat02 = (c.uniforms.v[0].x == 0.0f && c.uniforms.v[0].w > 0.5f);
+        } else if (c.shader == ShaderId::kCompositePro && c.uniforms.count == 11) {
+            // v3.9 fused zero-extra-pass CAT02 WB + filmic grain inside kCompositePro (uU4.xyz & uU5.x)
+            sawLiteCat02 = (c.uniforms.v[4].x > 0.0001f);
         }
     }
     EXPECT_TRUE(!sawLiteExtract);
@@ -1544,6 +1547,163 @@ void testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute() {
     pipe.releaseGpuResources();
 }
 
+void testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion() {
+    MockRhiDevice dev;
+    RenderPipeline pipe(dev);
+    PipelineAssets assets{};
+    assets.blushAtlas = dev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+    assets.eyebrowAtlas = dev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+    assets.eyeMakeupAtlas = dev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+    assets.contourHighlightAtlas = dev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+    assets.irisAtlas = dev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+    assets.whiteAlphaFallbackTex = dev.createTexture2D(1, 1, TextureFormat::kRgba8, nullptr);
+    pipe.setAssets(assets);
+
+    const TextureId camTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    FrameInputs in{};
+    in.inputTexture = camTex;
+    in.width = 720;
+    in.height = 1280;
+    in.nowMs = 420;
+    in.ambientRgb = {1.24f, 1.00f, 0.76f};  // Warm tungsten lighting
+    in.tierCaps = math::DeviceTierPolicy::capabilitiesFor(math::PerformanceTier::kStandard);
+
+    // 1. Pass Fusion: Auto CAT02 WB + filmGrain with no Bloom and no post-composite layers fuses directly
+    //    into kCompositePro -> ZERO kPostAtmosphere draw calls (saves 1 full-res render pass)!
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.smoothing = 0.45f;
+    cfg.autoWhiteBalance = 0.85f;
+    cfg.filmGrain = 0.10f;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    int compositeDraws = 0, postAtmDraws = 0;
+    float fusedCat02Flag = 0.0f, fusedGrainVal = 0.0f;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kCompositePro) {
+            ++compositeDraws;
+            if (c.uniforms.count == 11) {
+                fusedCat02Flag = (c.uniforms.v[4].x > 0.0001f) ? 1.0f : 0.0f;
+                fusedGrainVal = c.uniforms.v[5].x - std::floor(c.uniforms.v[5].x);
+            }
+        }
+        if (c.shader == ShaderId::kPostAtmosphere) ++postAtmDraws;
+    }
+    EXPECT_TRUE(compositeDraws == 1);
+    EXPECT_TRUE(postAtmDraws == 0);
+    EXPECT_TRUE(fusedCat02Flag > 0.5f && fusedGrainVal > 0.05f);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassAtmosphere) != 0u);
+
+    // 2. Fast-path single-level Bloom on Standard tier skips 1/9-res kDownsample after kPostBloomExtract (saves 3 passes!)
+    cfg.bloom = 0.35f;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    int bloomExtractStd = 0, bloomDownsampleStd = 0, postAtmStd = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kPostBloomExtract) ++bloomExtractStd;
+        if (bloomExtractStd > 0 && c.shader == ShaderId::kDownsample) ++bloomDownsampleStd;
+        if (c.shader == ShaderId::kPostAtmosphere) ++postAtmStd;
+    }
+    EXPECT_TRUE(bloomExtractStd == 1 && postAtmStd == 1);
+    EXPECT_TRUE(bloomDownsampleStd == 0);
+
+    // Ultra tier + strong bloom enables the full 2-level wide halo pyramid
+    in.tierCaps = math::DeviceTierPolicy::capabilitiesFor(math::PerformanceTier::kUltra);
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    int bloomExtractUltra = 0, bloomDownsampleUltra = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kPostBloomExtract) ++bloomExtractUltra;
+        if (bloomExtractUltra > 0 && c.shader == ShaderId::kDownsample) ++bloomDownsampleUltra;
+    }
+    EXPECT_TRUE(bloomDownsampleUltra == 1);
+
+    // 3. Dual-face independent lower-face occlusion via LiveBeautyEngine::submitMulticlass6Planar:
+    //    Primary face (left half) unoccluded -> lipstick drawn; Secondary face (right half) masked -> lipstick muted, eye makeup kept!
+    {
+        MockRhiDevice engDev;
+        LiveBeautyEngine engine(engDev);
+        BeautyConfig ecfg{};
+        ecfg.enabled = true;
+        ecfg.maxFaces = 2;
+        ecfg.performanceTier = math::PerformanceTier::kUltra;
+        ecfg.lipstick = 0.65f;
+        ecfg.eyeshadow = 0.50f;
+        engine.setConfig(ecfg);
+        PipelineAssets engAssets{};
+        engAssets.blushAtlas = engDev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+        engAssets.eyebrowAtlas = engDev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+        engAssets.eyeMakeupAtlas = engDev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+        engAssets.contourHighlightAtlas = engDev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+        engAssets.irisAtlas = engDev.createTexture2D(16, 16, TextureFormat::kRgba8, nullptr);
+        engAssets.whiteAlphaFallbackTex = engDev.createTexture2D(1, 1, TextureFormat::kRgba8, nullptr);
+        engine.setAssets(engAssets);
+
+        auto makeCanonFace = [](float cx, float fw) {
+            std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+            const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+            const float aspect = 720.0f / 1280.0f;
+            const float scale = fw / math::FaceMeshFilter::canonicalFaceWidth();
+            for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+                const float mx = cx + xyz[i * 3] * scale;
+                const float my = (0.5f / aspect) + xyz[i * 3 + 1] * scale;
+                mpXy[i * 2] = mx;
+                mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+            }
+            for (int i = 468; i < 478; ++i) {
+                mpXy[i * 2] = cx;
+                mpXy[i * 2 + 1] = 0.45f;
+            }
+            return mpXy;
+        };
+        const auto fLeft = makeCanonFace(0.26f, 0.26f);
+        const auto fRight = makeCanonFace(0.74f, 0.24f);
+        math::MultiFaceTracker::RawFaceInput rawFaces[2] = {
+            {fLeft.data(), 478},
+            {fRight.data(), 478},
+        };
+        const TextureId engCam = engDev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        int64_t lastTs = 5000;
+        for (int k = 0; k < 8; ++k) {
+            lastTs = 5000 + k * 33;
+            EXPECT_TRUE(engine.submitMultiFaceLandmarks(lastTs, rawFaces, 2, 720, 1280, lastTs) == 2);
+            engine.processFrame(engCam, 720, 1280, lastTs, lastTs);
+        }
+
+        // Planar 6-class confidence maps: left half bare skin (p3=1), right half lower-face occluded by mask (p5=1)
+        constexpr int kW = 32, kH = 32;
+        std::vector<float> p0(kW * kH, 0.0f), p1(kW * kH, 0.0f), p2(kW * kH, 0.0f);
+        std::vector<float> p3(kW * kH, 0.0f), p4(kW * kH, 0.0f), p5(kW * kH, 0.0f);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int idx = y * kW + x;
+                if (x >= kW / 2 && y >= kH / 2) {
+                    p5[idx] = 0.98f; p0[idx] = 0.02f;  // Right face lower-half masked
+                } else {
+                    p3[idx] = 0.98f; p0[idx] = 0.02f;  // Bare skin
+                }
+            }
+        }
+        const float* planes[6] = {p0.data(), p1.data(), p2.data(), p3.data(), p4.data(), p5.data()};
+        EXPECT_TRUE(engine.submitMulticlass6Planar(planes, kW, kH, lastTs));
+
+        engDev.calls.clear();
+        engine.processFrame(engCam, 720, 1280, lastTs + 33, lastTs + 33);
+        int lipDraws = 0;
+        int eyeLayerDraws = 0;
+        for (const auto& c : engDev.calls) {
+            if (c.shader == ShaderId::kMakeupLip) ++lipDraws;
+            if (c.shader == ShaderId::kMakeupLayer) ++eyeLayerDraws;
+        }
+        // Only primary (left) face gets lipstick (1 draw), while BOTH faces get eyeshadow (2 layers * 2 faces = 4 draws)!
+        EXPECT_TRUE(lipDraws == 1);
+        EXPECT_TRUE(eyeLayerDraws == 4);
+        engine.releaseGpuResources();
+    }
+
+    pipe.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -1561,6 +1721,7 @@ int main() {
     testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1();
     testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise();
     testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute();
+    testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

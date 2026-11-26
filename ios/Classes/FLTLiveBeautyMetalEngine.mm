@@ -245,6 +245,11 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     c.hairDye = dictFloat(d, @"hairDye", 0.0f);
     c.hairDyeColor = livebeauty::parseHairDyeColor(dictString(d, @"hairDyeColor", "milk_tea_brown"));
     c.hairShine = dictFloat(d, @"hairShine", 0.0f);
+    c.bloom = dictFloat(d, @"bloom", 0.0f);
+    c.filmGrain = dictFloat(d, @"filmGrain", 0.0f);
+    c.colorTemp = dictFloat(d, @"colorTemp", 0.0f);
+    c.colorTint = dictFloat(d, @"colorTint", 0.0f);
+    c.autoWhiteBalance = dictFloat(d, @"autoWhiteBalance", 0.0f);
     c.preferHalfFloat = dictBool(d, @"preferHalfFloat", true);
     c.maxFaces = static_cast<int>(dictFloat(d, @"maxFaces", 1.0f));
     c.frameDelayFrames = static_cast<int>(dictFloat(d, @"frameDelayFrames", 0.0f));
