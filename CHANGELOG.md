@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.7.0] - 2026-11-27
+
+### Added & Improved
+- **Commercial-Grade Beauty Pipeline Upgrade (`BeautyQualityTuning`, `RenderPipeline`, `FaceMeshDeformer`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - **Green-Dominant Perceptual Skin Smoothing & Two-Stage Curve**: Upgraded `kGuidedDiff` / `kGuidedWeightDiff`, `kBlemishHeal`, and `kCompositePro` range kernels to a green-dominant perceptual distance (`sqrt(0.24*dr² + 0.58*dg² + 0.18*db²) * 1.73205`) resisting indoor R/B chroma sensor noise while keeping exact edge preservation on neutral gray contours; added zero-extra-pass mid-band isolated dark pore/blemish pre-lift inside skin (`spotDelta ∈ [0.018, 0.240]`, `yOrig > 0.14`, skips dark hair/lash/beard and flat skin) and a two-stage smoothing curve (`BeautyQualityTuning::twoStageSmoothMix` / `twoStageDetailKeep`: `0..0.60` ramps clean coverage with 100% natural micro-grain, `0.60..1.0` tapers grain smoothly to porcelain finish).
+  - **Log-Compressed Halo-Free Clarity**: Upgraded `kCompositePro` / `fs_composite_pro` sharpening to green-dominant band-pass with logarithmic gradient compression (`sign(g) * log(1 + 42*|g|) / 42`), sub-noise floor gating (`0.35..0.90 * core`), and balanced skin shielding (`1 - 0.62 * skin * featureKeep * faceM`), lifting eyelashes, hair strands, and eye contour crispness without ringing halos or grain amplification.
+  - **Adaptive Indoor Temporal Stabilization**: Added `BeautyQualityTuning::indoorTemporalDenoise(lightLuma)` to extend subtle temporal noise stabilization (`0.04..0.11`) into normal indoor rooms (`lightLuma ∈ [0.18, 0.38]`) while staying `0.0` in bright daylight and `0.0` during camera shake (`denoiseKeep = 0`).
+  - **Implicit Natural Retouch Synergy & Upgraded Local Retouch (`kRetouchSkin`, `kRetouchEyeTeeth`)**: Enabled subtle automatic dark-circle (`smoothing * 0.35`), nasolabial fold (`smoothing * 0.25`), and bright-eye (`smoothing * 0.40`) synergy whenever skin smoothing is active; upgraded tear-trough retouch to neutralize cool/bluish under-eye cast alongside luminance deficit (`0/255` on uniform skin, strictly non-darkening), upgraded nasolabial fold retouch with crease-gated base lift (`0/255` on flat skin), upgraded bright-eyes to strictly brighten-only 4-tap local sparkle + clean sclera (never darkening pupils, irises, or eyeliner), and gated `teethWhiten` by landmark mouth-opening ratio (`BeautyQualityTuning::mouthOpenGate`).
+  - **Exact W3C Soft-Light Makeup & Extreme Side-Profile Contour Guard**: Upgraded `softLightBlend` in `kMakeupLayer` / `fs_makeup_layer` from Pegtop approximation to exact W3C/Photoshop Soft-Light for more luminous 3D contour & highlight; added asymmetric narrow-side contour guard (`1.95..2.55x` width ratio) in `FaceMeshDeformer` to prevent far-cheek silhouette collapse during steep 3/4 turns.
+
 ## [3.6.15] - 2026-11-26
 
 ### Added & Fixed

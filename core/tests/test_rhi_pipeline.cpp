@@ -1272,6 +1272,128 @@ void testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1() {
     engine.releaseGpuResources();
 }
 
+void testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise() {
+    MockRhiDevice dev;
+    RenderPipeline pipe(dev);
+    const TextureId inTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+
+    std::array<float, math::FaceMeshFrame::kCoordCount> lm{};
+    const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 720.0f / 1280.0f;
+    const float scale = 0.40f / math::FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+        lm[i * 2] = 0.50f + xyz[i * 3] * scale;
+        lm[i * 2 + 1] = 0.50f + xyz[i * 3 + 1] * scale * aspect;
+    }
+    math::FaceMeshFrame::synthesizeIris(lm.data(), 468, 33, 133, 159, 145, aspect);
+    math::FaceMeshFrame::synthesizeIris(lm.data(), 473, 362, 263, 386, 374, aspect);
+    float meta[math::FaceMeshFrame::kMetaSize]{};
+    EXPECT_TRUE(math::FaceMeshFrame::fillMeta(lm.data(), math::FaceMeshFrame::kCoordCount, aspect, meta));
+
+    FrameInputs in{};
+    in.inputTexture = inTex;
+    in.width = 720;
+    in.height = 1280;
+    in.nowMs = 1000;
+    in.hasFaceMesh = true;
+    in.landmarks478x2 = lm.data();
+    in.faceMeta15 = meta;
+    in.hasIris = true;
+    in.facePresence = 1.0f;
+    in.steadyFace = 1.0f;
+    in.steadyEye = 1.0f;
+    in.denoiseKeep = 1.0f;
+    in.loadFadeSmooth = 1.0f;
+    in.loadFadeFace = 1.0f;
+
+    // 1. Implicit natural retouch synergy activates automatically with smoothing=0.60 even when explicit retouch sliders are 0
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.smoothing = 0.60f;
+    cfg.darkCircles = 0.0f;
+    cfg.nasolabial = 0.0f;
+    cfg.brightEyes = 0.0f;
+    cfg.teethWhiten = 0.0f;
+
+    in.lightLuma = 0.24f;  // Normal indoor light -> triggers gentle indoor temporal denoise (v3.7.0)
+    // Frame 1 primes temporal denoise history; Frame 2 blends via kTemporalDenoise and reports kPassDenoise.
+    pipe.render(cfg, in);
+    in.nowMs = 1033;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassRetouch) != 0);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) != 0);
+
+    bool sawSkinRetouch = false;
+    bool sawEyeSparkleWithTexel = false;
+    bool sawTeethDraw = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kRetouchSkin && c.uniforms.count >= 1) {
+            sawSkinRetouch = (std::fabs(c.uniforms.v[0].x - 0.21f) < 0.01f &&
+                              std::fabs(c.uniforms.v[0].y - 0.15f) < 0.01f);
+        } else if (c.shader == ShaderId::kRetouchEyeTeeth && c.uniforms.count >= 1) {
+            if (c.uniforms.v[0].y < 0.5f) {
+                sawEyeSparkleWithTexel = (std::fabs(c.uniforms.v[0].x - 0.24f) < 0.01f &&
+                                          c.uniforms.v[0].z > 0.001f && c.uniforms.v[0].w > 0.0005f);
+            } else {
+                sawTeethDraw = true;
+            }
+        }
+    }
+    EXPECT_TRUE(sawSkinRetouch);
+    EXPECT_TRUE(sawEyeSparkleWithTexel);
+    EXPECT_TRUE(!sawTeethDraw);
+
+    // 2. Bright daylight (lightLuma=0.45) and camera shake (denoiseKeep=0.0) both keep kPassDenoise == 0
+    in.lightLuma = 0.45f;
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) == 0);
+    in.lightLuma = 0.24f;
+    in.denoiseKeep = 0.0f;
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) == 0);
+    in.denoiseKeep = 1.0f;
+
+    // 3. Open-mouth teeth whitening gate: closed mouth suppresses teeth draw, open mouth activates it
+    cfg.teethWhiten = 0.85f;
+    // Closed mouth: lm[13] == lm[14]
+    const float midLipY = 0.5f * (lm[13 * 2 + 1] + lm[14 * 2 + 1]);
+    lm[13 * 2 + 1] = midLipY;
+    lm[14 * 2 + 1] = midLipY;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    bool sawTeethClosed = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kRetouchEyeTeeth && c.uniforms.count >= 1 && c.uniforms.v[0].y > 0.5f) {
+            sawTeethClosed = true;
+        }
+    }
+    EXPECT_TRUE(!sawTeethClosed);
+
+    // Open mouth: gap/width = 0.18 (> 0.135 -> mouthOpenGate == 1.0)
+    const float mw = std::hypot(lm[291 * 2] - lm[61 * 2], (lm[291 * 2 + 1] - lm[61 * 2 + 1]) / aspect);
+    lm[13 * 2 + 1] = midLipY + 0.09f * mw * aspect;
+    lm[14 * 2 + 1] = midLipY - 0.09f * mw * aspect;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    float teethStrength = 0.0f;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kRetouchEyeTeeth && c.uniforms.count >= 1 && c.uniforms.v[0].y > 0.5f) {
+            teethStrength = c.uniforms.v[0].x;
+        }
+    }
+    EXPECT_TRUE(teethStrength >= 0.84f);
+
+    // 4. smoothing=0 + explicit retouch=0 -> kPassRetouch == 0
+    cfg.smoothing = 0.0f;
+    cfg.teethWhiten = 0.0f;
+    cfg.whiten = 0.30f;
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassRetouch) == 0);
+
+    pipe.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -1287,6 +1409,7 @@ int main() {
     testV36ChromaKeyParticlesMulticlassAndHandShield();
     testV3610CheekMakeupSteadyFaceAndAutoOccDecoupling();
     testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1();
+    testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

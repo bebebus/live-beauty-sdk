@@ -368,8 +368,14 @@ bool FaceMeshDeformer::deform(
     const float poseLeftFade = 1.0f - 0.82f * detail::smoothstep(0.36f, 0.66f, -signedYaw);
     const float smoothRightW = 1.0f - detail::smoothstep(0.36f, 0.66f, signedYaw);
     const float smoothLeftW = 1.0f - detail::smoothstep(0.36f, 0.66f, -signedYaw);
-    const float effRightW = std::min(temporal ? smoothRightW : rightWeight, poseRightFade);
-    const float effLeftW = std::min(temporal ? smoothLeftW : leftWeight, poseLeftFade);
+    // v3.7.0 Extreme side-profile asymmetric narrow-side contour guard (ratio 1.95..2.55x):
+    // prevents far narrow cheek silhouette from collapsing inward on steep 3/4 turns.
+    const float wRatioL = wRight / std::max(wLeft, 1e-4f);
+    const float wRatioR = wLeft / std::max(wRight, 1e-4f);
+    const float narrowGuardL = 1.0f - 0.85f * detail::smoothstep(1.95f, 2.55f, wRatioL);
+    const float narrowGuardR = 1.0f - 0.85f * detail::smoothstep(1.95f, 2.55f, wRatioR);
+    const float effRightW = std::min(temporal ? smoothRightW : rightWeight, poseRightFade) * narrowGuardR;
+    const float effLeftW = std::min(temporal ? smoothLeftW : leftWeight, poseLeftFade) * narrowGuardL;
     const float rSideW = (mirrorSign > 0.0f) ? effLeftW : effRightW;
     const float lSideW = (mirrorSign > 0.0f) ? effRightW : effLeftW;
     const float maxDisp = 0.135f * std::max(fw, fh);

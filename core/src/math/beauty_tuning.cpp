@@ -34,6 +34,37 @@ float BeautyQualityTuning::ambientSceneLift(float lightLuma) {
     return detail::clampf(0.30f * indoorKeep + 0.26f * dimBoost, 0.0f, 0.56f);
 }
 
+float BeautyQualityTuning::indoorTemporalDenoise(float lightLuma) {
+    if (!std::isfinite(lightLuma)) return 0.0f;
+    // v3.7.0 Clean-room indoor temporal stabilization weight:
+    // - Very dim light (<= 0.12): 0.18 (strong static sensor noise suppression)
+    // - Normal indoor (0.18..0.34): gentle 0.04..0.11 (steadies skin gate & clarity)
+    // - Bright scenes (>= 0.38): 0.0 (zero temporal cost in daylight)
+    const float dim = 1.0f - detail::smoothstep(0.08f, 0.20f, lightLuma);
+    const float indoor = 1.0f - detail::smoothstep(0.18f, 0.38f, lightLuma);
+    return detail::clampf(0.10f * dim + 0.08f * indoor, 0.0f, 0.18f);
+}
+
+float BeautyQualityTuning::twoStageSmoothMix(float smoothing) {
+    if (!std::isfinite(smoothing) || smoothing <= 0.0f) return 0.0f;
+    const float s = detail::clampf(smoothing, 0.0f, 1.0f);
+    // Stage 1 (0..0.60): rapid clean skin coverage; Stage 2 (0.60..1.0): full coverage while softening detail keep.
+    const float stage1 = detail::clampf(s / 0.60f, 0.0f, 1.0f);
+    return detail::clampf(stage1 * (0.86f + 0.14f * stage1) * 0.96f, 0.0f, 0.96f);
+}
+
+float BeautyQualityTuning::twoStageDetailKeep(float smoothing) {
+    if (!std::isfinite(smoothing) || smoothing <= 0.0f) return 1.0f;
+    const float s = detail::clampf(smoothing, 0.0f, 1.0f);
+    // Keep full natural skin texture across 0..0.60, taper smoothly to 0.45 toward 1.0 for porcelain smoothness.
+    return 1.0f - 0.55f * detail::smoothstep(0.60f, 1.0f, s);
+}
+
+float BeautyQualityTuning::mouthOpenGate(float openRatio) {
+    if (!std::isfinite(openRatio)) return 0.0f;
+    return detail::smoothstep(0.055f, 0.135f, openRatio);
+}
+
 void GuidedSpread::reset() {
     value_ = kDefault;
     smoothed_ = kDefault;

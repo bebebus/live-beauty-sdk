@@ -1050,9 +1050,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     const float aspect = static_cast<float>(in.width) / static_cast<float>(in.height);
     TextureId currentTex = in.inputTexture;
 
-    // 0. Adaptive Temporal Denoise (Stage 0 pre-warp, matching VideoEffectsFilter.kt; strict 8/255 motion cutoff + 0.18 cap)
-    const float lumaDenoise = (config.smoothing > 0.0f && std::isfinite(in.lightLuma))
-        ? detail::clampf((0.18f - in.lightLuma) / 0.10f, 0.0f, 1.0f) * 0.18f
+    // 0. Adaptive Temporal Denoise (Stage 0 pre-warp: v3.7.0 smooth indoor stabilization; strict motion cutoff + 0.18 cap)
+    const float lumaDenoise = (config.smoothing > 0.0f)
+        ? math::BeautyQualityTuning::indoorTemporalDenoise(in.lightLuma)
         : 0.0f;
     const float denoiseWeight = detail::clampf(
         std::max(lumaDenoise, math::BitrateEffectsTuning::denoise(in.bitratePressure)) *
@@ -1339,8 +1339,15 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     const auto deformParams = math::FaceMeshDeformer::Params::fromConfig(config);
     const bool wantWarp = in.hasFaceMesh && activeLandmarks && in.faceMeta15 &&
                           effFacePresence > 1e-4f && deformParams.isActive();
+    // v3.7.0 Implicit natural retouch synergy (strictly non-darkening & 0/255 on flat skin)
+    const bool hasImplicitRetouch = config.enabled && !config.compareOriginal && config.smoothing > 1e-4f;
     const bool wantRetouch = in.hasFaceMesh && activeLandmarks && in.faceMeta15 &&
-                             effFacePresence > 1e-4f && config.hasRetouch();
+                             effFacePresence > 1e-4f && (config.hasRetouch() || hasImplicitRetouch);
+    const auto computeMouthOpenGate = [aspect](const float* lm) -> float {
+        const float mw = std::hypot(lm[291 * 2] - lm[61 * 2], (lm[291 * 2 + 1] - lm[61 * 2 + 1]) / aspect);
+        const float mh = std::hypot(lm[14 * 2] - lm[13 * 2], (lm[14 * 2 + 1] - lm[13 * 2 + 1]) / aspect);
+        return math::BeautyQualityTuning::mouthOpenGate(mh / std::max(mw, 1e-3f));
+    };
 
     if (wantWarp) {
         meshWarped = deformer_.deform(
@@ -1403,10 +1410,14 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
 
         // In-place 468-pt anatomical sub-mesh retouch directly on rtWarp_ (zero extra 1080p FBO).
         if (wantRetouch) {
-            const float dc = detail::clampf(config.darkCircles * effFacePresence * in.steadyFace, 0.0f, 1.0f);
-            const float nf = detail::clampf(config.nasolabial * effFacePresence * in.steadyFace, 0.0f, 1.0f);
-            const float be = detail::clampf(config.brightEyes * effFacePresence * in.steadyEye, 0.0f, 1.0f);
-            const float tw = detail::clampf(config.teethWhiten * effFacePresence * in.steadyEye, 0.0f, 1.0f);
+            const float baseDc = hasImplicitRetouch ? std::max(config.darkCircles, config.smoothing * 0.35f) : config.darkCircles;
+            const float baseNf = hasImplicitRetouch ? std::max(config.nasolabial, config.smoothing * 0.25f) : config.nasolabial;
+            const float baseBe = hasImplicitRetouch ? std::max(config.brightEyes, config.smoothing * 0.40f) : config.brightEyes;
+            const float dc = detail::clampf(baseDc * effFacePresence * in.steadyFace, 0.0f, 1.0f);
+            const float nf = detail::clampf(baseNf * effFacePresence * in.steadyFace, 0.0f, 1.0f);
+            const float be = detail::clampf(baseBe * effFacePresence * in.steadyEye, 0.0f, 1.0f);
+            const float mouthGate = (config.teethWhiten > 1e-4f) ? computeMouthOpenGate(postWarpLandmarks) : 0.0f;
+            const float tw = detail::clampf(config.teethWhiten * mouthGate * effFacePresence * in.steadyEye, 0.0f, 1.0f);
             const float ax = in.faceMeta15[math::FaceMeshFrame::kMetaAxisX];
             const float ay = in.faceMeta15[math::FaceMeshFrame::kMetaAxisY];
             const float norm = std::hypot(ax, ay);
@@ -1437,7 +1448,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 }
                 if (be > 1e-4f) {
                     UniformBlock ub{};
-                    ub.push(be, 0.0f, 0.0f, 0.0f);
+                    ub.push(be, 0.0f, 1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height));
                     device_.drawIndexed(
                         ShaderId::kRetouchEyeTeeth, retouchSt, vbRetouch_, ibEyeOpening_,
                         0, static_cast<int>(math::FaceMakeupUv::eyeOpeningIndices().size()),
@@ -1469,7 +1480,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     if (secActive) {
         lastActivePassesMask_ |= kPassDualFace;
         const bool wantSecWarp = deformParams.isActive();
-        const bool wantSecRetouch = config.hasRetouch();
+        const bool wantSecRetouch = config.hasRetouch() || hasImplicitRetouch;
         if (wantSecWarp) {
             secWarped = deformer2_.deform(
                 sec.landmarks478x2, aspect,
@@ -1510,10 +1521,14 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 lastActivePassesMask_ |= kPassFaceWarp;
             }
             if (wantSecRetouch) {
-                const float dc = detail::clampf(config.darkCircles * effSecPresence * sec.steadyFace, 0.0f, 1.0f);
-                const float nf = detail::clampf(config.nasolabial * effSecPresence * sec.steadyFace, 0.0f, 1.0f);
-                const float be = detail::clampf(config.brightEyes * effSecPresence * sec.steadyEye, 0.0f, 1.0f);
-                const float tw = detail::clampf(config.teethWhiten * effSecPresence * sec.steadyEye, 0.0f, 1.0f);
+                const float baseDc = hasImplicitRetouch ? std::max(config.darkCircles, config.smoothing * 0.35f) : config.darkCircles;
+                const float baseNf = hasImplicitRetouch ? std::max(config.nasolabial, config.smoothing * 0.25f) : config.nasolabial;
+                const float baseBe = hasImplicitRetouch ? std::max(config.brightEyes, config.smoothing * 0.40f) : config.brightEyes;
+                const float dc = detail::clampf(baseDc * effSecPresence * sec.steadyFace, 0.0f, 1.0f);
+                const float nf = detail::clampf(baseNf * effSecPresence * sec.steadyFace, 0.0f, 1.0f);
+                const float be = detail::clampf(baseBe * effSecPresence * sec.steadyEye, 0.0f, 1.0f);
+                const float secMouthGate = (config.teethWhiten > 1e-4f) ? computeMouthOpenGate(postSecLandmarks) : 0.0f;
+                const float tw = detail::clampf(config.teethWhiten * secMouthGate * effSecPresence * sec.steadyEye, 0.0f, 1.0f);
                 const float ax = sec.meta15[math::FaceMeshFrame::kMetaAxisX];
                 const float ay = sec.meta15[math::FaceMeshFrame::kMetaAxisY];
                 const float norm = std::hypot(ax, ay);
@@ -1535,7 +1550,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                                             VertexLayout::kRetouchPos2Uv2A4, tb, ub);
                     }
                     if (be > 1e-4f) {
-                        UniformBlock ub{}; ub.push(be, 0.0f, 0.0f, 0.0f);
+                        UniformBlock ub{}; ub.push(be, 0.0f, 1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height));
                         device_.drawIndexed(ShaderId::kRetouchEyeTeeth, retouchSt, vbRetouch_, ibEyeOpening_,
                                             0, static_cast<int>(math::FaceMakeupUv::eyeOpeningIndices().size()),
                                             VertexLayout::kRetouchPos2Uv2A4, tb, ub);

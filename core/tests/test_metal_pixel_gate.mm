@@ -2206,6 +2206,283 @@ void testV3615MetalDouyinAmbientSceneBrightnessLift(MetalDevice& dev) {
     EXPECT_TRUE(int(brightLamp.r) >= 236 && int(brightLamp.r) <= 250);
 }
 
+void testV370MetalCommercialBeautyPixelInvariants(MetalDevice& dev) {
+    // 1. Pre-smooth isolated mid-band dark blemish pre-lift vs dark hair protection & flat skin 0/255 invariant
+    {
+        constexpr int kSz = 32;
+        std::vector<uint8_t> srcPx(kSz * kSz * 4);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const int i = (y * kSz + x) * 4;
+                uint8_t r = 205, g = 165, b = 148;
+                if (x >= 15 && x <= 17 && y >= 15 && y <= 17) {
+                    // Isolated mid-band dark blemish/pore on cheek
+                    r = 184; g = 144; b = 128;
+                } else if (x >= 4 && x <= 10 && y >= 4 && y <= 10) {
+                    // Dark hair / lash strand (yOrig < 0.14)
+                    r = 22; g = 18; b = 16;
+                }
+                srcPx[i + 0] = r; srcPx[i + 1] = g; srcPx[i + 2] = b; srcPx[i + 3] = 255;
+            }
+        }
+        const TextureId srcTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, srcPx.data());
+        const TextureId coeffTex = makeSolidTex(dev, kSz, kSz, 205, 165, 148, 0);
+        const TextureId semTex = makeSolidTex(dev, kSz, kSz, 255, 0, 76, 255);
+        const TextureId lutTex = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, coeffTex); tb.bind(2, semTex); tb.bind(3, lutTex);
+        UniformBlock ub{};
+        ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);
+        ub.push(16.0f, 0.55f, 0.0f, 0.0f);  // skinOnly=1, smoothing=0.55
+        ub.push(0.0f, 0.0f, 1.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.35f, 0.45f);
+        ub.push(0.5f, 0.5f, 0.20f, 0.12f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.015f, 0.0f, 0.0f);
+        dev.beginPass(rt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        auto px = [&](int x, int y) -> Rgba {
+            const int idx = (y * kSz + x) * 4;
+            return {out[idx], out[idx + 1], out[idx + 2], out[idx + 3]};
+        };
+        const Rgba blemishOut = px(16, 16);
+        const Rgba hairOut = px(7, 7);
+        const Rgba flatOut = px(26, 26);
+        EXPECT_TRUE(int(blemishOut.r) >= 198 && int(blemishOut.g) >= 158);
+        EXPECT_TRUE(int(hairOut.r) <= 24 && int(hairOut.g) <= 20);
+        EXPECT_TRUE(flatOut.r == 205 && flatOut.g == 165 && flatOut.b == 148);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(lutTex);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(coeffTex);
+        dev.destroyTexture(srcTex);
+    }
+
+    // 2. Log-compressed halo-free clarity: flat skin & sub-noise 1-LSB dots stay exact 0/255, real detail pops cleanly
+    {
+        constexpr int kSz = 32;
+        std::vector<uint8_t> srcPx(kSz * kSz * 4);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const int i = (y * kSz + x) * 4;
+                uint8_t v = 132;
+                if (x >= 15 && x <= 17 && y >= 15 && y <= 17) v = 168;  // 3x3 detail ridge
+                else if (x == 8 && y == 24) v = 133;                    // 1-LSB sub-noise dot
+                srcPx[i + 0] = v; srcPx[i + 1] = v; srcPx[i + 2] = v; srcPx[i + 3] = 255;
+            }
+        }
+        const TextureId srcTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, srcPx.data());
+        const TextureId coeffTex = makeSolidTex(dev, kSz, kSz, 132, 132, 132, 0);
+        const TextureId semTex = makeSolidTex(dev, kSz, kSz, 255, 255, 0, 255);  // exclM=1.0 (eye/lash detail zone)
+        const TextureId lutTex = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, coeffTex); tb.bind(2, semTex); tb.bind(3, lutTex);
+        UniformBlock ub{};
+        ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);
+        ub.push(16.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.80f, 1.0f, 0.0f);  // sharpness=0.80
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.35f, 0.45f);
+        ub.push(0.5f, 0.5f, 0.20f, 0.12f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.015f, 0.0f, 0.0f);
+        dev.beginPass(rt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        auto px = [&](int x, int y) -> Rgba {
+            const int idx = (y * kSz + x) * 4;
+            return {out[idx], out[idx + 1], out[idx + 2], out[idx + 3]};
+        };
+        const Rgba flatOut = px(26, 26);
+        const Rgba noiseOut = px(8, 24);
+        const Rgba ridgeOut = px(16, 16);
+        EXPECT_TRUE(flatOut.r == 132 && flatOut.g == 132 && flatOut.b == 132);
+        EXPECT_TRUE(noiseOut.r == 133 && noiseOut.g == 133 && noiseOut.b == 133);
+        EXPECT_TRUE(int(ridgeOut.g) >= 174 && int(ridgeOut.g) <= 205);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(lutTex);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(coeffTex);
+        dev.destroyTexture(srcTex);
+    }
+
+    // 3. Strictly brighten-only Bright Eyes (kRetouchEyeTeeth): never darkens pupil/iris, pops catchlight & cleans sclera
+    {
+        constexpr int kSz = 16;
+        std::vector<uint8_t> eyePx(kSz * kSz * 4, 255);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const int i = (y * kSz + x) * 4;
+                if (x < 8 && y < 8) {
+                    eyePx[i + 0] = 52; eyePx[i + 1] = 40; eyePx[i + 2] = 34;  // dark iris
+                    if (x <= 2 && y <= 2) {
+                        eyePx[i + 0] = 16; eyePx[i + 1] = 14; eyePx[i + 2] = 14;  // pitch-dark pupil
+                    } else if (x == 5 && y == 5) {
+                        eyePx[i + 0] = 116; eyePx[i + 1] = 108; eyePx[i + 2] = 102;  // iris catchlight
+                    }
+                } else {
+                    eyePx[i + 0] = 168; eyePx[i + 1] = 148; eyePx[i + 2] = 144;  // slightly reddish sclera
+                }
+            }
+        }
+        const TextureId srcTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, eyePx.data());
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        const float verts[32] = {
+            -1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+             1.0f, -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+             1.0f,  1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        };
+        const uint16_t indices[6] = {0, 1, 2, 2, 1, 3};
+        const BufferId vb = dev.createDynamicVertexBuffer(sizeof(verts));
+        dev.updateVertexBuffer(vb, verts, sizeof(verts));
+        const BufferId ib = dev.createStaticIndexBuffer(indices, 6);
+        dev.beginPass(rt, kSz, kSz, false, {});
+        {
+            RenderState copySt{};
+            TextureBindings tb{}; tb.bind(0, srcTex);
+            UniformBlock ub{};
+            dev.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+        }
+        {
+            RenderState st{}; st.blendEnable = true;
+            TextureBindings tb{}; tb.bind(0, srcTex);
+            UniformBlock ub{}; ub.push(0.90f, 0.0f, 1.0f / kSz, 1.0f / kSz);
+            dev.drawIndexed(ShaderId::kRetouchEyeTeeth, st, vb, ib, 0, 6, VertexLayout::kRetouchPos2Uv2A4, tb, ub);
+        }
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        auto px = [&](int x, int y) -> Rgba {
+            const int idx = (y * kSz + x) * 4;
+            return {out[idx], out[idx + 1], out[idx + 2], out[idx + 3]};
+        };
+        const Rgba pupilOut = px(1, 1);
+        const Rgba irisOut = px(3, 6);
+        const Rgba catchOut = px(5, 5);
+        const Rgba scleraOut = px(12, 12);
+        EXPECT_TRUE(pupilOut.r >= 16 && pupilOut.g >= 14 && pupilOut.b >= 14);
+        EXPECT_TRUE(irisOut.r >= 52 && irisOut.g >= 40 && irisOut.b >= 34);
+        EXPECT_TRUE(int(catchOut.r) >= 116 + 15);
+        EXPECT_TRUE(int(scleraOut.g) >= 148 + 8 && int(scleraOut.b) >= 144 + 10 &&
+                    (int(scleraOut.r) - int(scleraOut.b)) < (168 - 144));
+        dev.destroyBuffer(ib);
+        dev.destroyBuffer(vb);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(srcTex);
+    }
+
+    // 4. Cool-cast Tear Trough & Crease-filled Nasolabial (kRetouchSkin): non-darkening, lifts folds/cool tint, 0/255 on flat skin
+    {
+        constexpr int kSz = 16;
+        // 4a: Top half cool bluish under-eye (152,134,146), bottom half warm lower cheek (182,150,136)
+        std::vector<uint8_t> dcPx(kSz * kSz * 4, 255);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const int i = (y * kSz + x) * 4;
+                if (y < 8) { dcPx[i + 0] = 152; dcPx[i + 1] = 134; dcPx[i + 2] = 146; }
+                else       { dcPx[i + 0] = 182; dcPx[i + 1] = 150; dcPx[i + 2] = 136; }
+            }
+        }
+        const TextureId dcTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, dcPx.data());
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        const float dcVerts[32] = {
+            -1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, -0.50f,
+             1.0f, -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, -0.50f,
+            -1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, -0.50f,
+             1.0f,  1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, -0.50f,
+        };
+        const uint16_t indices[6] = {0, 1, 2, 2, 1, 3};
+        const BufferId vb = dev.createDynamicVertexBuffer(sizeof(dcVerts));
+        const BufferId ib = dev.createStaticIndexBuffer(indices, 6);
+        dev.updateVertexBuffer(vb, dcVerts, sizeof(dcVerts));
+        dev.beginPass(rt, kSz, kSz, false, {});
+        {
+            RenderState copySt{}; TextureBindings tb{}; tb.bind(0, dcTex); UniformBlock ub{};
+            dev.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+        }
+        {
+            RenderState st{}; st.blendEnable = true; TextureBindings tb{}; tb.bind(0, dcTex);
+            UniformBlock ub{}; ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+            dev.drawIndexed(ShaderId::kRetouchSkin, st, vb, ib, 0, 6, VertexLayout::kRetouchPos2Uv2A4, tb, ub);
+        }
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        const int dcIdx = (4 * kSz + 8) * 4;
+        const int flatDcIdx = (12 * kSz + 8) * 4;
+        // Cool tear trough warms & lifts cleanly (strictly non-darkening), flat lower cheek stays exact 0/255
+        EXPECT_TRUE(out[dcIdx] >= 152 + 16 && out[dcIdx + 1] >= 134 + 10 && out[dcIdx + 2] >= 146);
+        EXPECT_TRUE(out[flatDcIdx] == 182 && out[flatDcIdx + 1] == 150 && out[flatDcIdx + 2] == 136);
+
+        // 4b: Vertical nasolabial dark crease at x=8 (136,104,92) flanked by warm cheek (176,140,124)
+        std::vector<uint8_t> nfPx(kSz * kSz * 4, 255);
+        for (int y = 0; y < kSz; ++y) {
+            for (int x = 0; x < kSz; ++x) {
+                const int i = (y * kSz + x) * 4;
+                if (x == 8) { nfPx[i + 0] = 136; nfPx[i + 1] = 104; nfPx[i + 2] = 92; }
+                else        { nfPx[i + 0] = 176; nfPx[i + 1] = 140; nfPx[i + 2] = 124; }
+            }
+        }
+        const TextureId nfTex = dev.createTexture2D(kSz, kSz, TextureFormat::kRgba8, nfPx.data());
+        const float nfVerts[32] = {
+            -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.18f, 0.0f,
+             1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.18f, 0.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.18f, 0.0f,
+             1.0f,  1.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.18f, 0.0f,
+        };
+        dev.updateVertexBuffer(vb, nfVerts, sizeof(nfVerts));
+        dev.beginPass(rt, kSz, kSz, false, {});
+        {
+            RenderState copySt{}; TextureBindings tb{}; tb.bind(0, nfTex); UniformBlock ub{};
+            dev.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
+        }
+        {
+            RenderState st{}; st.blendEnable = true; TextureBindings tb{}; tb.bind(0, nfTex);
+            UniformBlock ub{}; ub.push(0.0f, 1.0f, 0.0f, 0.0f);
+            dev.drawIndexed(ShaderId::kRetouchSkin, st, vb, ib, 0, 6, VertexLayout::kRetouchPos2Uv2A4, tb, ub);
+        }
+        dev.endPass();
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        const int nfIdx = (8 * kSz + 8) * 4;
+        const int flatNfIdx = (8 * kSz + 2) * 4;
+        EXPECT_TRUE(out[nfIdx] >= 136 + 24 && out[nfIdx + 1] >= 104 + 20 && out[nfIdx + 2] >= 92 + 16);
+        EXPECT_TRUE(out[flatNfIdx] == 176 && out[flatNfIdx + 1] == 140 && out[flatNfIdx + 2] == 124);
+
+        dev.destroyBuffer(ib);
+        dev.destroyBuffer(vb);
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(nfTex);
+        dev.destroyTexture(dcTex);
+    }
+
+    // 5. Exact W3C softLightBlend in kMakeupLayer lifts luminous highlight cleanly without clipping
+    {
+        UniformBlock ub{};
+        ub.push(0.96f, 0.93f, 0.88f, 0.80f);  // luminous warm champagne highlight
+        ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);      // mode.x=0 (W3C softLight + subtle mult)
+        const Rgba hiOut = evalMakeupShader(dev, ShaderId::kMakeupLayer, {145, 115, 100, 255}, {255, 0, 0, 255}, ub);
+        EXPECT_TRUE(int(hiOut.r) >= 145 + 10 && int(hiOut.g) >= 115 + 8 && int(hiOut.r) <= 235);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2234,6 +2511,7 @@ int main() {
         testV3613MetalHairDyeRgbBoundaryMattingBangsAndDarkHairUniformity(dev);
         testV3614TikTokExposureCoupledNonDarkeningLips(dev);
         testV3615MetalDouyinAmbientSceneBrightnessLift(dev);
+        testV370MetalCommercialBeautyPixelInvariants(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

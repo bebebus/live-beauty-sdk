@@ -1817,6 +1817,73 @@ void testV3615DouyinAmbientSceneLiftCurve() {
     EXPECT_NEAR(sunny, 0.0f, 1e-5f);
 }
 
+void testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard() {
+    // 1. Adaptive indoor temporal stabilization curve
+    EXPECT_NEAR(BeautyQualityTuning::indoorTemporalDenoise(std::numeric_limits<float>::quiet_NaN()), 0.0f, 1e-6f);
+    const float dDim = BeautyQualityTuning::indoorTemporalDenoise(0.08f);
+    const float dIndoor = BeautyQualityTuning::indoorTemporalDenoise(0.24f);
+    const float dBright = BeautyQualityTuning::indoorTemporalDenoise(0.40f);
+    EXPECT_NEAR(dDim, 0.18f, 1e-4f);
+    EXPECT_TRUE(dIndoor >= 0.04f && dIndoor <= 0.11f && dIndoor < dDim);
+    EXPECT_NEAR(dBright, 0.0f, 1e-5f);
+
+    // 2. Two-stage commercial smoothing curve: 0..0.60 ramps coverage to 0.96 with 100% detail keep;
+    //    0.60..1.0 holds coverage and tapers detail keep smoothly down to 0.45.
+    EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(0.0f), 0.0f, 1e-6f);
+    EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(0.60f), 0.96f, 1e-4f);
+    EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(1.0f), 0.96f, 1e-4f);
+    EXPECT_TRUE(BeautyQualityTuning::twoStageSmoothMix(0.30f) > 0.40f &&
+                BeautyQualityTuning::twoStageSmoothMix(0.30f) < 0.55f);
+    EXPECT_NEAR(BeautyQualityTuning::twoStageDetailKeep(0.0f), 1.0f, 1e-6f);
+    EXPECT_NEAR(BeautyQualityTuning::twoStageDetailKeep(0.60f), 1.0f, 1e-6f);
+    EXPECT_TRUE(BeautyQualityTuning::twoStageDetailKeep(0.80f) > 0.65f &&
+                BeautyQualityTuning::twoStageDetailKeep(0.80f) < 0.80f);
+    EXPECT_NEAR(BeautyQualityTuning::twoStageDetailKeep(1.0f), 0.45f, 1e-4f);
+
+    // 3. Open-mouth teeth whitening gate
+    EXPECT_NEAR(BeautyQualityTuning::mouthOpenGate(std::numeric_limits<float>::quiet_NaN()), 0.0f, 1e-6f);
+    EXPECT_NEAR(BeautyQualityTuning::mouthOpenGate(0.04f), 0.0f, 1e-6f);
+    const float halfOpen = BeautyQualityTuning::mouthOpenGate(0.095f);
+    EXPECT_TRUE(halfOpen > 0.35f && halfOpen < 0.65f);
+    EXPECT_NEAR(BeautyQualityTuning::mouthOpenGate(0.16f), 1.0f, 1e-5f);
+
+    // 4. Extreme 3/4 side-profile asymmetric narrow-side contour guard (width ratio > 2.55x):
+    //    Narrow far-side cheek contour MUST be protected against inward silhouette collapse!
+    constexpr float kAspect = 9.0f / 16.0f;
+    std::array<float, FaceMeshFrame::kCoordCount> yawGl{};
+    makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.42f, 0.48f, 0.0f, 0.0f, yawGl);
+    float meta[FaceMeshFrame::kMetaSize]{};
+    EXPECT_TRUE(FaceMeshFrame::fillMeta(yawGl.data(), FaceMeshFrame::kCoordCount, kAspect, meta));
+
+    // Confirm steep asymmetric ratio (> 2.2x between wide and narrow cheek halves)
+    const float noseX = yawGl[1 * 2];
+    const float dist234 = std::fabs(yawGl[234 * 2] - noseX);
+    const float dist454 = std::fabs(yawGl[454 * 2] - noseX);
+    const bool leftIsNarrow = (dist234 < dist454);
+    EXPECT_TRUE(std::max(dist234, dist454) / std::max(std::min(dist234, dist454), 1e-4f) > 2.2f);
+
+    FaceMeshDeformer deformer;
+    FaceMeshDeformer::Params dp{};
+    dp.faceSlim = 0.85f;
+    dp.vFace = 0.85f;
+    dp.cheekboneSlim = 0.65f;
+    EXPECT_TRUE(deformer.deform(
+        yawGl.data(), kAspect,
+        meta[FaceMeshFrame::kMetaAxisX], meta[FaceMeshFrame::kMetaAxisY],
+        meta[FaceMeshFrame::kMetaFaceWidth], meta[FaceMeshFrame::kMetaFaceHeight],
+        meta[FaceMeshFrame::kMetaLeftWeight], meta[FaceMeshFrame::kMetaRightWeight],
+        meta[FaceMeshFrame::kMetaYawWeight], 1.0f, 1.0f, 1.0f, dp, 1000));
+
+    const float* warped = deformer.warpedLandmarks();
+    const int narrowCheek = leftIsNarrow ? 132 : 361;
+    const int wideCheek = leftIsNarrow ? 361 : 132;
+    const float narrowLatDisp = std::fabs(warped[narrowCheek * 2] - yawGl[narrowCheek * 2]);
+    const float wideLatDisp = std::fabs(warped[wideCheek * 2] - yawGl[wideCheek * 2]);
+    // Narrow far-side cheek lateral slimming stays strictly guarded (< 0.0025 screenW and < 25% of wide near-side)
+    EXPECT_TRUE(wideLatDisp > 0.003f);
+    EXPECT_TRUE(narrowLatDisp < 0.0025f && narrowLatDisp < wideLatDisp * 0.25f);
+}
+
 }  // namespace
 
 int main() {
@@ -1844,6 +1911,7 @@ int main() {
     testV3612PhoneShakeZeroFeatureLag();
     testV3613HairCoverageGhostFreeEmaAndAffineMargin();
     testV3615DouyinAmbientSceneLiftCurve();
+    testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

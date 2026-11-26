@@ -56,7 +56,9 @@ inline float2 faceMasks(float2 uv, float aspect, float presence, float4 oval, fl
 }
 
 inline float3 softLightBlend(float3 b, float3 s) {
-    return (1.0f - 2.0f * s) * b * b + 2.0f * s * b;
+    float3 lo = 2.0f * b * s + b * b * (1.0f - 2.0f * s);
+    float3 hi = sqrt(max(b, float3(0.0f))) * (2.0f * s - 1.0f) + 2.0f * b * (1.0f - s);
+    return mix(lo, hi, step(float3(0.5f), s));
 }
 
 inline float3 fitGamut(float3 c, float y) {
@@ -276,7 +278,8 @@ fragment float4 fs_guided_diff(BlurOut in [[stage_in]],
                                texture2d<float> tex1 [[texture(1)]]) {
     float3 mean = blur5Sample(tex0, in).rgb;
     float3 diff = tex1.sample(kLinearClamp, toMtlUv(in.c)).rgb - mean;
-    return float4(mean, clamp(length(diff) * 2.5f, 0.0f, 1.0f));
+    float dev = sqrt(0.24f * diff.r * diff.r + 0.58f * diff.g * diff.g + 0.18f * diff.b * diff.b) * 1.73205f;
+    return float4(mean, clamp(dev * 2.5f, 0.0f, 1.0f));
 }
 
 fragment float4 fs_guided_coeff(BlurOut in [[stage_in]],
@@ -323,7 +326,8 @@ fragment float4 fs_guided_weight_diff(BlurOut in [[stage_in]],
     float4 sum = blur5Sample(tex0, in);
     float3 mean = clamp(sum.rgb / max(sum.a, 0.02f), 0.0f, 1.0f);
     float3 diff = tex1.sample(kLinearClamp, toMtlUv(in.c)).rgb - mean;
-    return float4(mean, clamp(length(diff) * 2.5f, 0.0f, 1.0f));
+    float dev = sqrt(0.24f * diff.r * diff.r + 0.58f * diff.g * diff.g + 0.18f * diff.b * diff.b) * 1.73205f;
+    return float4(mean, clamp(dev * 2.5f, 0.0f, 1.0f));
 }
 
 fragment float4 fs_guided_weight_coeff(BlurOut in [[stage_in]],
@@ -371,12 +375,20 @@ fragment float4 fs_retouch_skin(RetouchOut in [[stage_in]],
         float yBase = luma709(c);
         float yRef = luma709(cheekRef);
         float deficit = clamp((yRef - yBase) * 2.4f, 0.0f, 0.22f);
-        float liftMask = clamp(deficit * 3.8f, 0.0f, 0.75f);
-        target = clamp(c + (cheekRef - c) * liftMask + float3(0.058f, 0.046f, 0.032f) * liftMask * (1.0f - yBase), 0.0f, 1.0f);
+        // Also neutralize cool/bluish under-eye cast relative to lower cheek (exact 0 on uniform skin).
+        float coolCast = clamp(((c.b - cheekRef.b) - (c.r - cheekRef.r)) * 1.8f, 0.0f, 0.16f);
+        float liftMask = clamp((deficit + coolCast * 0.55f) * 3.8f, 0.0f, 0.78f);
+        float3 lifted = c + max(cheekRef - c, float3(0.0f)) * liftMask + float3(0.058f, 0.046f, 0.032f) * liftMask * (1.0f - yBase);
+        target = clamp(max(c, lifted), 0.0f, 1.0f);
     } else {
         float3 sideA = tex0.sample(kLinearClamp, toMtlUv(clamp(in.src + off, 0.0f, 1.0f))).rgb;
         float3 sideB = tex0.sample(kLinearClamp, toMtlUv(clamp(in.src - off, 0.0f, 1.0f))).rgb;
-        target = max(c, 0.5f * (sideA + sideB));
+        float3 sideAvg = 0.5f * (sideA + sideB);
+        float3 foldDef = max(sideAvg - c, float3(0.0f));
+        float maxDef = max(foldDef.r, max(foldDef.g, foldDef.b));
+        float creaseGate = smoothstep(0.008f, 0.038f, maxDef);
+        float3 lift = clamp(foldDef * 1.32f + sideAvg * (0.045f * creaseGate), float3(0.0f), float3(0.24f));
+        target = clamp(c + lift, 0.0f, 1.0f);
     }
     return float4(target, alpha);
 }
@@ -390,10 +402,23 @@ fragment float4 fs_retouch_eye_teeth(RetouchOut in [[stage_in]],
     float y = luma601(c);
     float chroma = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
     if (uni.u[0].y < 0.5f) {
+        // v3.7.0 Strictly brighten-only eye sparkle + clean sclera (never darkens pupils/eyeliner)
+        float3 eyeTarget = c;
+        if (uni.u[0].z > 0.0f && uni.u[0].w > 0.0f) {
+            float2 d = uni.u[0].zw * 1.5f;
+            float3 localBlur = 0.25f * (
+                tex0.sample(kLinearClamp, toMtlUv(clamp(in.src + float2(-d.x, -d.y), 0.0f, 1.0f))).rgb +
+                tex0.sample(kLinearClamp, toMtlUv(clamp(in.src + float2( d.x, -d.y), 0.0f, 1.0f))).rgb +
+                tex0.sample(kLinearClamp, toMtlUv(clamp(in.src + float2(-d.x,  d.y), 0.0f, 1.0f))).rgb +
+                tex0.sample(kLinearClamp, toMtlUv(clamp(in.src + float2( d.x,  d.y), 0.0f, 1.0f))).rgb
+            );
+            float3 sparkle = clamp(localBlur + (c - localBlur) * 2.25f, 0.0f, 0.78f);
+            eyeTarget = max(eyeTarget, sparkle);
+        }
         float sclera = smoothstep(0.38f, 0.62f, y) * (1.0f - smoothstep(0.12f, 0.28f, chroma));
-        float3 contrasted = clamp((c - 0.42f) * 1.16f + 0.45f, 0.0f, 1.0f);
-        float3 cleanSclera = mix(contrasted, float3(min(y * 1.07f + 0.025f, 1.0f)), sclera * 0.55f);
-        return float4(cleanSclera, clamp(strength * 0.72f, 0.0f, 1.0f));
+        float3 cleanSclera = float3(min(y * 1.09f + 0.028f, 0.98f));
+        eyeTarget = max(eyeTarget, mix(eyeTarget, cleanSclera, sclera * 0.58f));
+        return float4(clamp(eyeTarget, 0.0f, 1.0f), clamp(strength * 0.72f, 0.0f, 1.0f));
     } else {
         float toothMask = smoothstep(0.28f, 0.50f, y) * (1.0f - smoothstep(0.20f, 0.38f, chroma));
         float alpha = clamp(strength * toothMask * 0.84f, 0.0f, 1.0f);
@@ -734,12 +759,27 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     float micro = luma709(original.rgb - fineLow);
     float3 color = original.rgb;
     if (uParams.y > 0.0f) {
-        float rEdge = length(original.rgb - guided) / 0.36f;
+        float skinGateSmooth = skinOnly > 0.5f ? skin : 1.0f;
+        // v3.7.0 Pre-smooth isolated mid-band dark pore/blemish pre-lift (skips dark hair/lash/beard & flat skin)
+        float3 darkDef = max(guided - original.rgb, float3(0.0f));
+        float spotDelta = length(darkDef);
+        float spotBand = smoothstep(0.018f, 0.055f, spotDelta) * (1.0f - smoothstep(0.145f, 0.240f, spotDelta));
+        float notDarkHair = smoothstep(0.14f, 0.28f, yOrig);
+        float spotLift = spotBand * notDarkHair * skinGateSmooth * featureKeep * fineDark * smoothstep(0.0f, 0.55f, uParams.y) * 0.42f;
+        float3 preLifted = mix(original.rgb, guided, spotLift);
+        // Green-dominant perceptual range kernel resists indoor R/B chroma noise while preserving crisp features
+        float3 dEdge = preLifted - guided;
+        float rEdge = sqrt(0.24f * dEdge.r * dEdge.r + 0.58f * dEdge.g * dEdge.g + 0.18f * dEdge.b * dEdge.b) * 1.73205f / 0.36f;
         float rEdge2 = rEdge * rEdge;
-        float k = uParams.y * 0.96f * (skinOnly > 0.5f ? skin : 1.0f) * featureKeep * fineDark / (1.0f + rEdge2 * rEdge2);
+        // Two-stage commercial smoothing curve: 0..0.60 ramps clean coverage with full micro-grain, 0.60..1.0 softens grain
+        float stage1 = clamp(uParams.y / 0.60f, 0.0f, 1.0f);
+        float smoothCover = stage1 * (0.86f + 0.14f * stage1);
+        float detailKeep = 1.0f - 0.55f * smoothstep(0.60f, 1.0f, uParams.y);
+        float k = smoothCover * 0.96f * skinGateSmooth * featureKeep * fineDark / (1.0f + rEdge2 * rEdge2);
+        float preMicro = luma709(preLifted - fineLow);
         float tex = clamp(band, -0.035f, 0.035f) * smoothstep(core, 2.5f * core, abs(band));
-        float microTex = clamp(micro, -0.022f, 0.022f) * smoothstep(core * 0.85f, core * 2.2f, abs(micro));
-        color = mix(original.rgb, guided, k) + float3((tex * mix(0.35f, 0.85f, uParams.w) + microTex * uGrade.z) * k);
+        float microTex = clamp(preMicro, -0.022f, 0.022f) * smoothstep(core * 0.85f, core * 2.2f, abs(preMicro));
+        color = mix(preLifted, guided, k) + float3((tex * mix(0.35f, 0.85f, uParams.w) + microTex * uGrade.z) * k * detailKeep);
     }
     float mouthZone = 0.0f;
     if (uMouth.z > 0.001f && exclM > 0.25f) {
@@ -747,11 +787,16 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
                     smoothstep(0.55f, 0.88f, exclM) * nonHair;
     }
     if (uDetails.y > 0.0f) {
-        float edge = smoothstep(1.5f * core, 4.0f * core, abs(band));
-        float region = mix(0.35f, 1.0f, exclM) * (1.0f - 0.85f * skin * featureKeep * faceM);
-        float negCap = mix(-0.05f, -0.010f, max(mouthZone, smoothstep(0.10f, 0.45f, faceM)));
-        float sharpDelta = clamp(band, negCap, 0.06f);
-        color += float3(sharpDelta * edge * uDetails.y * 1.6f * region);
+        // v3.7.0 Log-compressed halo-free clarity: green-dominant band-pass boosts micro-detail without ringing halos
+        float gBand = (fineLow.g - wideLow.g) * 0.72f + band * 0.28f;
+        float absBand = abs(gBand);
+        float logGrad = sign(gBand) * log(1.0f + 42.0f * absBand) / 42.0f;
+        float noiseGate = smoothstep(0.35f * core, 0.90f * core, absBand);
+        float activity = noiseGate * mix(0.28f, 1.0f, smoothstep(1.1f * core, 3.2f * core, absBand));
+        float region = mix(0.65f, 1.0f, exclM) * (1.0f - 0.62f * skin * featureKeep * faceM);
+        float negCap = mix(-0.045f, -0.012f, max(mouthZone, smoothstep(0.10f, 0.45f, faceM)));
+        float sharpDelta = clamp(logGrad * 2.15f, negCap, 0.068f);
+        color += float3(sharpDelta * activity * uDetails.y * region);
     }
     color = clamp(color, 0.0f, 1.0f);
     float w = skin * toneKeep;
@@ -1114,10 +1159,14 @@ fragment float4 fs_blemish_heal(QuadOut in [[stage_in]],
     float3 s7 = tex0.sample(kLinearClamp, toMtlUv(clamp(uv + float2(-rd.x, -rd.y), 0.0f, 1.0f))).rgb;
     float3 ringAvg = (s0 + s1 + s2 + s3 + s4 + s5 + s6 + s7) * 0.125f;
 
+    float3 d0 = s0 - ringAvg; float3 d1 = s1 - ringAvg;
+    float3 d2 = s2 - ringAvg; float3 d3 = s3 - ringAvg;
     float spread = 0.25f * (
-        length(s0 - ringAvg) + length(s1 - ringAvg) +
-        length(s2 - ringAvg) + length(s3 - ringAvg)
-    );
+        sqrt(0.24f * d0.r * d0.r + 0.58f * d0.g * d0.g + 0.18f * d0.b * d0.b) +
+        sqrt(0.24f * d1.r * d1.r + 0.58f * d1.g * d1.g + 0.18f * d1.b * d1.b) +
+        sqrt(0.24f * d2.r * d2.r + 0.58f * d2.g * d2.g + 0.18f * d2.b * d2.b) +
+        sqrt(0.24f * d3.r * d3.r + 0.58f * d3.g * d3.g + 0.18f * d3.b * d3.b)
+    ) * 1.73205f;
     float yC = luma709(orig.rgb);
     float yR = luma709(ringAvg);
     float darkDeficit = max(yR - yC, 0.0f);

@@ -21,6 +21,10 @@ struct BeautyQualityTuning {
     static float guidedEps(float smoothing);
     static float coreThreshold(float lightLuma, float pressure);
     static float ambientSceneLift(float lightLuma);
+    static float indoorTemporalDenoise(float lightLuma);
+    static float twoStageSmoothMix(float smoothing);
+    static float twoStageDetailKeep(float smoothing);
+    static float mouthOpenGate(float openRatio);
 };
 
 class GuidedSpread {
