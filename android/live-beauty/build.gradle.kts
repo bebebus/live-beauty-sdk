@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.bebebus"
-version = "3.6.13"
+version = "3.6.14"
 
 android {
     namespace = "io.bebebus.livebeauty"

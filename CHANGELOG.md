@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.14] - 2026-11-26
+
+### Fixed
+- **TikTok-Style Exposure-Coupled Non-Darkening Lips (`gles_shaders.cpp`, `metal_shaders.h`, `face_makeup_uv.cpp`)**:
+  - Added exposure-coupled, hue-preserving bare-lip luma tracking (`faceExp = whiten + 0.50*brightness + 0.35*relight`) plus gentle dark-upper-lip shadow recovery and cyanosis neutralization in `kCompositePro` / `fs_composite_pro` (with lip-seam guard tightened to `0.125..0.205` so real upper-lip shadows lift cleanly while dark seams and teeth remain `0/255` untouched), eliminating "white face -> blackened lips" simultaneous-contrast darkening without adding fake Barbie pink.
+  - Replaced multiplicative Beer-Lambert G/B darkening in `kMakeupLip` / `fs_makeup_lip` with a TikTok-style dark-lip concealer pre-lift + luma-preserving chroma transfer (`fitLipGamut` / `fitGamut`), calibrated the 6 lipstick shades (`face_makeup_uv.cpp`), and lowered `darkGate` to `0.125..0.20` so all 6 shades lift dark/indoor lips cleanly (`dY > +0.010..+0.043`) while preserving 3D upper/lower shading, lip-line micro-texture, and bright-camera anti-washout (`L6`).
+
 ## [3.6.13] - 2026-11-26
 
 ### Fixed

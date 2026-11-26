@@ -1093,10 +1093,10 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
         EXPECT_TRUE((ySkin1 - ySkin0) >= 26.0f && (int(porcelainSkin.r) - int(porcelainSkin.b)) <= 66);
 
         // Dull purplish bare lip (112, 74, 80) in default natural mode neutralizes bluish cyanosis (B <= G + 1)
-        // and gently balances dim exposure without painting artificial Barbie pink!
+        // and couples exposure cleanly without painting artificial Barbie pink!
         const Rgba caredBareLip = evalComp({112, 74, 80, 255}, 0, 255, 0.30f, 0.15f);
-        EXPECT_TRUE(caredBareLip.r >= 117 && caredBareLip.r <= 128 &&
-                    caredBareLip.b <= caredBareLip.g + 1 && caredBareLip.r > caredBareLip.b + 35);
+        EXPECT_TRUE(caredBareLip.r >= 120 && caredBareLip.r <= 136 &&
+                    caredBareLip.b <= caredBareLip.g + 1 && caredBareLip.r > caredBareLip.b + 38);
 
         const Rgba protectedSeam = evalComp({45, 25, 27, 255}, 0, 255, 0.55f, 0.20f);
         EXPECT_TRUE(std::abs(int(protectedSeam.r) - 45) <= 2 && std::abs(int(protectedSeam.g) - 25) <= 2);
@@ -1910,14 +1910,16 @@ void testV3611RealisticNaturalLipColorNoFakePink(MetalDevice& dev) {
     const Rgba upperShadow = evalBareLip({88, 58, 56, 255}, 0.30f, 0.15f);
     const Rgba dullPurple = evalBareLip({112, 74, 80, 255}, 0.30f, 0.15f);
 
-    // Normal/bright bare lips must not shift pink (|dR| <= 4, G >= B + 4)
-    EXPECT_TRUE(std::abs(int(maleNormal.r) - 140) <= 4 && int(maleNormal.g) >= int(maleNormal.b) + 5);
-    EXPECT_TRUE(std::abs(int(femaleNormal.r) - 158) <= 4 && int(femaleNormal.g) >= int(femaleNormal.b) + 4);
-    EXPECT_TRUE(std::abs(int(brightLip.r) - 178) <= 2 && int(brightLip.g) >= int(brightLip.b) + 4);
-    // Upper-lip shadow must stay genuinely shaded relative to lower lip (>= 55/255 R contrast preserved)
-    EXPECT_TRUE(int(upperShadow.r) - 88 <= 10 && int(femaleNormal.r) - int(upperShadow.r) >= 55);
-    // Dull cyanotic/purplish lip (B=80 > G=74) neutralizes purple cast (B <= G + 1) with gentle lift, never neon pink!
-    EXPECT_TRUE(int(dullPurple.r) >= 117 && int(dullPurple.r) <= 128 && int(dullPurple.b) <= int(dullPurple.g) + 1);
+    // Normal/bright bare lips follow exposure-coupled hue-preserving lift (ZERO Barbie pink shift: G >= B + 4, R/G preserved)
+    EXPECT_TRUE(int(maleNormal.r) >= 145 && int(maleNormal.r) <= 158 && int(maleNormal.g) >= int(maleNormal.b) + 5 &&
+                std::fabs(float(maleNormal.r) / float(maleNormal.g) - 140.0f / 100.0f) <= 0.06f);
+    EXPECT_TRUE(int(femaleNormal.r) >= 162 && int(femaleNormal.r) <= 178 && int(femaleNormal.g) >= int(femaleNormal.b) + 4 &&
+                std::fabs(float(femaleNormal.r) / float(femaleNormal.g) - 158.0f / 106.0f) <= 0.06f);
+    EXPECT_TRUE(int(brightLip.r) >= 182 && int(brightLip.r) <= 196 && int(brightLip.g) >= int(brightLip.b) + 4);
+    // Upper-lip shadow lifts out of black mud while preserving genuine 3D shading contrast (>= 55/255 vs lower lip)
+    EXPECT_TRUE(int(upperShadow.r) >= 98 && int(upperShadow.r) <= 114 && int(femaleNormal.r) - int(upperShadow.r) >= 55);
+    // Dull cyanotic/purplish lip (B=80 > G=74) neutralizes purple cast (B <= G + 1) with clean lift, never neon pink!
+    EXPECT_TRUE(int(dullPurple.r) >= 120 && int(dullPurple.r) <= 136 && int(dullPurple.b) <= int(dullPurple.g) + 1);
 
     // 2. Translucent 3D-shaded lipstick at preset strength (clear: rose_bean 0.35 * 0.75 = 0.2625):
     //    Must preserve real upper-vs-lower lip 3D shading and warm natural hue (NO flat glowing plastic pink!).
@@ -2051,6 +2053,101 @@ void testV3613MetalHairDyeRgbBoundaryMattingBangsAndDarkHairUniformity(MetalDevi
     dev.destroyTexture(imgTex);
 }
 
+void testV3614TikTokExposureCoupledNonDarkeningLips(MetalDevice& dev) {
+    auto luma601 = [](Rgba c) -> float {
+        return (0.299f * c.r + 0.587f * c.g + 0.114f * c.b) / 255.0f;
+    };
+
+    // 1. Bare lip under high whitening (whiten=0.60, relight=0.35):
+    //    Exposure-coupled hue-preserving lift prevents "white face -> blackened lips" simultaneous-contrast darkening,
+    //    while dark lip seam (45, 25, 27) and teeth (222, 216, 206) stay exact 0/255 untouched!
+    auto evalCompHigh = [&](Rgba px, uint8_t faceByte, uint8_t exclByte) -> Rgba {
+        constexpr int kSz = 16;
+        const TextureId srcTex = makeSolidTex(dev, kSz, kSz, px.r, px.g, px.b, 255);
+        const TextureId coeffTex = makeSolidTex(dev, kSz, kSz, px.r, px.g, px.b, 0);
+        const TextureId semTex = makeSolidTex(dev, kSz, kSz, faceByte, exclByte, 76, 255);
+        const TextureId lutTex = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, coeffTex); tb.bind(2, semTex); tb.bind(3, lutTex);
+        UniformBlock ub{};
+        ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);
+        ub.push(16.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.30f, 1.0f, 0.0f);
+        ub.push(0.60f, 0.15f, 0.0f, 0.35f);  // whiten=0.60, rosy=0.15, relight=0.35
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.35f, 0.45f);
+        ub.push(0.5f, 0.5f, 0.20f, 0.12f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.015f, 0.0f, 0.0f);
+        dev.beginPass(rt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        const int idx = ((kSz / 2) * kSz + (kSz / 2)) * 4;
+        const Rgba res{out[idx], out[idx + 1], out[idx + 2], out[idx + 3]};
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(lutTex);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(coeffTex);
+        dev.destroyTexture(srcTex);
+        return res;
+    };
+
+    const Rgba skinIn{175, 138, 122, 255};
+    const Rgba upperIn{88, 58, 56, 255};
+    const Rgba indoorIn{118, 76, 74, 255};
+    const Rgba skinOut = evalCompHigh(skinIn, 255, 0);
+    const Rgba upperOut = evalCompHigh(upperIn, 0, 255);
+    const Rgba indoorOut = evalCompHigh(indoorIn, 0, 255);
+    const Rgba seamOut = evalCompHigh({45, 25, 27, 255}, 0, 255);
+    const Rgba teethOut = evalCompHigh({222, 216, 206, 255}, 0, 255);
+
+    // Lip brightness tracks skin whitening cleanly (skin-lip contrast increase stays <= +0.055 instead of exploding!)
+    const float upperContrastDelta = (luma601(skinOut) - luma601(upperOut)) - (luma601(skinIn) - luma601(upperIn));
+    const float indoorContrastDelta = (luma601(skinOut) - luma601(indoorOut)) - (luma601(skinIn) - luma601(indoorIn));
+    EXPECT_TRUE(luma601(upperOut) >= luma601(upperIn) + 0.08f && upperContrastDelta <= 0.055f);
+    EXPECT_TRUE(luma601(indoorOut) >= luma601(indoorIn) + 0.07f && indoorContrastDelta <= 0.055f);
+    // Warm natural hue preserved (ZERO Barbie pink: G >= B + 2)
+    EXPECT_TRUE(int(upperOut.g) >= int(upperOut.b) + 2 && int(indoorOut.g) >= int(indoorOut.b) + 2);
+    // Seam and teeth remain exact untouched
+    EXPECT_TRUE(seamOut.r == 45 && seamOut.g == 25 && seamOut.b == 27);
+    EXPECT_TRUE(teethOut.r == 222 && teethOut.g == 216 && teethOut.b == 206);
+
+    // 2. ALL 6 lipstick shades at velvet preset/mid strength (lipstick=0.60 -> uAlpha=0.45):
+    //    MUST NEVER darken either shadowed upper lip (82,52,50) or indoor lip (118,76,74)!
+    const LipstickColor allShades[6] = {
+        LipstickColor::kRoseBean,
+        LipstickColor::kCoralPeach,
+        LipstickColor::kCherryRed,
+        LipstickColor::kMilkTea,
+        LipstickColor::kBerryPlum,
+        LipstickColor::kOrangeSoda,
+    };
+    const Rgba darkUpper{82, 52, 50, 255};
+    for (LipstickColor shade : allShades) {
+        const Vec3 rgb = FaceMakeupUv::lipstickRgb(shade);
+        UniformBlock ub{};
+        ub.push(rgb.x, rgb.y, rgb.z, 0.45f);
+        ub.push(0.0f, 1.0f / 16.0f, 1.0f / 16.0f, 0.0f);  // velvet finish
+        const Rgba outUpper = evalMakeupShader(dev, ShaderId::kMakeupLip, darkUpper, {0, 0, 255, 255}, ub, 0.5f, 0.67f);
+        const Rgba outIndoor = evalMakeupShader(dev, ShaderId::kMakeupLip, indoorIn, {0, 0, 255, 255}, ub, 0.5f, 0.72f);
+        // Zero darkening: EVERY shade lifts shadowed upper lip >= +0.020 and indoor lip >= +0.010 in Rec.601 luma!
+        EXPECT_TRUE(luma601(outUpper) >= luma601(darkUpper) + 0.020f);
+        EXPECT_TRUE(luma601(outIndoor) >= luma601(indoorIn) + 0.010f);
+        // Warm/natural shades stay warm (G >= B); berry_plum stays berry (B > G)
+        if (shade == LipstickColor::kBerryPlum) {
+            EXPECT_TRUE(int(outIndoor.b) > int(outIndoor.g) + 4);
+        } else {
+            EXPECT_TRUE(int(outIndoor.g) >= int(outIndoor.b));
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2077,6 +2174,7 @@ int main() {
         testV3610MetalCheekBeautyZeroTwitch(dev);
         testV3611RealisticNaturalLipColorNoFakePink(dev);
         testV3613MetalHairDyeRgbBoundaryMattingBangsAndDarkHairUniformity(dev);
+        testV3614TikTokExposureCoupledNonDarkeningLips(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

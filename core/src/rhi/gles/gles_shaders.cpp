@@ -378,6 +378,14 @@ uniform vec4 uU1;
 uniform vec4 uU2;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
+vec3 fitLipGamut(vec3 c, float y) {
+    float hi = max(max(c.r, c.g), c.b);
+    float lo = min(min(c.r, c.g), c.b);
+    float s = 1.0;
+    if (hi > 1.0) s = min(s, (1.0 - y) / max(hi - y, 0.0001));
+    if (lo < 0.0) s = min(s, y / max(y - lo, 0.0001));
+    return clamp(vec3(y) + (c - vec3(y)) * s, 0.0, 1.0);
+}
 void main() {
     float feather = texture2D(uTex1, vMakeupUv).b;
     if (feather * uU0.a <= 0.001) { discard; }
@@ -386,7 +394,7 @@ void main() {
     if (vis <= 0.002) { discard; }
     vec3 base = texture2D(uTex0, uv).rgb;
     float baseY = dot(base, vec3(0.299, 0.587, 0.114));
-    float darkGate = smoothstep(0.11, 0.24, baseY);
+    float darkGate = smoothstep(0.125, 0.20, baseY);
     float redExcess = base.r - max(base.g, base.b);
     float teethLike = smoothstep(0.42, 0.66, baseY) * (1.0 - smoothstep(0.025, 0.095, redExcess));
     float teethGate = 1.0 - teethLike;
@@ -411,16 +419,28 @@ void main() {
     vec3 lipPigment = clamp(uU0.rgb * amb, 0.0, 1.0);
     float lipDetail = clamp(baseY - smoothY, -0.09, 0.09);
     float isGlossy = step(0.5, uU1.x);
-    float shade = mix(0.56, 1.00, smoothstep(0.16, 0.58, smoothY));
+    float pigY = max(dot(lipPigment, vec3(0.299, 0.587, 0.114)), 0.14);
+    // v3.6.14 TikTok-style lip concealer pre-lift + luma-preserving chroma transfer:
+    // lifts shadowed upper/dim lips cleanly out of dark mud without quadratic G/B blackening,
+    // while taming overexposed bright-camera washout and preserving 3D upper/lower shading.
+    float preLiftA = 0.58 * (1.0 - smoothstep(0.18, 0.50, smoothY)) * clamp(uU0.a * 1.35, 0.25, 1.0);
+    float liftedY = smoothY * (1.0 + preLiftA) / (1.0 + preLiftA * smoothY);
+    float brightTame = smoothstep(0.46, 0.64, smoothY);
+    float shadeY = mix(liftedY, min(liftedY, pigY * 0.92), brightTame * 0.90);
+    float pigFloor = pigY * mix(0.72, 1.02, smoothstep(0.18, 0.52, liftedY));
+    float targetY = mix(max(shadeY, mix(shadeY, pigFloor, 0.42)), shadeY, brightTame);
+    vec3 tinted = fitLipGamut(lipPigment * (targetY / pigY), targetY);
+    vec3 softBase = base * (liftedY / max(baseY, 0.0001));
     float pigMax = max(max(lipPigment.r, lipPigment.g), max(lipPigment.b, 0.45));
-    float dimBoost = mix(1.26, 0.96, smoothstep(0.30, 0.62, smoothY));
-    vec3 stain = clamp(base * mix(vec3(1.0), clamp((lipPigment / pigMax) * dimBoost, 0.16, 1.08), 0.82), 0.0, 1.0);
-    vec3 shadedPig = clamp(lipPigment * shade, 0.0, 1.0);
-    float opacity = clamp(mix(0.26, 0.76, smoothstep(0.15, 0.82, uU0.a)), 0.24, 0.78);
-    vec3 result = mix(stain, shadedPig, opacity);
+    vec3 rawStain = softBase * mix(vec3(1.0), clamp(lipPigment / pigMax, 0.48, 1.05), 0.45);
+    float stainY = max(dot(rawStain, vec3(0.299, 0.587, 0.114)), 0.0001);
+    float stainTargetY = mix(max(liftedY * 0.98, stainY), min(liftedY, pigY * 0.95), brightTame);
+    vec3 sheerStain = fitLipGamut(rawStain * (stainTargetY / stainY), stainTargetY);
+    float chromaMix = clamp(mix(0.45, 0.88, smoothstep(0.15, 0.80, uU0.a)), 0.42, 0.90);
+    vec3 result = mix(sheerStain, tinted, chromaMix);
     result = clamp(result + vec3(lipDetail * mix(1.15, 0.85, isGlossy)), 0.0, 1.0);
     if (isGlossy > 0.5) {
-        float lumaDrive = smoothstep(0.22, 0.56, baseY);
+        float lumaDrive = smoothstep(0.20, 0.54, baseY);
         float yawShift = clamp(uU1.w * 0.18, -0.14, 0.14);
         float centerBelly = 1.0 - smoothstep(0.015, 0.090, abs(vMakeupUv.x - (0.5 + yawShift)));
         float fresnelRim = clamp(abs(uU1.w) * 0.22, 0.0, 0.14) * smoothstep(0.03, 0.14, abs(vMakeupUv.x - 0.5));
@@ -434,10 +454,10 @@ void main() {
         float glossDrive = clamp(uU0.a * 1.15, 0.25, 1.0);
         float spec = clamp(((lowerBand + upperBand) * (centerBelly + fresnelRim) * lumaDrive * 0.76 + microGlint + naturalHot) * ridgeMask * effFeather * glossDrive, 0.0, 0.68);
         vec3 specCol = clamp(vec3(1.0, 0.99, 0.97) * mix(vec3(1.0), amb, 0.35), 0.0, 1.0);
-        result = clamp(result + (specCol - result) * (spec * 0.42), 0.0, 1.0);
+        result = clamp(result + (specCol - result) * (spec * 0.48), 0.0, 1.0);
     } else {
         float velvetSoft = smoothstep(0.68, 0.92, baseY) * 0.06 * effFeather;
-        result = clamp(mix(result, shadedPig, velvetSoft), 0.0, 1.0);
+        result = clamp(mix(result, tinted, velvetSoft), 0.0, 1.0);
     }
     gl_FragColor = vec4(clamp(result, 0.0, 1.0), alpha);
 }
@@ -744,21 +764,29 @@ void main() {
         if (rosyA > 0.0) color = vec3(y2) + (color - vec3(y2)) * (1.0 + rosyA * 4.0 * y2 * (1.0 - y2));
         color = fitGamut(color, y2);
     }
-    if (mouthZone > 0.001 && (uU3.x > 0.0 || uU3.y > 0.0)) {
+    float faceExp = clamp(uU3.x + 0.50 * max(uU1.z, 0.0) + 0.35 * uU3.w, 0.0, 1.35);
+    if (mouthZone > 0.001 && (faceExp > 0.001 || uU3.y > 0.001)) {
         float yLip = luma(color);
         float redEx = color.r - max(color.g, color.b);
-        float notSeam = smoothstep(0.14, 0.26, yLip);
+        float notSeam = smoothstep(0.125, 0.205, yLip);
         float notTeeth = 1.0 - smoothstep(0.42, 0.64, yLip) * (1.0 - smoothstep(0.025, 0.095, redEx));
-        float dimGate = 1.0 - smoothstep(0.26, 0.42, yLip);
         float careGate = mouthZone * notSeam * notTeeth;
-        float careW = clamp(careGate * smoothstep(0.0, 0.40, uU3.x + uU3.y), 0.0, 1.0);
+        float careW = clamp(careGate * smoothstep(0.0, 0.35, faceExp + uU3.y), 0.0, 1.0);
         float purpleCast = max(color.b - color.g, 0.0);
-        color.b = clamp(color.b - purpleCast * 0.90 * careW, 0.0, 1.0);
-        float liftGain = 1.0 + clamp(uU3.x * 0.28 * dimGate * careGate, 0.0, 0.18);
-        color = clamp(color * liftGain, 0.0, 1.0);
-        float paleGate = (1.0 - smoothstep(0.05, 0.13, redEx)) * dimGate * careGate;
-        float warmNudge = clamp(paleGate * (uU3.x * 0.35 + uU3.y * 0.45) * 0.032, 0.0, 0.028);
+        color.b = clamp(color.b - purpleCast * 0.92 * careW, 0.0, 1.0);
+        float yCur = max(luma(color), 0.0001);
+        float hiRoll = 1.0 - 0.72 * smoothstep(0.46, 0.74, yCur);
+        float shadowFill = 0.32 * (1.0 - smoothstep(0.22, 0.42, yCur)) * clamp(faceExp + 0.35 * uU3.y, 0.0, 1.0);
+        float lipA = (0.48 * faceExp * hiRoll + shadowFill) * careGate;
+        float yNew = yCur * (1.0 + lipA) / (1.0 + lipA * yCur);
+        color *= yNew / yCur;
+        float satKeep = 1.0 + clamp((yNew - yCur) * 0.95, 0.0, 0.14);
+        color = vec3(yNew) + (color - vec3(yNew)) * satKeep;
+        float muddyGate = (1.0 - smoothstep(0.05, 0.15, redEx)) * (1.0 - smoothstep(0.28, 0.46, yCur)) * careGate;
+        float warmNudge = clamp(muddyGate * (faceExp * 0.35 + uU3.y * 0.45) * 0.038, 0.0, 0.032);
         color.r = clamp(color.r + warmNudge, 0.0, 1.0);
+        color.g = clamp(color.g + warmNudge * 0.22, 0.0, 1.0);
+        color = fitGamut(color, luma(color));
     }
     color = mix(vec3(luma(color)), color, uU2.z);
     color = mix(color, clamp(gradePro(color, style), 0.0, 1.0), uU2.w);
