@@ -2148,6 +2148,64 @@ void testV3614TikTokExposureCoupledNonDarkeningLips(MetalDevice& dev) {
     }
 }
 
+void testV3615MetalDouyinAmbientSceneBrightnessLift(MetalDevice& dev) {
+    // Non-skin room background pixels (faceM=0, skin=0) MUST lift cleanly when uGrade.w (ambientLift) or
+    // uParams.z (brightness) is active, while deep blacks stay crisp and bright highlights never clip!
+    auto evalAmbient = [&](Rgba px, float brightness, float ambientLift) -> Rgba {
+        constexpr int kSz = 16;
+        const TextureId srcTex = makeSolidTex(dev, kSz, kSz, px.r, px.g, px.b, 255);
+        const TextureId coeffTex = makeSolidTex(dev, kSz, kSz, px.r, px.g, px.b, 0);
+        // Non-face background wall: faceM=0, exclM=0, nonHair=255
+        const TextureId semTex = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+        const TextureId lutTex = makeSolidTex(dev, kSz, kSz, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, coeffTex); tb.bind(2, semTex); tb.bind(3, lutTex);
+        UniformBlock ub{};
+        ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);
+        ub.push(16.0f, 0.0f, brightness, 0.0f);
+        ub.push(0.0f, 0.0f, 1.0f, 0.0f);
+        ub.push(0.30f, 0.15f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.35f, 0.45f);
+        ub.push(0.5f, 0.5f, 0.20f, 0.12f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.015f, 0.0f, ambientLift);
+        dev.beginPass(rt, kSz, kSz, false, {});
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+        std::vector<uint8_t> out(kSz * kSz * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kSz, kSz));
+        const int idx = ((kSz / 2) * kSz + (kSz / 2)) * 4;
+        const Rgba res{out[idx], out[idx + 1], out[idx + 2], out[idx + 3]};
+        dev.destroyRenderTarget(rt);
+        dev.destroyTexture(lutTex);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(coeffTex);
+        dev.destroyTexture(srcTex);
+        return res;
+    };
+
+    // 1. Dim indoor room wall (78, 76, 72) lifts noticeably (+18..+28/255) under indoor ambientLift=0.45
+    const Rgba wallOut = evalAmbient({78, 76, 72, 255}, 0.0f, 0.45f);
+    EXPECT_TRUE(int(wallOut.r) >= 96 && int(wallOut.r) <= 112 && std::abs(int(wallOut.r) - int(wallOut.b)) <= 10);
+
+    // 2. Global brightness slider (brightness=0.35, ambientLift=0) now genuinely brightens non-skin room background too!
+    const Rgba brightWall = evalAmbient({96, 94, 92, 255}, 0.35f, 0.0f);
+    EXPECT_TRUE(int(brightWall.r) >= 106);
+
+    // 3. Deep black (6, 6, 6) stays crisp rich black (<= 8/255, zero milky grey haze!)
+    const Rgba deepBlack = evalAmbient({6, 6, 6, 255}, 0.25f, 0.50f);
+    EXPECT_TRUE(int(deepBlack.r) <= 8 && int(deepBlack.g) <= 8 && int(deepBlack.b) <= 8);
+
+    // 4. Bright lamp/window (236, 236, 234) stays cleanly rolled off (< 252, never hard-clipped!)
+    const Rgba brightLamp = evalAmbient({236, 236, 234, 255}, 0.0f, 0.45f);
+    EXPECT_TRUE(int(brightLamp.r) >= 236 && int(brightLamp.r) <= 250);
+}
+
 }  // namespace
 
 int main() {
@@ -2175,6 +2233,7 @@ int main() {
         testV3611RealisticNaturalLipColorNoFakePink(dev);
         testV3613MetalHairDyeRgbBoundaryMattingBangsAndDarkHairUniformity(dev);
         testV3614TikTokExposureCoupledNonDarkeningLips(dev);
+        testV3615MetalDouyinAmbientSceneBrightnessLift(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

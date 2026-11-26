@@ -20,6 +20,7 @@ struct BeautyQualityTuning {
     static float macroEvenness(float smoothing);
     static float guidedEps(float smoothing);
     static float coreThreshold(float lightLuma, float pressure);
+    static float ambientSceneLift(float lightLuma);
 };
 
 class GuidedSpread {

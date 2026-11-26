@@ -1804,6 +1804,19 @@ void testV3613HairCoverageGhostFreeEmaAndAffineMargin() {
     EXPECT_TRUE(!HairMaskTuning::affine(poseMask, poseJump, 0.5625f, aff));
 }
 
+void testV3615DouyinAmbientSceneLiftCurve() {
+    // Non-finite (unmeasured) stays 0.0
+    EXPECT_NEAR(BeautyQualityTuning::ambientSceneLift(std::numeric_limits<float>::quiet_NaN()), 0.0f, 1e-6f);
+    // Dim indoor room receives strong lift (~0.45..0.56); normal office room stays bright (~0.25..0.40);
+    // bright daylight tapers smoothly down to 0.0 (monotonic non-increasing)
+    const float dim = BeautyQualityTuning::ambientSceneLift(0.18f);
+    const float indoor = BeautyQualityTuning::ambientSceneLift(0.42f);
+    const float sunny = BeautyQualityTuning::ambientSceneLift(0.78f);
+    EXPECT_TRUE(dim >= 0.48f && dim <= 0.56f);
+    EXPECT_TRUE(indoor >= 0.28f && indoor < dim);
+    EXPECT_NEAR(sunny, 0.0f, 1e-5f);
+}
+
 }  // namespace
 
 int main() {
@@ -1830,6 +1843,7 @@ int main() {
     testV3610CheekBeautyStabilityMirroredNoTwitch();
     testV3612PhoneShakeZeroFeatureLag();
     testV3613HairCoverageGhostFreeEmaAndAffineMargin();
+    testV3615DouyinAmbientSceneLiftCurve();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

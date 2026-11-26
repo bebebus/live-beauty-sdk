@@ -769,9 +769,21 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
             color = mix(color, warmSkin, oilMask);
         }
     }
+    float globalLift = clamp(uGrade.w + 0.55f * max(uParams.z, 0.0f), 0.0f, 0.95f);
+    if (globalLift > 0.001f) {
+        float yAmb = luma709(color);
+        float blackKeep = smoothstep(0.015f, 0.085f, yAmb);
+        float hiProtect = 1.0f - 0.65f * smoothstep(0.72f, 0.96f, yAmb);
+        float g = globalLift * blackKeep * hiProtect;
+        float yNewAmb = yAmb * (1.0f + g) / (1.0f + g * yAmb);
+        color *= yNewAmb / max(yAmb, 0.0001f);
+        float satRestore = 1.0f + clamp((yNewAmb - yAmb) * 0.45f, 0.0f, 0.08f);
+        color = float3(yNewAmb) + (color - float3(yNewAmb)) * satRestore;
+        color = fitGamut(color, yNewAmb);
+    }
     float yPre = luma709(color);
     float relightFill = 0.22f * uTone.w * w * faceM * (1.0f - smoothstep(0.20f, 0.55f, yPre));
-    float liftA = (1.12f * uTone.x + 0.48f * uParams.z) * w + relightFill;
+    float liftA = 1.12f * uTone.x * w + relightFill;
     float rosyA = 0.25f * uTone.y * w;
     float sculptPlane = max(hiM - 0.18f * faceM, -0.05f * smoothstep(0.45f, 0.70f, yPre) * faceM);
     float sculpt = (0.30f * uDetails.x + 0.42f * uTone.w) * sculptPlane * w * faceM;
@@ -802,7 +814,7 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         if (rosyA > 0.0f) color = float3(y2) + (color - float3(y2)) * (1.0f + rosyA * 4.0f * y2 * (1.0f - y2));
         color = fitGamut(color, y2);
     }
-    float faceExp = clamp(uTone.x + 0.50f * max(uParams.z, 0.0f) + 0.35f * uTone.w, 0.0f, 1.35f);
+    float faceExp = clamp(uTone.x + 0.35f * uTone.w, 0.0f, 1.35f);
     if (mouthZone > 0.001f && (faceExp > 0.001f || uTone.y > 0.001f)) {
         float yLip = luma709(color);
         float redEx = color.r - max(color.g, color.b);

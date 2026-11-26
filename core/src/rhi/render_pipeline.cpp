@@ -1702,7 +1702,14 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
 
         // Uniform layout matching FRAGMENT_PRO (11 vec4 + 4 samplers = 15 active uniforms):
         // [0] uFrame, [1] uParams, [2] uDetails, [3] uTone(whiten,rosy,oilControl,relight),
-        // [4..5] uEyes[2], [6] uOval, [7] uMouth, [8..9] uEyeMask[2], [10] uGrade(lut,core,microDetailKeep,0)
+        // [4..5] uEyes[2], [6] uOval, [7] uMouth, [8..9] uEyeMask[2], [10] uGrade(lut,core,microDetailKeep,ambientLift)
+        const bool wantAmbientLift = config.enabled && !config.compareOriginal &&
+            (config.smoothing > 1e-4f || config.whiten > 1e-4f || config.rosy > 1e-4f ||
+             config.radiance > 1e-4f || config.relight > 1e-4f || config.brightness > 1e-4f ||
+             !config.lutUrl.empty());
+        const float ambientLift = wantAmbientLift
+            ? math::BeautyQualityTuning::ambientSceneLift(in.lightLuma)
+            : 0.0f;
         ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), aspect, framePresence);
         ub.push(stylePacked, effSmooth, config.brightness, effTexture);
         ub.push(config.radiance, effSharpness, config.saturation, activeFilterIntensity);
@@ -1717,7 +1724,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         } else {
             for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
         }
-        ub.push(lutStrength, coreThresh, microDetailKeep, 0.0f);
+        ub.push(lutStrength, coreThresh, microDetailKeep, ambientLift);
 
         device_.beginPass(rtComposite_, in.width, in.height, false);
         device_.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);

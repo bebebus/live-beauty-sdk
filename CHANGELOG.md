@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.6.15] - 2026-11-26
+
+### Added & Fixed
+- **Douyin-Style Adaptive Ambient Scene Brightness & Global Brightness Fix (`BeautyQualityTuning`, `RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Added `BeautyQualityTuning::ambientSceneLift(lightLuma)` wired via `uGrade.w` (`uU10.w`, zero extra uniforms) into `kCompositePro` / `fs_composite_pro`, smoothly lifting dim and indoor room environments (`~0.20..0.56` filmic exposure gain) while tapering cleanly to `0.0` in bright daylight (`lightLuma >= 0.76`), anchoring deep blacks (`0.015..0.085`) against milky haze, and rolling off bright lamps/windows (`0.72..0.96`) against clipping.
+  - Promoted `config.brightness` (`uParams.z` / `uU1.z`) from a skin-only mask multiplier (`* w`) to the global highlight-preserving filmic exposure lift so adjusting brightness brightens the entire room and subject together rather than creating a bright floating face inside a dark room.
+
 ## [3.6.14] - 2026-11-26
 
 ### Fixed

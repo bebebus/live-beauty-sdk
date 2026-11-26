@@ -1235,6 +1235,40 @@ void testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1() {
         EXPECT_TRUE((pipe.lastActivePassesMask() & kPassHairDye) != 0);
     }
 
+    // 4. v3.6.15 Ambient scene lift wiring in uGrade.w (uU10.w): indoor lightLuma pushes >0.35, sunny 0.80 pushes 0.0
+    {
+        MockRhiDevice pipeDev;
+        RenderPipeline pipe(pipeDev);
+        BeautyConfig pCfg{};
+        pCfg.enabled = true;
+        pCfg.smoothing = 0.50f;
+        FrameInputs pIn{};
+        pIn.inputTexture = pipeDev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+        pIn.width = 720;
+        pIn.height = 1280;
+        pIn.lightLuma = 0.25f;
+        pipeDev.calls.clear();
+        pipe.render(pCfg, pIn);
+        float indoorAmb = -1.0f;
+        for (const auto& c : pipeDev.calls) {
+            if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 11) {
+                indoorAmb = c.uniforms.v[10].w;
+            }
+        }
+        EXPECT_TRUE(indoorAmb >= 0.40f && indoorAmb <= 0.56f);
+
+        pIn.lightLuma = 0.80f;
+        pipeDev.calls.clear();
+        pipe.render(pCfg, pIn);
+        float sunnyAmb = -1.0f;
+        for (const auto& c : pipeDev.calls) {
+            if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 11) {
+                sunnyAmb = c.uniforms.v[10].w;
+            }
+        }
+        EXPECT_TRUE(std::fabs(sunnyAmb) <= 1e-5f);
+    }
+
     engine.releaseGpuResources();
 }
 

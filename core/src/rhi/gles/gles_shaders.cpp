@@ -731,9 +731,21 @@ void main() {
             color = mix(color, warmSkin, oilMask);
         }
     }
+    float globalLift = clamp(uU10.w + 0.55 * max(uU1.z, 0.0), 0.0, 0.95);
+    if (globalLift > 0.001) {
+        float yAmb = luma(color);
+        float blackKeep = smoothstep(0.015, 0.085, yAmb);
+        float hiProtect = 1.0 - 0.65 * smoothstep(0.72, 0.96, yAmb);
+        float g = globalLift * blackKeep * hiProtect;
+        float yNewAmb = yAmb * (1.0 + g) / (1.0 + g * yAmb);
+        color *= yNewAmb / max(yAmb, 0.0001);
+        float satRestore = 1.0 + clamp((yNewAmb - yAmb) * 0.45, 0.0, 0.08);
+        color = vec3(yNewAmb) + (color - vec3(yNewAmb)) * satRestore;
+        color = fitGamut(color, yNewAmb);
+    }
     float yPre = luma(color);
     float relightFill = 0.22 * uU3.w * w * faceM * (1.0 - smoothstep(0.20, 0.55, yPre));
-    float liftA = (1.12 * uU3.x + 0.48 * uU1.z) * w + relightFill;
+    float liftA = 1.12 * uU3.x * w + relightFill;
     float rosyA = 0.25 * uU3.y * w;
     float sculptPlane = max(hiM - 0.18 * faceM, -0.05 * smoothstep(0.45, 0.70, yPre) * faceM);
     float sculpt = (0.30 * uU2.x + 0.42 * uU3.w) * sculptPlane * w * faceM;
@@ -764,7 +776,7 @@ void main() {
         if (rosyA > 0.0) color = vec3(y2) + (color - vec3(y2)) * (1.0 + rosyA * 4.0 * y2 * (1.0 - y2));
         color = fitGamut(color, y2);
     }
-    float faceExp = clamp(uU3.x + 0.50 * max(uU1.z, 0.0) + 0.35 * uU3.w, 0.0, 1.35);
+    float faceExp = clamp(uU3.x + 0.35 * uU3.w, 0.0, 1.35);
     if (mouthZone > 0.001 && (faceExp > 0.001 || uU3.y > 0.001)) {
         float yLip = luma(color);
         float redEx = color.r - max(color.g, color.b);

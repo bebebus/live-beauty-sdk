@@ -23,6 +23,17 @@ float BeautyQualityTuning::coreThreshold(float lightLuma, float pressure) {
     return kCoreBase + kCoreDark * dark + kCorePressure * load;
 }
 
+float BeautyQualityTuning::ambientSceneLift(float lightLuma) {
+    if (!std::isfinite(lightLuma)) return 0.0f;
+    // v3.6.15 Douyin-style adaptive ambient environment brightness:
+    // - Dim indoor rooms (luma 0.12..0.40): lifts room shadows & midtones (~0.42..0.56)
+    // - Normal indoor lighting (luma 0.40..0.58): airy bright studio room (~0.20..0.42)
+    // - Bright daylight (luma >= 0.76): tapers cleanly to 0.0 to protect bright skies/highlights
+    const float dimBoost = 1.0f - detail::smoothstep(0.14f, 0.46f, lightLuma);
+    const float indoorKeep = 1.0f - detail::smoothstep(0.42f, 0.76f, lightLuma);
+    return detail::clampf(0.30f * indoorKeep + 0.26f * dimBoost, 0.0f, 0.56f);
+}
+
 void GuidedSpread::reset() {
     value_ = kDefault;
     smoothed_ = kDefault;
