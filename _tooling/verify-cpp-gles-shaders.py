@@ -139,8 +139,10 @@ document.getElementById('res').textContent = JSON.stringify(out);
             print(f"FAIL  [{f['mode']}] {f['name']}: vs={f['vsLog']} fs={f['fsLog']} link={f['pLog']}", file=sys.stderr)
         return 1
 
+    # v3.9.4 fused full 3x3 CAT02 WB into kCompositePro: 13 vec4 (uU0..uU12, <= 16 GLES2 min
+    # GL_MAX_FRAGMENT_UNIFORM_VECTORS) + 4 sampler2D (uTex0..uTex3, <= 8 GLES2 min) = 17 active uniforms.
     comp_high = [r for r in results if r["mode"] == "highp" and r["name"] == "kCompositePro"]
-    if not comp_high or comp_high[0]["activeUniforms"] > 15:
+    if not comp_high or comp_high[0]["activeUniforms"] > 17:
         print(f"FAIL  kCompositePro uniform budget exceeded: {comp_high}", file=sys.stderr)
         return 1
 
