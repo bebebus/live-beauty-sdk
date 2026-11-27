@@ -286,8 +286,8 @@ void main() {
         vec3 sideAvg = 0.5 * (sideA + sideB);
         vec3 foldDef = max(sideAvg - c, vec3(0.0));
         float maxDef = max(foldDef.r, max(foldDef.g, foldDef.b));
-        float creaseGate = smoothstep(0.012, 0.038, maxDef);
-        // v3.9.4 (makeup-11): Cap fold lift at 1.0x deficit without constant overshoot to prevent bright reverse line.
+        float creaseGate = smoothstep(0.010, 0.016, maxDef);
+        // v3.9.5 (makeup-n3): Narrow noise gate (0.010..0.016) gives shallow/mid folds full 1.0x correction without overshoot.
         vec3 lift = clamp(foldDef * creaseGate, vec3(0.0), vec3(0.20));
         target = clamp(c + lift, 0.0, 1.0);
     }
@@ -722,6 +722,23 @@ vec3 diag4(vec2 uv, vec2 d) {
                    texture2D(uTex0, uv + vec2(-d.x, d.y)).rgb +
                    texture2D(uTex0, uv + vec2(d.x, d.y)).rgb);
 }
+float evalPortraitPrior(vec2 uv, float aspect, vec4 oval, vec2 axis, float presence) {
+    if (oval.z <= 0.001 || oval.w <= 0.001 || presence <= 0.001) return 0.0;
+    float fLen = length(axis);
+    vec2 fu = fLen > 0.001 ? (axis / fLen) : vec2(1.0, 0.0);
+    vec2 fuBody = normalize(mix(vec2(1.0, 0.0), fu, 0.30));
+    vec2 dp = vec2(uv.x - oval.x, (uv.y - oval.y) / max(aspect, 0.0001));
+    float pa = dot(dp, fu) / max(oval.z, 0.0001);
+    float pb = dot(dp, vec2(-fu.y, fu.x)) / max(oval.w, 0.0001);
+    float bodyRx = max(oval.z, oval.w * 0.77);
+    float ba = dot(dp, fuBody) / max(bodyRx, 0.0001);
+    float bb = dot(dp, vec2(-fuBody.y, fuBody.x)) / max(oval.w, 0.0001);
+    float headHalo = (1.0 - smoothstep(1.35, 2.20, length(vec2(pa, pb)))) * (1.0 - smoothstep(0.95, 1.35, pb));
+    float down = -bb;
+    float neckChest = smoothstep(-0.15, 0.85, down) * (1.0 - smoothstep(3.80, 5.20, down)) *
+                      (1.0 - smoothstep(1.85, 3.15, abs(ba)));
+    return clamp(max(headHalo, neckChest) * clamp(presence, 0.0, 1.0), 0.0, 1.0);
+}
 void main() {
     if (uU1.x < -0.5) { gl_FragColor = texture2D(uTex0, vTextureCoord); return; }
     vec2 uv = vTextureCoord;
@@ -768,76 +785,79 @@ void main() {
     float bodyChroma = smoothstep(0.080, 0.145, relRB) * smoothstep(0.042, 0.090, relRG);
     float bodyGate = max(gate * chromaGate, gateNorm * bodyChroma * smoothstep(0.16, 0.25, yFine));
     // Protect clearly lit warm skin inside the face polygon from coarse 128x128 hairMask edge bleed
-    // casting dark un-whitened bands along hairline/temples while still protecting actual dark hair.
+    // only along transition edges (smoothstep(0.05, 0.35, nonHair)) so high-confidence light/blonde bangs
+    // (nonHair ~ 0) are never re-whitened as skin (v3.9.5 skin-n3).
     float hairSkinGuard = faceM * smoothstep(0.22, 0.36, yFine) * warmPoly;
-    float effNonHair = max(nonHair, hairSkinGuard);
-    // v3.9.4 (A2/tone-v1/skin-5): Portrait spatial prior restricts non-face body skin gating to head halo
-    // (ears/forehead border, excluding above-crown hair) + neck/collarbone/chest/shoulders below chin,
-    // preventing whitening/smoothing bleed onto warm beige walls, wooden furniture, and brown hair.
-    float portraitPrior = 1.0;
-    if (uU6.z > 0.001 && uU6.w > 0.001) {
-        vec2 fAxis = vec2(uU4.w, uU5.w);
-        float fLen = length(fAxis);
-        vec2 fu = fLen > 0.001 ? (fAxis / fLen) : vec2(1.0, 0.0);
-        vec2 dp = vec2(uv.x - uU6.x, (uv.y - uU6.y) / max(uU0.z, 0.0001));
-        float pa = dot(dp, fu) / max(uU6.z, 0.0001);
-        float pb = dot(dp, vec2(-fu.y, fu.x)) / max(uU6.w, 0.0001);
-        float headHalo = (1.0 - smoothstep(1.15, 1.65, length(vec2(pa, pb)))) * (1.0 - smoothstep(0.75, 1.15, pb));
-        float down = -pb;
-        float neckChest = smoothstep(0.45, 0.95, down) * (1.0 - smoothstep(3.80, 5.20, down)) *
-                          (1.0 - smoothstep(1.80, 3.00, abs(pa)));
-        portraitPrior = clamp(max(headHalo, neckChest), 0.0, 1.0);
+    float effNonHair = max(nonHair, hairSkinGuard * smoothstep(0.05, 0.35, nonHair));
+    // v3.9.5 (skin-n1/tone-n1/tone-c1/skin-n4): Portrait spatial prior defaults to 0.0 when no face is
+    // tracked (never snapping to 1.0 on face loss), supports smooth presence decay via (1 - uU5.y),
+    // widened non-cliff transitions + yaw/roll-invariant chest coverage, and dual-face secondary prior.
+    float bodyPriorScale = clamp(1.0 - uU5.y, 0.0, 1.0);
+    float portraitPrior = evalPortraitPrior(uv, uU0.z, uU6, vec2(uU4.w, uU5.w), bodyPriorScale);
+    if (uU0.w >= 3.5 && uU8.z > 0.001 && uU8.w > 0.001 && uU9.z > 0.001) {
+        portraitPrior = max(portraitPrior, evalPortraitPrior(uv, uU0.z, uU8, uU9.xy, uU9.z));
     }
     float skin = clamp(faceM * polyGate + (1.0 - faceM) * bodyGate * portraitPrior * (1.0 - 0.70 * exclM), 0.0, 1.0) * effNonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
     float yOrig = luma(original.rgb);
     float core = max(uU10.y, 0.005);
-    float hairStrand = smoothstep(0.022, 0.065, luma(wideLow) - yOrig) * (1.0 - smoothstep(0.18, 0.34, yOrig));
-    float bleedGuard = (1.0 - (1.0 - smoothstep(0.10, 0.18, yFine)) *
-        smoothstep(0.045, 0.105, luma(guided) - yFine)) * (1.0 - 0.82 * hairStrand);
-    // v3.9.4 (A3/skin-1/skin-v1): Anisotropic 1D line detector preserves 1px eyebrows, lashes, beard stubble,
-    // hair wisps & bright metallic glasses frames while retaining guidedA gating so 1-2px blackheads & noise still smooth.
-    float loLine = 0.025 + 2.5 * (core - 0.005);
-    float dk = yFine - yOrig;
-    float lineScore = 0.0;
-    if (abs(dk) > loLine && skin > 0.01) {
-        vec2 tx = uU0.xy;
-        float p0 = 0.5 * (luma(texture2D(uTex0, uv + vec2(tx.x, 0.0)).rgb) + luma(texture2D(uTex0, uv - vec2(tx.x, 0.0)).rgb)) - yOrig;
-        float p1 = 0.5 * (luma(texture2D(uTex0, uv + vec2(0.0, tx.y)).rgb) + luma(texture2D(uTex0, uv - vec2(0.0, tx.y)).rgb)) - yOrig;
-        float p2 = 0.5 * (luma(texture2D(uTex0, uv + tx).rgb) + luma(texture2D(uTex0, uv - tx).rgb)) - yOrig;
-        float p3 = 0.5 * (luma(texture2D(uTex0, uv + vec2(tx.x, -tx.y)).rgb) + luma(texture2D(uTex0, uv + vec2(-tx.x, tx.y)).rgb)) - yOrig;
-        float sgn = dk >= 0.0 ? 1.0 : -1.0;
-        vec4 lp = sgn * vec4(p0, p1, p2, p3);
-        float pmax = max(max(lp.x, lp.y), max(lp.z, lp.w));
-        float pmin = min(min(lp.x, lp.y), min(lp.z, lp.w));
-        lineScore = smoothstep(0.45, 0.75, (pmax - pmin) / max(pmax, 0.004));
-    }
-    float darkKeep = smoothstep(loLine, loLine + 0.045, dk) * max(smoothstep(0.28, 0.58, guidedA), lineScore);
-    float brightKeep = smoothstep(loLine + 0.01, loLine + 0.055, -dk) * lineScore;
-    float fineDark = (1.0 - max(darkKeep, brightKeep)) * bleedGuard;
     float featureKeep = clamp(1.0 - exclM, 0.0, 1.0);
     float toneKeep = 1.0 - smoothstep(0.58, 0.88, exclM);
     float band = luma(fineLow - wideLow);
     float micro = luma(original.rgb - fineLow);
     vec3 color = original.rgb;
     if (uU1.y > 0.0) {
+        float hairStrand = smoothstep(0.022, 0.065, luma(wideLow) - yOrig) * (1.0 - smoothstep(0.18, 0.34, yOrig));
+        float bleedGuard = (1.0 - (1.0 - smoothstep(0.10, 0.18, yFine)) *
+            smoothstep(0.045, 0.105, luma(guided) - yFine)) * (1.0 - 0.82 * hairStrand);
+        // v3.9.5 (skin-n5/skin-c1): Anisotropic 1D line detector gated inside smoothing pass with min(a,b)
+        // pair criterion: zeroes out step edges & spot rims while preserving 1px hairs, brows & glasses frames.
+        float loLine = 0.025 + 2.5 * (core - 0.005);
+        float dk = yFine - yOrig;
+        float lineScore = 0.0;
+        if (abs(dk) > loLine && skin > 0.01) {
+            vec2 tx = uU0.xy;
+            float sgn = dk >= 0.0 ? 1.0 : -1.0;
+            float p0 = min(sgn * (luma(texture2D(uTex0, uv + vec2(tx.x, 0.0)).rgb) - yOrig),
+                           sgn * (luma(texture2D(uTex0, uv - vec2(tx.x, 0.0)).rgb) - yOrig));
+            float p1 = min(sgn * (luma(texture2D(uTex0, uv + vec2(0.0, tx.y)).rgb) - yOrig),
+                           sgn * (luma(texture2D(uTex0, uv - vec2(0.0, tx.y)).rgb) - yOrig));
+            float p2 = min(sgn * (luma(texture2D(uTex0, uv + tx).rgb) - yOrig),
+                           sgn * (luma(texture2D(uTex0, uv - tx).rgb) - yOrig));
+            float p3 = min(sgn * (luma(texture2D(uTex0, uv + vec2(tx.x, -tx.y)).rgb) - yOrig),
+                           sgn * (luma(texture2D(uTex0, uv + vec2(-tx.x, tx.y)).rgb) - yOrig));
+            vec4 lp = max(vec4(p0, p1, p2, p3), vec4(0.0));
+            float pmax = max(max(lp.x, lp.y), max(lp.z, lp.w));
+            float pmin = min(min(lp.x, lp.y), min(lp.z, lp.w));
+            lineScore = smoothstep(0.45, 0.75, (pmax - pmin) / max(pmax, 0.004));
+        }
+        float darkKeep = smoothstep(loLine, loLine + 0.045, dk) * max(smoothstep(0.28, 0.58, guidedA), lineScore);
+        float brightKeep = smoothstep(loLine + 0.01, loLine + 0.055, -dk) * lineScore;
+        float fineDark = (1.0 - max(darkKeep, brightKeep)) * bleedGuard;
         float skinGateSmooth = skinOnly > 0.5 ? skin : 1.0;
         // v3.7.0 Pre-smooth isolated mid-band dark pore/blemish pre-lift (skips dark hair/lash/beard & flat skin)
         vec3 darkDef = max(guided - original.rgb, vec3(0.0));
         float spotDelta = length(darkDef);
         float spotBand = smoothstep(0.018, 0.055, spotDelta) * (1.0 - smoothstep(0.145, 0.240, spotDelta));
         float notDarkHair = smoothstep(0.14, 0.28, yOrig);
-        float spotLift = spotBand * notDarkHair * skinGateSmooth * featureKeep * fineDark * smoothstep(0.0, 0.55, uU1.y) * 0.42;
+        float smoothRamp = smoothstep(0.0, 0.55, uU1.y);
+        float spotLift = spotBand * notDarkHair * skinGateSmooth * featureKeep * fineDark * smoothRamp * 0.42;
         vec3 preLifted = mix(original.rgb, guided, spotLift);
         // Green-dominant perceptual range kernel resists indoor R/B chroma noise while preserving crisp features
         vec3 dEdge = preLifted - guided;
         float rEdge = sqrt(0.24 * dEdge.r * dEdge.r + 0.58 * dEdge.g * dEdge.g + 0.18 * dEdge.b * dEdge.b) * 1.73205 / 0.36;
         float rEdge2 = rEdge * rEdge;
-        // v3.9.4 (A4/skin-2): Recalibrated smoothing curve leaving natural pore headroom at default 0.55.
-        float stage1 = clamp(uU1.y / 0.85, 0.0, 1.0);
+        // v3.9.5 (skin-n2): Low-light adaptive smoothing curve + spot-adaptive kSpot recovers full blemish
+        // & low-light noise suppression while preserving bright-light pore headroom at default 0.55.
+        float lowLightT = smoothstep(0.005, 0.013, core);
+        float stage1 = clamp(uU1.y / mix(0.85, 0.60, lowLightT), 0.0, 1.0);
         float smoothCover = stage1 * (0.80 + 0.20 * stage1);
         float detailKeep = 1.0 - 0.55 * smoothstep(0.60, 1.0, uU1.y);
-        float k = smoothCover * 0.96 * skinGateSmooth * featureKeep * fineDark / (1.0 + rEdge2 * rEdge2);
+        float invEdge = 1.0 / (1.0 + rEdge2 * rEdge2);
+        float kBase = smoothCover * 0.96 * skinGateSmooth * featureKeep * fineDark * invEdge;
+        float kSpot = smoothstep(0.035, 0.070, spotDelta) * (1.0 - smoothstep(0.145, 0.240, spotDelta)) *
+                      notDarkHair * featureKeep * fineDark * skinGateSmooth * smoothRamp * 0.90 * invEdge;
+        float k = max(kBase, kSpot);
         float preMicro = luma(preLifted - fineLow);
         // v3.9.4 (skin-3): Asymmetric band clamp (-0.018..+0.035) reduces dark spot re-injection without hurting pores.
         float tex = clamp(band, -0.018, 0.035) * smoothstep(core, 2.5 * core, abs(band));

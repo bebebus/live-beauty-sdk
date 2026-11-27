@@ -212,6 +212,7 @@ public:
         rhi::RenderTargetId outputRt = rhi::kInvalidRenderTarget);
 
     int loadLevel() const { return std::max(governor_.level(), hostLoadLevel_.load(std::memory_order_relaxed)); }
+    bool lastWroteOutputRt() const { return pipeline_.lastWroteOutputRt(); }
     float facePresence() const { return faces_.slot(0).presence(); }
     int activeFaceCount() const { return faces_.activeFaceCount(); }
     const PerfStats& stats() const { return stats_; }
@@ -303,6 +304,7 @@ private:
     int lastWidth_ = 0;
     int lastHeight_ = 0;
     int deformerRunId_ = -1;
+    uint64_t deformerPromotionCount_ = 0;
     bool hasPendingBody_ = false;
     std::array<float, math::BodyGeometry::kStateSize> pendingBodyState_{};
     float pendingBodyVis_ = 1.0f;

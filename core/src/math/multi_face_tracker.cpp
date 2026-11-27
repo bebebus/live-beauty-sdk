@@ -16,6 +16,7 @@ void MultiFaceTracker::reset() {
         hasLastCenter_[i] = false;
         lastCx_[i] = 0.5f;
         lastCy_[i] = 0.5f;
+        lastFw_[i] = 0.0f;
     }
 }
 
@@ -30,8 +31,10 @@ bool MultiFaceTracker::promoteSecondaryIfPrimaryEmpty() {
     std::swap(timelines_[0], timelines_[1]);
     std::swap(lastCx_[0], lastCx_[1]);
     std::swap(lastCy_[0], lastCy_[1]);
+    std::swap(lastFw_[0], lastFw_[1]);
     std::swap(hasLastCenter_[0], hasLastCenter_[1]);
     timelines_[0].bumpRunId();
+    ++promotionCount_;
     return true;
 }
 
@@ -122,14 +125,32 @@ int MultiFaceTracker::submitFaces(
     if (validCount == 1) {
         const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
         const bool s1 = hasLastCenter_[1] && timelines_[1].latest() != kTimeInvalid;
+        // v3.9.5 (tracking-4): Enforce 0.8*fw association distance gate when matching a single
+        // detection to an existing slot so a newly entering face far away doesn't hijack slot 0's
+        // temporal filter state while slot 0 is briefly missed.
+        const auto withinGate = [&](int slotIdx, const ParsedFace& p) -> bool {
+            const float refFw = std::max(std::max(lastFw_[slotIdx], p.fw), 0.08f);
+            const float maxD = 0.80f * refFw;
+            return distSq(p.cx, p.cy, lastCx_[slotIdx], lastCy_[slotIdx], aspect) <= maxD * maxD;
+        };
         if (s0 && s1) {
             const float d0 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[0], lastCy_[0], aspect);
             const float d1 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[1], lastCy_[1], aspect);
-            assign[d0 <= d1 ? 0 : 1] = 0;
+            const int best = (d0 <= d1) ? 0 : 1;
+            assign[best] = 0;
         } else if (s1 && !s0) {
-            // Primary slot 0 is empty and only one face remains in slot 1: promote slot 1 -> slot 0.
-            promoteSecondaryIfPrimaryEmpty();
-            assign[0] = 0;
+            if (withinGate(1, parsed[0])) {
+                // Primary slot 0 is empty and only slot 1's face remains: promote slot 1 -> slot 0.
+                promoteSecondaryIfPrimaryEmpty();
+                assign[0] = 0;
+            } else {
+                // Far-away face while slot 1 is still active: keep slot 1 intact, spawn new face in slot 0.
+                assign[0] = 0;
+            }
+        } else if (s0 && !s1 && !withinGate(0, parsed[0])) {
+            // Far-away single face while slot 0 is still active (temporarily occluded): route to slot 1
+            // so slot 0's temporal anchor & filter state are not hijacked!
+            assign[1] = 0;
         } else {
             assign[0] = 0;
         }
@@ -167,6 +188,7 @@ int MultiFaceTracker::submitFaces(
             timelines_[s].add(sampleTsMs, p.state41.data(), &p.mesh);
             lastCx_[s] = p.cx;
             lastCy_[s] = p.cy;
+            lastFw_[s] = p.fw;
             hasLastCenter_[s] = true;
             if (s == 0) {
                 if (outPrimaryCenterX) *outPrimaryCenterX = p.cx;

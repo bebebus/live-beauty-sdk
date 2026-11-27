@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.5] - 2026-11-27
+
+### Fixed
+- **Face Contour, Fold Guard & Neck Band (`FaceMeshDeformer`, `RenderPipeline`)**:
+  - Restricted the outer-canthus lateral exclusion (`xi0E`) to the eye/cheekbone vertical band using untapered `wSide` while preserving the original chin/jaw `innerGate`, restoring chin/jaw slimming (`> 5%` width reduction) without eye compression (`< 1%`) or jaw kink (`shape-n1`).
+  - Restricted post-safety flip verification and global lambda bisection to visible front-facing triangles (`triFront > 0.35` and source area `>= ~4 px²`) with temporally smoothed lambda recovery and post-smoothing fold guard (`shape-n2`).
+  - Made steep-yaw tracking faster above `|rawSignedYaw| > 0.45` (`tau <= 28ms`) with `(0.50..0.68)` taper (`shape-9`).
+  - Made chin-aware `neckBandOverride` stateful with 150ms temporal smoothing and transient-miss hold (`shape-n3`).
+- **Portrait Spatial Prior, Smoothing, Hair Guard & Denoise (`gles_shaders.cpp`, `metal_shaders.h`, `RenderPipeline`)**:
+  - Defaulted `portraitPrior` to `0.0` when no face is tracked, persisted the last valid primary & secondary face ovals with smooth `tau = 350ms` decay (`uU5.y` mute / `uU8..uU9` dual-face prior) so face disappearance > 500ms never snaps warm background whitening back to `1.0` (`skin-n1`, `tone-n1`, `skin-n4`, `tone-n2`).
+  - Damped head-roll coupling (`0.30x`), added yaw-invariant chest width floor (`max(rx, ry*0.77)`), raised crown cutoff (`0.95..1.35`), and widened outer halo/chest transitions to eliminate side-hand brightness cliffs (`tone-c1`, `tone-n3`).
+  - Gated the 8-tap `lineScore` detector strictly inside `smoothing > 0` (`skin-n5`), switched pair evaluation to `min(a, b)` so step edges & spot rims no longer trigger false line preservation (`skin-c1`), and added low-light adaptive `stage1` + spot-adaptive `kSpot` (`skin-n2`).
+  - Restricted `hairSkinGuard` to hair-mask transition edges (`smoothstep(0.05, 0.35, nonHair)`) so high-confidence light/blonde bangs are never re-whitened (`skin-n3`).
+  - Removed Stage 0 8-bit temporal denoise & its warmup `kPassThrough` copy along with eager `rtDenoise_[0..1]` allocation (`tone-2`, saving `~16.6 MB` VRAM at 1080p).
+- **Makeup, Segmentation, Tracking & Load Governance (`FaceParsingMapper`, `FaceMeshFilter`, `MultiFaceTracker`, `DeviceTierPolicy`, `RenderPipeline`, `LiveBeautyEngine`)**:
+  - Calibrated `kMakeupIris` perceptual scaling (`contactLens * 0.65`, `catchlight * 0.55`) after decoupling double-alpha squaring (`makeup-n1`) and narrowed nasolabial fold noise gate to `smoothstep(0.010, 0.016, maxDef)` (`makeup-n3`).
+  - Relaxed `FaceParsingMapper` hand-in-face occlusion threshold proportionally to `handInFace` (`makeup-1`), fixed `-0.5f` box-center alignment (`segmentation-n4`), and added 2×2 box averaging to planar 6-class probability mapping (`seg-8`).
+  - Switched `kBgBlur` to a strictly continuous 3-pass ladder `(1.0, 1.0+0.5*b*fade, (1.0+b)*fade)` converging cleanly to privacy-safe 2-pass `(1.0, 1.0)` under overload (`gpuperf-n1`, `segmentation-n1`), smoothly attenuated `kBgHairMerge` by `loadFadeBody` (`segmentation-n3`), kept spatial RGB-guided `kMatteRefine` active during motion while restoring `(0.36+0.48*mt)*denoiseKeep` (`segmentation-v2`, `segmentation-n5`), stopped feeding blur-only `hairMaskTex` into `rtSkinMask_.a` (`seg-3`), and cleared `secLowerFaceOcc_` on fallback/timeout (`segmentation-c2`).
+  - Kept `enableBlemishHeal` and `enableMatteRefine` tier-governed at `loadLevel == 1` (`skin-7`, `cpuperf-v1`), raised `kResFcMin[3]` to `0.85` / `kResBeta[3]` to `20.0` (`tracking-5`), strengthened coherent rigid jitter deadzone to `0.65 * rigidFloor` (`tracking-1`), added `0.8 * fw` single-face association gate + monotonic `promotionCount()` deformer reset (`tracking-4`, `tracking-n3`), and added `lastWroteOutputRt()` for accurate `nativeProcessFrameToFbo` status (`gpuperf-n4`).
+
 ## [3.9.4] - 2026-11-27
 
 ### Fixed

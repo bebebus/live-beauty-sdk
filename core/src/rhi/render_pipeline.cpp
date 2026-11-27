@@ -91,6 +91,18 @@ void RenderPipeline::resetTemporal() {
     delayWriteIdx_ = 0;
     delayCount_ = 0;
     for (int i = 0; i < kMaxDelaySlots; ++i) delayStamps_[i] = kTimeInvalid;
+    lastWroteOutputRt_ = false;
+    lastValidOval_ = {0.0f, 0.0f, 0.0f, 0.0f};
+    lastValidAxis_ = {1.0f, 0.0f};
+    bodyPriorPresence_ = 0.0f;
+    secLastValidOval_ = {0.0f, 0.0f, 0.0f, 0.0f};
+    secLastValidAxis_ = {1.0f, 0.0f};
+    secBodyPriorPresence_ = 0.0f;
+    priorLastNowMs_ = kTimeInvalid;
+    neckBandRatio_ = 0.30f;
+    neckBandValid_ = false;
+    neckBandLastValidMs_ = kTimeInvalid;
+    neckBandLastNowMs_ = kTimeInvalid;
 }
 
 void RenderPipeline::resetDeformerTemporal() {
@@ -285,8 +297,8 @@ void RenderPipeline::ensureResources(int width, int height, bool useHalfFloat) {
         recreateFmt(rtWarp_, width_, height_, TextureFormat::kRgba8);
         recreateFmt(rtComposite_, width_, height_, TextureFormat::kRgba8);
         recreateFmt(rtMakeup_, width_, height_, TextureFormat::kRgba8);
-        recreateFmt(rtDenoise_[0], width_, height_, TextureFormat::kRgba8);
-        recreateFmt(rtDenoise_[1], width_, height_, TextureFormat::kRgba8);
+        // v3.9.5 (tone-2): Stage 0 8-bit temporal denoise removed (sub-0.5-LSB rounding & wasted warmup copy);
+        // skipping rtDenoise_[0..1] saves 2x full-res RGBA8 render targets (~16.6MB @ 1080p).
         for (int i = 0; i < 3; ++i) recreateFmt(rtGuided_[i], guidedW_, guidedH_, interFmt);
         for (int i = 0; i < 2; ++i) recreateFmt(rtMacro_[i], macroW_, macroH_, interFmt);
         recreateFmt(rtSkinMask_, skinW_, skinH_, TextureFormat::kRgba8);
@@ -760,8 +772,10 @@ void RenderPipeline::renderMakeup(
     if ((cfg.contactLens > 0.0f || cfg.catchlight > 0.0f) && hasIris && assets_.irisAtlas != kInvalidTexture) {
         const float aspect = static_cast<float>(width) / static_cast<float>(height);
         const Vec2 tile = math::FaceMakeupUv::irisTile(cfg.contactLensStyle);
-        const float lensS = cfg.contactLens * irisGain;
-        const float clS = cfg.catchlight * irisGain;
+        // v3.9.5 (makeup-n1): Perceptual calibration after fixing double-alpha squaring in kMakeupIris
+        // so built-in presets (contactLens 0.29..0.39, catchlight 0.32..0.46) map cleanly to 0.19..0.25.
+        const float lensS = cfg.contactLens * 0.65f * irisGain;
+        const float clS = cfg.catchlight * 0.55f * irisGain;
 
         auto drawEye = [&](int irisBase, BufferId eyeIb, int eyeCount, float openVal, float gateVal) {
             float circle[4];
@@ -1053,6 +1067,7 @@ void RenderPipeline::renderParticles(
 
 TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& in) {
     lastActivePassesMask_ = 0;
+    lastWroteOutputRt_ = false;
     if (in.inputTexture == kInvalidTexture || in.width <= 0 || in.height <= 0) {
         return in.inputTexture;
     }
@@ -1086,41 +1101,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     const float aspect = static_cast<float>(in.width) / static_cast<float>(in.height);
     TextureId currentTex = in.inputTexture;
 
-    // 0. Adaptive Temporal Denoise (Stage 0 pre-warp: active only in extreme low-light or high bitrate pressure >= 0.15)
-    const float lumaDenoise = (config.smoothing > 0.0f)
-        ? math::BeautyQualityTuning::indoorTemporalDenoise(in.lightLuma)
-        : 0.0f;
-    const float denoiseWeight = detail::clampf(
-        std::max(lumaDenoise, math::BitrateEffectsTuning::denoise(in.bitratePressure)) *
-            in.denoiseKeep * in.loadFadeSmooth,
-        0.0f, 0.18f);
-    if (denoiseWeight >= 0.15f && denoiseHistoryValid_) {
-        const int dstIdx = 1 - denoiseParity_;
-        RenderState st{};
-        TextureBindings tb{};
-        UniformBlock ub{};
-        tb.bind(0, currentTex);
-        tb.bind(1, device_.textureOf(rtDenoise_[denoiseParity_]));
-        ub.push(denoiseWeight, 0.010f, 0.032f, 1.0f / static_cast<float>(in.width));
-        device_.beginPass(rtDenoise_[dstIdx], in.width, in.height, LoadOp::kDontCare);
-        device_.drawFullScreenQuad(ShaderId::kTemporalDenoise, st, tb, ub);
-        device_.endPass();
-        denoiseParity_ = dstIdx;
-        currentTex = device_.textureOf(rtDenoise_[dstIdx]);
-        lastActivePassesMask_ |= kPassDenoise;
-    } else if (denoiseWeight >= 0.15f) {
-        RenderState st{};
-        TextureBindings tb{};
-        UniformBlock ub{};
-        tb.bind(0, currentTex);
-        device_.beginPass(rtDenoise_[denoiseParity_], in.width, in.height, LoadOp::kDontCare);
-        device_.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
-        device_.endPass();
-        denoiseHistoryValid_ = true;
-    } else {
-        // Invalidate history whenever denoise pauses so stale frames are never blended later.
-        denoiseHistoryValid_ = false;
-    }
+    // 0. Stage 0 8-bit Temporal Denoise removed in v3.9.5 (tone-2):
+    // 8-bit quantization rounded away <0.5 LSB corrections while paying full-res 10-tap + warmup PassThrough.
+    denoiseHistoryValid_ = false;
 
     // 1. Optional Background Bokeh / Virtual Background / Studio Chroma Key Replacement
     // Privacy invariant: backgroundBlur and virtual background replacement must NEVER fade out
@@ -1188,16 +1171,16 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     } else if ((wantVirtualImage || wantBgBlur) && in.personMaskTex != kInvalidTexture) {
         lastActivePassesMask_ |= kPassBg;
 
-        // 1a. Optional Hair-Person Mask Merge (soft bokeh only; skipped during virtual bg or thermal load)
+        // 1a. Optional Hair-Person Mask Merge (soft bokeh only; smoothly attenuated by loadFadeBody so no step jump at 0.5)
         TextureId effectiveMaskTex = in.personMaskTex;
-        if (!wantVirtualImage && in.loadFadeBody >= 0.5f &&
-            in.hairMaskTex != kInvalidTexture && in.hairBgShown > 1e-4f) {
+        const float effHairBg = in.hairBgShown * detail::clampf(in.loadFadeBody, 0.0f, 1.0f);
+        if (!wantVirtualImage && effHairBg > 1e-4f && in.hairMaskTex != kInvalidTexture) {
             RenderState st{};
             TextureBindings tb{};
             UniformBlock ub{};
             tb.bind(0, in.personMaskTex);
             tb.bind(1, in.hairMaskTex);
-            ub.push(in.hairAffine[0], in.hairAffine[1], in.hairAffine[2], in.hairBgShown);
+            ub.push(in.hairAffine[0], in.hairAffine[1], in.hairAffine[2], effHairBg);
             ub.push(in.hairAffine[4], in.hairAffine[5], in.hairAffine[6], 0.0f);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, in.hasFaceState ? 1.0f : 0.0f);
@@ -1208,9 +1191,11 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         }
 
         // 1b. P2: RGB-Guided Joint Bilateral + Motion-Adaptive Temporal Portrait Matting Refinement
-        // Skip during camera shake / extreme motion (effMatteTemporal == 0); no 0.36 floor inside renderTemporalMatte.
-        const float effMatteTemporal = config.matteTemporal * in.denoiseKeep;
-        if (in.tierCaps.enableMatteRefine && effMatteTemporal > 1e-4f) {
+        // v3.9.5 (segmentation-v2/n5): Keep spatial RGB-guided matte refine always active when enabled by tier
+        // (even during motion when temporal weight drops to 0), and restore static stability curve (0.36 + 0.48*mt)*denoiseKeep.
+        const float mt = detail::clampf(config.matteTemporal, 0.0f, 1.0f);
+        const float effMatteTemporal = (mt > 1e-4f ? (0.36f + 0.48f * mt) : 0.0f) * detail::clampf(in.denoiseKeep, 0.0f, 1.0f);
+        if (in.tierCaps.enableMatteRefine) {
             effectiveMaskTex = renderTemporalMatte(effectiveMaskTex, currentTex, in.width, in.height, effMatteTemporal);
             lastActivePassesMask_ |= kPassMatteRefine;
         } else {
@@ -1287,18 +1272,17 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             device_.drawFullScreenQuad(ShaderId::kBgPremask, st, tb, ub);
             device_.endPass();
 
-            // Monotonic anti-aliasing blur step ladder (pass 0 ALWAYS fixed at 1.0 texel to eliminate comb/dot-matrix bokeh).
-            float steps[3] = {1.0f, 1.0f, 1.5f};
-            int passCount = 1;
-            if (in.loadFadeBody >= 0.5f) {
-                steps[0] = 1.0f;
-                steps[1] = detail::clampf(1.0f + 0.75f * bgBlur, 1.0f, 1.75f);
-                passCount = 2;
-                if (bgBlur > 0.55f) {
-                    steps[2] = detail::clampf(1.5f + 0.50f * bgBlur, 1.5f, 2.0f);
-                    passCount = 3;
-                }
-            }
+            // v3.9.5 (gpuperf-n1/segmentation-n1/n3): Strictly continuous & monotonic anti-aliasing bokeh ladder.
+            // Normal (loadFadeBody=1): 3 passes (1.0, 1.0+0.5*b, 1.0+1.0*b), sigma 11.7..17.8px, zero jump at 0.55.
+            // Overload transition: pass 2 step smoothly scales to 0 (identity) with loadFadeBody and skips once <= 0.02,
+            // settling on privacy-safe 2-pass (1.0, 1.0) (sigma 9.6px) with zero visual step discontinuity!
+            const float fadeB = detail::clampf(in.loadFadeBody, 0.0f, 1.0f);
+            float steps[3] = {
+                1.0f,
+                1.0f + 0.50f * bgBlur * fadeB,
+                (1.0f + 1.00f * bgBlur) * fadeB,
+            };
+            const int passCount = (steps[2] > 0.02f) ? 3 : 2;
             for (int pass = 0; pass < passCount; ++pass) {
                 const float stepScale = steps[pass];
                 tb.clear(); ub.clear();
@@ -1341,13 +1325,20 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         const float waist = config.waistSlim * 0.16f * bodyMod;
         const float bust = config.bustEnhance * 0.14f * bodyMod;
         const float shoulder = config.shoulderSlim * 0.12f * bodyMod;
-        const float neck = config.neckLengthen * 0.22f * bodyMod;
-        appliedNeck = neck;
+        float neck = config.neckLengthen * 0.22f * bodyMod;
 
-        if (neck > 1e-4f && in.hasFaceMesh && in.landmarks478x2) {
-            const float torso = in.bodyState7[4];
-            const float axLen = std::hypot(in.bodyState7[2], in.bodyState7[3]);
-            if (torso > 0.04f && axLen > 1e-4f) {
+        // v3.9.5 (shape-n3): Stateful 150ms smoothed chin-aware neckBand ratio prevents single-frame
+        // neck jump during head nod (uChin near 0.05*torso) or transient face loss (< 1000ms).
+        const float torso = in.bodyState7[4];
+        const float axLen = std::hypot(in.bodyState7[2], in.bodyState7[3]);
+        if (neck > 1e-4f && torso > 0.04f && axLen > 1e-4f) {
+            const float dtNeckMs = (neckBandLastNowMs_ != kTimeInvalid && in.nowMs > neckBandLastNowMs_)
+                ? static_cast<float>(std::min<int64_t>(in.nowMs - neckBandLastNowMs_, 250))
+                : 33.0f;
+            neckBandLastNowMs_ = in.nowMs;
+            const float alphaNeck = 1.0f - std::exp(-dtNeckMs / 150.0f);
+            bool gotChin = false;
+            if (in.hasFaceMesh && in.landmarks478x2) {
                 const float bax = in.bodyState7[2] / axLen;
                 const float bay = in.bodyState7[3] / axLen;
                 const float hipX = in.bodyState7[0];
@@ -1355,11 +1346,30 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 const float chinX = in.landmarks478x2[152 * 2];
                 const float chinY = in.landmarks478x2[152 * 2 + 1] / aspect;
                 const float uChin = -((chinX - hipX) * bax + (chinY - hipY) * bay + torso);
-                if (uChin > 0.05f * torso) {
-                    neckBandOverride = detail::clampf(uChin - 0.03f * torso, 0.06f * torso, 0.30f * torso);
+                const float targetRatio = detail::clampf((uChin - 0.03f * torso) / torso, 0.06f, 0.30f);
+                // Gently attenuate neck lengthening when chin drops near shoulder line (nodding down).
+                const float chinClearance = detail::smoothstep(0.02f * torso, 0.09f * torso, uChin);
+                neck *= (0.25f + 0.75f * chinClearance);
+                if (!neckBandValid_) {
+                    neckBandRatio_ = targetRatio;
+                    neckBandValid_ = true;
+                } else {
+                    neckBandRatio_ += alphaNeck * (targetRatio - neckBandRatio_);
+                }
+                neckBandLastValidMs_ = in.nowMs;
+                gotChin = true;
+            }
+            if (!gotChin) {
+                // Hold last valid ratio during transient face loss (< 1000ms); ramp smoothly toward 0.30f afterward.
+                if (neckBandValid_ && neckBandLastValidMs_ != kTimeInvalid &&
+                    in.nowMs - neckBandLastValidMs_ > 1000) {
+                    const float alphaBack = 1.0f - std::exp(-dtNeckMs / 300.0f);
+                    neckBandRatio_ += alphaBack * (0.30f - neckBandRatio_);
                 }
             }
+            neckBandOverride = neckBandRatio_ * torso;
         }
+        appliedNeck = neck;
 
         const bool hasHandShield = (in.handShieldCoords.x >= 0.0f || in.handShieldCoords.z >= 0.0f);
         RenderState st{};
@@ -1858,21 +1868,91 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             lastActivePassesMask_ |= kPassAtmosphere;
         }
 
+        // v3.9.5 (skin-n1/tone-n1/skin-n4): Smoothly track primary & secondary face spatial prior
+        // presence (tau=350ms decay on face loss; starts at 0 before first face) so warm background
+        // never snaps to portraitPrior=1.0 after 500ms timeline clear, and secondary face gets full neck prior.
+        const float dtPriorMs = (priorLastNowMs_ != kTimeInvalid && in.nowMs > priorLastNowMs_)
+            ? static_cast<float>(std::min<int64_t>(in.nowMs - priorLastNowMs_, 250))
+            : 33.0f;
+        priorLastNowMs_ = in.nowMs;
+        const float decayPrior = std::exp(-dtPriorMs / 350.0f);
+        const float risePrior = 1.0f - std::exp(-dtPriorMs / 120.0f);
+        if (fallbackEllipseState && fallbackEllipseState[24] > 0.001f && fallbackEllipseState[25] > 0.001f) {
+            lastValidOval_ = {fallbackEllipseState[22], fallbackEllipseState[23],
+                              fallbackEllipseState[24], fallbackEllipseState[25]};
+            lastValidAxis_ = {fallbackEllipseState[26], fallbackEllipseState[27]};
+            const float targetP = detail::clampf(effFacePresence, 0.0f, 1.0f);
+            if (targetP >= bodyPriorPresence_) {
+                bodyPriorPresence_ += risePrior * (targetP - bodyPriorPresence_);
+            } else {
+                bodyPriorPresence_ = targetP + (bodyPriorPresence_ - targetP) * decayPrior;
+            }
+        } else {
+            bodyPriorPresence_ *= decayPrior;
+            if (bodyPriorPresence_ < 0.002f) {
+                bodyPriorPresence_ = 0.0f;
+                lastValidOval_ = {0.0f, 0.0f, 0.0f, 0.0f};
+            }
+        }
+        const float* secPriorState = (hasSecOval && secActive) ? in.secondaryFace.state41 : nullptr;
+        if (secPriorState && secPriorState[24] > 0.001f && secPriorState[25] > 0.001f) {
+            secLastValidOval_ = {secPriorState[22], secPriorState[23], secPriorState[24], secPriorState[25]};
+            secLastValidAxis_ = {secPriorState[26], secPriorState[27]};
+            const float targetS = detail::clampf(effSecPresence, 0.0f, 1.0f);
+            if (targetS >= secBodyPriorPresence_) {
+                secBodyPriorPresence_ += risePrior * (targetS - secBodyPriorPresence_);
+            } else {
+                secBodyPriorPresence_ = targetS + (secBodyPriorPresence_ - targetS) * decayPrior;
+            }
+        } else {
+            secBodyPriorPresence_ *= decayPrior;
+            if (secBodyPriorPresence_ < 0.002f) {
+                secBodyPriorPresence_ = 0.0f;
+                secLastValidOval_ = {0.0f, 0.0f, 0.0f, 0.0f};
+            }
+        }
+        const float bodyPriorMute = 1.0f - detail::clampf(bodyPriorPresence_, 0.0f, 1.0f);
+
         ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), aspect, framePresence);
         ub.push(stylePacked, effSmooth, config.brightness, effTexture);
         ub.push(config.radiance, effSharpness, config.saturation, activeFilterIntensity);
         ub.push(config.whiten, config.rosy, effOilControl, effRelight);
         if (fallbackEllipseState) {
             ub.push(cat02[0], cat02[1], cat02[2], fallbackEllipseState[26]);
-            ub.push(fusedPackedGrain, 0.0f, 0.0f, fallbackEllipseState[27]);
+            ub.push(fusedPackedGrain, bodyPriorMute, 0.0f, fallbackEllipseState[27]);
             ub.push(fallbackEllipseState[22], fallbackEllipseState[23], fallbackEllipseState[24], fallbackEllipseState[25]);
             ub.push(fallbackEllipseState[28], fallbackEllipseState[29], fallbackEllipseState[30], fallbackEllipseState[31]);
-            ub.push(fallbackEllipseState[32], fallbackEllipseState[33], fallbackEllipseState[34], fallbackEllipseState[35]);
-            ub.push(fallbackEllipseState[36], fallbackEllipseState[37], fallbackEllipseState[38], fallbackEllipseState[39]);
+            if (polySkinMaskReady && secBodyPriorPresence_ > 0.001f) {
+                ub.push(secLastValidOval_[0], secLastValidOval_[1], secLastValidOval_[2], secLastValidOval_[3]);
+                ub.push(secLastValidAxis_[0], secLastValidAxis_[1], secBodyPriorPresence_, 0.0f);
+            } else {
+                ub.push(fallbackEllipseState[32], fallbackEllipseState[33], fallbackEllipseState[34], fallbackEllipseState[35]);
+                ub.push(fallbackEllipseState[36], fallbackEllipseState[37], fallbackEllipseState[38], fallbackEllipseState[39]);
+            }
+        } else if (bodyPriorPresence_ > 0.001f && lastValidOval_[2] > 0.001f) {
+            ub.push(cat02[0], cat02[1], cat02[2], lastValidAxis_[0]);
+            ub.push(fusedPackedGrain, bodyPriorMute, 0.0f, lastValidAxis_[1]);
+            ub.push(lastValidOval_[0], lastValidOval_[1], lastValidOval_[2], lastValidOval_[3]);
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            if (polySkinMaskReady && secBodyPriorPresence_ > 0.001f) {
+                ub.push(secLastValidOval_[0], secLastValidOval_[1], secLastValidOval_[2], secLastValidOval_[3]);
+                ub.push(secLastValidAxis_[0], secLastValidAxis_[1], secBodyPriorPresence_, 0.0f);
+            } else {
+                ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+                ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            }
         } else {
             ub.push(cat02[0], cat02[1], cat02[2], 0.0f);
-            ub.push(fusedPackedGrain, 0.0f, 0.0f, 0.0f);
-            for (int i = 0; i < 4; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            ub.push(fusedPackedGrain, 1.0f, 0.0f, 0.0f);
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            if (polySkinMaskReady && secBodyPriorPresence_ > 0.001f) {
+                ub.push(secLastValidOval_[0], secLastValidOval_[1], secLastValidOval_[2], secLastValidOval_[3]);
+                ub.push(secLastValidAxis_[0], secLastValidAxis_[1], secBodyPriorPresence_, 0.0f);
+            } else {
+                ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+                ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            }
         }
         ub.push(lutStrength, coreThresh, microDetailKeep, ambientLift);
         ub.push(cat02[3], cat02[4], cat02[5], fusedCat02Full);
@@ -1885,6 +1965,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         device_.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
         device_.endPass();
         currentTex = device_.textureOf(compositeDstRt);
+        if (compositeIsFinal) lastWroteOutputRt_ = true;
         lastActivePassesMask_ |= kPassComposite;
     }
 
@@ -1941,6 +2022,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         device_.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
         device_.endPass();
         currentTex = device_.textureOf(hairDyeDstRt);
+        if (hairDyeIsFinal) lastWroteOutputRt_ = true;
         lastActivePassesMask_ |= kPassHairDye;
     }
 
@@ -2026,6 +2108,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         currentTex = device_.textureOf(stage7DstRt);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassParticles;
+    }
+    if (makeupRendered && stage7DstRt == in.outputRt && in.outputRt != kInvalidRenderTarget) {
+        lastWroteOutputRt_ = true;
     }
 
     // 8. v3.8/v3.9: Cinematic Atmosphere Post-Processing (Soft-Knee Multi-Scale Bloom + Non-Darkening Filmic Grain + CIE CAT02 WB)
@@ -2117,6 +2202,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         device_.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, tb, ub);
         device_.endPass();
         currentTex = device_.textureOf(postDstRt);
+        if (postDstRt == in.outputRt && in.outputRt != kInvalidRenderTarget) {
+            lastWroteOutputRt_ = true;
+        }
         lastActivePassesMask_ |= kPassAtmosphere;
     }
 

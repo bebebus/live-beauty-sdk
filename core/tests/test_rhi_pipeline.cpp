@@ -412,9 +412,6 @@ void testFourFrameDelayStage0DenoiseAndLutFilterSuppression() {
         const auto& c = dev.calls[i];
         if (c.shader == ShaderId::kTemporalDenoise) {
             idxDenoise = i;
-            EXPECT_TRUE(c.uniforms.v[0].x <= 0.181f);
-            EXPECT_TRUE(std::fabs(c.uniforms.v[0].y - 0.010f) < 1e-4f);
-            EXPECT_TRUE(std::fabs(c.uniforms.v[0].z - 0.032f) < 1e-4f);
         }
         if (c.shader == ShaderId::kCompositePro) {
             idxComposite = i;
@@ -423,7 +420,8 @@ void testFourFrameDelayStage0DenoiseAndLutFilterSuppression() {
             EXPECT_TRUE(c.uniforms.v[2].w == 0.0f);
         }
     }
-    EXPECT_TRUE(idxDenoise >= 0 && idxComposite > idxDenoise);
+    // v3.9.5 (tone-2): Stage 0 8-bit temporal denoise removed (zero wasted pass/VRAM).
+    EXPECT_TRUE(idxDenoise == -1 && idxComposite >= 0);
 }
 
 void testP1ToP4PassesAndHardwareTierGating() {
@@ -938,7 +936,16 @@ void testV36ChromaKeyParticlesMulticlassAndHandShield() {
     dev.calls.clear();
     engine.processFrame(inputTex, 720, 1280, 1283, 1283, kInvalidTexture, 0.05f, 1.0f);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassDenoise) == 0);
-    EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) == 0);
+    // v3.9.5 (segmentation-v2): During camera shake, spatial RGB-guided matte refine stays active
+    // while temporal history blending drops strictly to 0 (no ghosting!).
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) != 0);
+    bool sawZeroTemporalMatteOnShake = false;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kMatteRefine && c.uniforms.count >= 1) {
+            sawZeroTemporalMatteOnShake = (c.uniforms.v[0].z <= 1e-4f && c.uniforms.v[0].w <= 1e-4f);
+        }
+    }
+    EXPECT_TRUE(sawZeroTemporalMatteOnShake);
     EXPECT_TRUE((engine.stats().activePassesMask & kPassHairDye) == 0);
     // v3.6.3: Fallback autoParsePersonTex_ MUST remain bound during camera shake so virtual background never flashes off!
     EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);
@@ -1322,13 +1329,13 @@ void testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise() {
     pipe.render(cfg, in);
     EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) == 0);
 
-    in.lightLuma = 0.08f;  // Extreme darkness -> engages temporal denoise (>= 0.15)
+    in.lightLuma = 0.08f;  // v3.9.5 (tone-2): Stage 0 8-bit temporal denoise removed (zero wasted warmup/pass).
     pipe.render(cfg, in);
     in.nowMs = 1066;
     dev.calls.clear();
     pipe.render(cfg, in);
     EXPECT_TRUE((pipe.lastActivePassesMask() & kPassRetouch) != 0);
-    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) != 0);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) == 0);
 
     bool sawSkinRetouch = false;
     bool sawEyeSparkleWithTexel = false;
@@ -1920,7 +1927,191 @@ void testV394AuditFixesPipelineAndGpuPerf() {
     for (const auto& c : dev.calls) {
         if (c.shader == ShaderId::kBgBlur) ++bgBlurCallsLoad;
     }
-    EXPECT_TRUE(bgBlurCallsLoad == 2);  // Simplified to 1 H+V pass under load
+    EXPECT_TRUE(bgBlurCallsLoad == 4);  // v3.9.5 (segmentation-n1): Privacy-safe 2 H+V passes (sigma 9.6px) under overload
+
+    engine.releaseGpuResources();
+}
+
+void testV395ReverificationFixesPipeline() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId camTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId personTex = dev.createTexture2D(128, 128, TextureFormat::kR8, nullptr);
+    const TextureId hairTex = dev.createTexture2D(128, 128, TextureFormat::kR8, nullptr);
+    const TextureId irisAtlas = dev.createTexture2D(256, 256, TextureFormat::kRgba8, nullptr);
+    PipelineAssets assets{};
+    assets.irisAtlas = irisAtlas;
+    engine.setAssets(assets);
+
+    auto makeFaceMp = [](float cx, float fw) {
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = fw / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            mpXy[i * 2] = cx + xyz[i * 3] * scale;
+            mpXy[i * 2 + 1] = 1.0f - (((0.50f / aspect) + xyz[i * 3 + 1] * scale) * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mpXy[i * 2] = cx + ((i >= 473) ? 0.06f : -0.06f);
+            mpXy[i * 2 + 1] = 0.44f;
+        }
+        return mpXy;
+    };
+
+    // 1. skin-n1/tone-n1: 40 consecutive submitFaceMiss frames decay bodyPriorMute smoothly (delta <= 0.11/frame)
+    //    and NEVER snap portraitPrior back to 1.0 when timeline clears at >500ms!
+    {
+        auto cfg = BeautyConfig::naturalStudio();
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.30f);
+        for (int f = 0; f < 12; ++f) {
+            const int64_t ts = 1000 + f * 33;
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        float prevMute = -1.0f;
+        float maxDelta = 0.0f;
+        float lastMute = 0.0f;
+        for (int f = 0; f < 40; ++f) {
+            const int64_t ts = 1400 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceMiss(ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 7) {
+                    const float mute = c.uniforms.v[5].y;
+                    if (prevMute >= 0.0f) {
+                        maxDelta = std::max(maxDelta, std::fabs(mute - prevMute));
+                    }
+                    prevMute = mute;
+                    lastMute = mute;
+                    // Whenever oval clears (uU6.z == 0), bodyPriorMute MUST be 1.0 (prior=0, never 1.0!)
+                    if (c.uniforms.v[6].z <= 0.001f) {
+                        EXPECT_TRUE(mute >= 0.99f);
+                    }
+                }
+            }
+        }
+        EXPECT_TRUE(maxDelta <= 0.11f);
+        EXPECT_TRUE(lastMute >= 0.90f);
+    }
+
+    // 2. skin-n4/tone-n2: Dual-face secondary portrait prior packed into uU8/uU9 when polySkinMaskReady
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.maxFaces = 2;
+        engine.setConfig(cfg);
+        const auto mpL = makeFaceMp(0.28f, 0.26f);
+        const auto mpR = makeFaceMp(0.72f, 0.26f);
+        math::MultiFaceTracker::RawFaceInput pair[2] = {{mpL.data(), 478}, {mpR.data(), 478}};
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 3000 + f * 33;
+            dev.calls.clear();
+            engine.submitMultiFaceLandmarks(ts, pair, 2, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        bool sawSecPrior = false;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 10) {
+                if (c.uniforms.v[0].w >= 3.5f && c.uniforms.v[8].z > 0.05f && c.uniforms.v[9].z > 0.5f) {
+                    sawSecPrior = true;
+                }
+            }
+        }
+        EXPECT_TRUE(sawSecPrior);
+    }
+
+    // 3. makeup-n1: Perceptual calibration of contactLens (*0.65) & catchlight (*0.55)
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.maxFaces = 1;
+        cfg.contactLens = 0.35f;
+        cfg.catchlight = 0.40f;
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.32f);
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 4000 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        bool sawCalibratedIris = false;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kMakeupIris && c.uniforms.count >= 3) {
+                const float lensS = c.uniforms.v[2].x;
+                const float clS = c.uniforms.v[2].y;
+                if (lensS > 0.18f && lensS < 0.25f && clS > 0.18f && clS < 0.25f) {
+                    sawCalibratedIris = true;
+                }
+            }
+        }
+        EXPECT_TRUE(sawCalibratedIris);
+    }
+
+    // 4. gpuperf-n1 + segmentation-n1 + seg-3: continuous 3-pass bokeh across 0.54/0.56 & blurOnlyHair skips kHairAlpha
+    {
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.contactLens = 0.0f;
+        cfg.catchlight = 0.0f;
+        cfg.hairDye = 0.0f;
+        cfg.hairShine = 0.0f;
+        cfg.backgroundBlur = 0.54f;
+        engine.setConfig(cfg);
+        const auto mpBlur = makeFaceMp(0.50f, 0.30f);
+        for (int f = 0; f < 6; ++f) {
+            const int64_t ts = 5000 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mpBlur.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts, personTex, 0.30f, 1.0f, hairTex, ts);
+        }
+        int blur54 = 0;
+        float step2_54 = 0.0f;
+        bool sawHairMerge = false;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kBgBlur) {
+                if (blur54 == 4) step2_54 = c.uniforms.v[0].x * 180.0f;
+                ++blur54;
+            }
+            if (c.shader == ShaderId::kBgHairMerge) sawHairMerge = true;
+        }
+        EXPECT_TRUE(blur54 == 6);
+        EXPECT_TRUE(sawHairMerge);
+        EXPECT_TRUE((engine.stats().activePassesMask & kPassHairAlpha) == 0);  // seg-3: blur-only skips rtSkinMask_.a
+
+        cfg.backgroundBlur = 0.56f;
+        engine.setConfig(cfg);
+        dev.calls.clear();
+        engine.submitFaceLandmarks(5200, mpBlur.data(), 478, 720, 1280, 5200);
+        engine.processFrame(camTex, 720, 1280, 5200, 5200, personTex, 0.30f, 1.0f, hairTex, 5200);
+        int blur56 = 0;
+        float step2_56 = 0.0f;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kBgBlur) {
+                if (blur56 == 4) step2_56 = c.uniforms.v[0].x * 180.0f;
+                ++blur56;
+            }
+        }
+        EXPECT_TRUE(blur56 == 6);
+        EXPECT_TRUE(std::fabs(step2_56 - step2_54) < 0.03f);  // Continuous across 0.55!
+    }
+
+    // 5. gpuperf-n4: lastWroteOutputRt() accurately distinguishes rendered outputRt vs passthrough
+    {
+        const RenderTargetId extRt = dev.createRenderTarget(720, 1280, TextureFormat::kRgba8);
+        auto cfg = BeautyConfig::naturalStudio();
+        engine.setConfig(cfg);
+        engine.processFrame(camTex, 720, 1280, 6000, 6000, kInvalidTexture, 0.30f, 1.0f, kInvalidTexture, kTimeInvalid, extRt);
+        EXPECT_TRUE(engine.lastWroteOutputRt());
+
+        cfg.compareOriginal = true;
+        engine.setConfig(cfg);
+        engine.processFrame(camTex, 720, 1280, 6033, 6033, kInvalidTexture, 0.30f, 1.0f, kInvalidTexture, kTimeInvalid, extRt);
+        EXPECT_TRUE(!engine.lastWroteOutputRt());
+        dev.destroyRenderTarget(extRt);
+    }
 
     engine.releaseGpuResources();
 }
@@ -1945,6 +2136,7 @@ int main() {
     testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion();
     testV393OcclusionDeferredAfterCompositeBeforeMakeup();
     testV394AuditFixesPipelineAndGpuPerf();
+    testV395ReverificationFixesPipeline();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

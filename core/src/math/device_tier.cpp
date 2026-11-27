@@ -158,10 +158,8 @@ TierCapabilities DeviceTierPolicy::resolve(
     }
     TierCapabilities cap = capabilitiesFor(base);
     cap.hardwareTier = hwBase;
-    if (governorLoadLevel >= 1) {
-        cap.enableBlemishHeal = false;
-        cap.enableMatteRefine = false;
-    }
+    // v3.9.5 (skin-7/cpuperf-v1): Keep enableBlemishHeal & enableMatteRefine governed by resolved tier;
+    // RenderPipeline smoothly fades blemish strength via loadFadeBody instead of hard-snapping at L1.
     return cap;
 }
 

@@ -808,10 +808,9 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeProcessFrameToFbo(
         ? handle->device.wrapExternalTexture(static_cast<uint32_t>(hairMaskGlTex))
         : livebeauty::rhi::kInvalidTexture;
     const auto outRt = handle->device.wrapExternalFramebuffer(static_cast<uint32_t>(dstFbo), width, height);
-    const auto outTex = handle->engine.processFrame(
+    handle->engine.processFrame(
         inTex, width, height, frameTsMs, nowMs, maskTex, lightLuma, bitrateRatio, hairTex, hairMaskStampMs, outRt);
-    // When beauty actually processed and wrote to outRt, textureOf(outRt) == kInvalidTexture (outTex != inTex).
-    return (outTex != inTex) ? JNI_TRUE : JNI_FALSE;
+    return handle->engine.lastWroteOutputRt() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL

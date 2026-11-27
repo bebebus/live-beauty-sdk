@@ -22,8 +22,8 @@ constexpr int kLipRing[40] = {
 constexpr int kRightLids[6] = {160, 144, 159, 145, 158, 153};
 constexpr int kLeftLids[6] = {387, 373, 386, 374, 385, 380};
 constexpr int kCenterPoints[4] = {234, 454, 10, 152};
-constexpr float kResFcMin[4] = {0.85f, 1.25f, 1.30f, 0.52f};
-constexpr float kResBeta[4] = {24.0f, 68.0f, 72.0f, 18.0f};
+constexpr float kResFcMin[4] = {0.85f, 1.25f, 1.30f, 0.85f};
+constexpr float kResBeta[4] = {24.0f, 68.0f, 72.0f, 20.0f};
 
 struct FilterStaticData {
     float canonicalFaceWidth = 1.0f;
@@ -545,7 +545,8 @@ void FaceMeshFilter::step(float teMs) {
     const float rigidFloor = (accPower_ < 0.0f) ? 0.0f : std::sqrt(accMin_);
     noiseFloor_ = floorVal;
     const float dead = kKPose * kCPose * floorVal;
-    const float deadBeta = std::max(dead, kKPose * kCPose * rigidFloor);
+    // v3.9.5 (tracking-1): Use 0.65x rigidFloor (vs 0.20x) to reject coherent detector jitter without adding 3D shake lag.
+    const float deadBeta = std::max(dead, 0.65f * rigidFloor);
     const float basisLag = std::sqrt(lag2dAcc * 0.5f) / s;
     const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.015f, 0.060f, basisLag));
     // Dimensionally consistent lag threshold: dead (1/s) * teSec (s) = faceWidth displacement

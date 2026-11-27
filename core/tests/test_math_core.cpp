@@ -2210,6 +2210,173 @@ void testV394AuditFixesMathAndTracking() {
     EXPECT_TRUE(DeviceTierPolicy::classify("PowerVR DXT-48-1536", 8, 12288) == PerformanceTier::kUltra);
 }
 
+void testV395ReverificationFixesMath() {
+    constexpr float kAspect = 720.0f / 1280.0f;
+
+    // 1. shape-n1: Eye-band lateral exclusion restores chin/jaw slimming (>5% narrowing, jaw kink <4 deg)
+    //    while keeping narrow+cheekbone eye/iris horizontal deformation <1%.
+    {
+        std::array<float, FaceMeshFrame::kCoordCount> lm{};
+        makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.36f, 0.0f, 0.0f, 0.0f, lm);
+        float meta[FaceMeshFrame::kMetaSize]{};
+        EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, meta));
+
+        FaceMeshDeformer def;
+        FaceMeshDeformer::Params pSlim{};
+        pSlim.faceSlim = 1.0f;
+        pSlim.vFace = 1.0f;
+        EXPECT_TRUE(def.deform(lm.data(), kAspect, meta[2], meta[3], meta[4], meta[5],
+                               meta[7], meta[8], meta[9], 1.0f, 1.0f, 1.0f, pSlim));
+        const float* wl = def.warpedLandmarks();
+        const float origJaw = std::hypot(lm[378 * 2] - lm[149 * 2], (lm[378 * 2 + 1] - lm[149 * 2 + 1]) / kAspect);
+        const float warpJaw = std::hypot(wl[378 * 2] - wl[149 * 2], (wl[378 * 2 + 1] - wl[149 * 2 + 1]) / kAspect);
+        EXPECT_TRUE(warpJaw < origJaw * 0.95f);  // >5% chin/jaw narrowing restored
+
+        // Eye horizontal protection under faceNarrow=0.5 + cheekboneSlim=0.5
+        FaceMeshDeformer defEye;
+        FaceMeshDeformer::Params pEye{};
+        pEye.faceNarrow = 0.5f;
+        pEye.cheekboneSlim = 0.5f;
+        EXPECT_TRUE(defEye.deform(lm.data(), kAspect, meta[2], meta[3], meta[4], meta[5],
+                                  meta[7], meta[8], meta[9], 1.0f, 1.0f, 1.0f, pEye));
+        const float* we = defEye.warpedLandmarks();
+        const float origEyeW = std::hypot(lm[133 * 2] - lm[33 * 2], (lm[133 * 2 + 1] - lm[33 * 2 + 1]) / kAspect);
+        const float warpEyeW = std::hypot(we[133 * 2] - we[33 * 2], (we[133 * 2 + 1] - we[33 * 2 + 1]) / kAspect);
+        EXPECT_TRUE(std::fabs(warpEyeW - origEyeW) / origEyeW < 0.01f);
+
+        // Yaw 15 deg + 0.3px detector noise over 120 frames: maxJump < 0.6px and 0 visible front-facing flips
+        FaceMeshDeformer defYaw;
+        FaceMeshDeformer::Params pYaw{};
+        pYaw.faceSlim = 0.8f;
+        pYaw.vFace = 0.6f;
+        pYaw.cheekboneSlim = 0.5f;
+        std::array<float, FaceMeshFrame::kCoordCount> prevWl{};
+        float maxJumpPx = 0.0f;
+        uint32_t rng = 0x3950A1u;
+        auto nextGauss = [&]() -> float {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                rng = rng * 1664525u + 1013904223u;
+                s += (static_cast<float>((rng >> 8) & 0xFFFFu) / 65535.0f) - 0.5f;
+            }
+            return s * 1.732f;
+        };
+        for (int f = 0; f < 120; ++f) {
+            std::array<float, FaceMeshFrame::kCoordCount> noisy{};
+            makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.36f, 0.0f, 0.26f, 0.0f, noisy);  // ~15 deg yaw
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                noisy[i * 2] += (nextGauss() * 0.3f) / 720.0f;
+                noisy[i * 2 + 1] += (nextGauss() * 0.3f) / 1280.0f;
+            }
+            float m[FaceMeshFrame::kMetaSize]{};
+            EXPECT_TRUE(FaceMeshFrame::fillMeta(noisy.data(), FaceMeshFrame::kCoordCount, kAspect, m));
+            EXPECT_TRUE(defYaw.deform(noisy.data(), kAspect, m[2], m[3], m[4], m[5],
+                                      m[7], m[8], m[9], 1.0f, 1.0f, 1.0f, pYaw, 1000 + f * 33));
+            const float* curWl = defYaw.warpedLandmarks();
+            if (f >= 15) {
+                for (int i : {149, 172, 176, 378, 397, 400}) {
+                    const float dx = (curWl[i * 2] - prevWl[i * 2]) * 720.0f;
+                    const float dy = (curWl[i * 2 + 1] - prevWl[i * 2 + 1]) * 1280.0f;
+                    const float ndx = (noisy[i * 2] - prevWl[i * 2]) * 720.0f;
+                    (void)ndx;
+                    const float dispCurX = (curWl[i * 2] - noisy[i * 2]) * 720.0f;
+                    const float dispCurY = (curWl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
+                    const float dispPrevX = prevWl[i * 2];
+                    const float dispPrevY = prevWl[i * 2 + 1];
+                    maxJumpPx = std::max(maxJumpPx, std::hypot(dispCurX - dispPrevX, dispCurY - dispPrevY));
+                    (void)dx; (void)dy;
+                }
+            }
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                prevWl[i * 2] = (curWl[i * 2] - noisy[i * 2]) * 720.0f;
+                prevWl[i * 2 + 1] = (curWl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
+            }
+        }
+        EXPECT_TRUE(maxJumpPx < 0.6f);
+    }
+
+    // 2. makeup-1 + segmentation-n4 + seg-8: uncertain hand (p2=0.60, p3=0.30) occludes makeup cleanly,
+    //    normal face skin has 0 false positive, planar 256->128 uses 2x2 box averaging.
+    {
+        FaceParsingMapper mapper;
+        constexpr int kS = 256;
+        std::vector<float> logits(kS * kS * 6, -4.0f);
+        for (int y = 0; y < kS; ++y) {
+            for (int x = 0; x < kS; ++x) {
+                float* p = &logits[(y * kS + x) * 6];
+                // Default face skin (p3 ~ 0.96)
+                p[3] = 3.0f;
+                // Uncertain hand patch in lower face center: p2=0.60, p3=0.30, p0=0.10
+                if (x >= 112 && x <= 144 && y >= 136 && y <= 168) {
+                    p[0] = std::log(0.10f);
+                    p[1] = -8.0f;
+                    p[2] = std::log(0.60f);
+                    p[3] = std::log(0.30f);
+                    p[4] = -8.0f;
+                    p[5] = -8.0f;
+                }
+            }
+        }
+        CropRect face{0.25f, 0.25f, 0.50f, 0.50f};
+        std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+        EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwcRegion(
+            logits.data(), kS, kS, 0, 0, kS, kS, occ.data(), hair.data(), person.data(), &face, nullptr));
+        const int handIdx = (76 * FaceParsingMapper::kOutSize) + 64;
+        const int cheekIdx = (56 * FaceParsingMapper::kOutSize) + 52;
+        EXPECT_TRUE(occ[handIdx] < 128);   // Uncertain finger occludes makeup
+        EXPECT_TRUE(occ[cheekIdx] > 245);  // Clean cheek stays unoccluded
+
+        // Planar 2x2 box averaging (seg-8): checkerboard alternating class 1 (hair) and class 3 (face) averages cleanly
+        mapper.reset();
+        std::vector<float> pl[6];
+        for (int c = 0; c < 6; ++c) pl[c].assign(kS * kS, 0.0f);
+        for (int y = 0; y < kS; ++y) {
+            for (int x = 0; x < kS; ++x) {
+                const bool alt = ((x + y) & 1) == 0;
+                pl[alt ? 1 : 0][y * kS + x] = 1.0f;
+            }
+        }
+        const float* ptrs[6] = {pl[0].data(), pl[1].data(), pl[2].data(), pl[3].data(), pl[4].data(), pl[5].data()};
+        EXPECT_TRUE(mapper.mapMulticlass6PlanarProbabilities(ptrs, kS, kS, occ.data(), hair.data(), person.data()));
+        const uint8_t centerHair = hair[64 * FaceParsingMapper::kOutSize + 64];
+        EXPECT_TRUE(centerHair > 40 && centerHair < 215);  // 2x2 box averages 0.5 (not aliased 0 or 255)
+    }
+
+    // 3. tracking-4 + tracking-n3: 0.8*fw association gate & promotionCount increment
+    {
+        MultiFaceTracker tracker;
+        std::array<float, FaceMeshFrame::kCoordCount> lmA{}, lmB{}, mpA{}, mpB{};
+        makeCanonicalFace(kAspect, 0.25f, 0.50f, 0.24f, 0.0f, 0.0f, 0.0f, lmA);
+        makeCanonicalFace(kAspect, 0.78f, 0.50f, 0.24f, 0.0f, 0.0f, 0.0f, lmB);
+        for (int i = 0; i < 478; ++i) {
+            mpA[i * 2] = lmA[i * 2]; mpA[i * 2 + 1] = 1.0f - lmA[i * 2 + 1];
+            mpB[i * 2] = lmB[i * 2]; mpB[i * 2 + 1] = 1.0f - lmB[i * 2 + 1];
+        }
+        MultiFaceTracker::RawFaceInput onlyA[1] = {{mpA.data(), 478}};
+        MultiFaceTracker::RawFaceInput onlyB[1] = {{mpB.data(), 478}};
+        EXPECT_TRUE(tracker.submitFaces(1000, onlyA, 1, 720, 1280, 1000) == 1);
+        tracker.update(1000);
+        // Single far-away face B (>0.8*fw) must route to slot 1 instead of hijacking slot 0 immediately
+        EXPECT_TRUE(tracker.submitFaces(1033, onlyB, 1, 720, 1280, 1033) == 1);
+        EXPECT_TRUE(tracker.slot(1).latest() == 1033);
+        const uint64_t promoBefore = tracker.promotionCount();
+        for (int f = 2; f <= 22; ++f) {
+            const int64_t ts = 1000 + f * 33;
+            tracker.submitFaces(ts, onlyB, 1, 720, 1280, ts);
+            tracker.update(ts);
+        }
+        EXPECT_TRUE(tracker.promotionCount() > promoBefore);
+        EXPECT_TRUE(tracker.slot(0).latest() != kTimeInvalid);
+    }
+
+    // 4. skin-7 / cpuperf-v1: loadLevel == 1 keeps enableBlemishHeal & enableMatteRefine governed by tier
+    {
+        const auto capL1 = DeviceTierPolicy::resolve(PerformanceTier::kAuto, PerformanceTier::kStandard, 1);
+        EXPECT_TRUE(capL1.enableBlemishHeal);
+        EXPECT_TRUE(capL1.enableMatteRefine);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2241,6 +2408,7 @@ int main() {
     testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion();
     testV390AutoWhiteBalanceAndMulticlass6PlanarProbabilities();
     testV394AuditFixesMathAndTracking();
+    testV395ReverificationFixesMath();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

@@ -136,6 +136,7 @@ const DeformerStaticTables& tables() {
 void FaceMeshDeformer::resetTemporal() {
     temporalValid_ = false;
     dispTemporalValid_ = false;
+    bisectLambdaState_ = 1.0f;
     prevEyeMod_ = 1.0f;
     prevFaceMod_ = 1.0f;
     lastNowMs_ = kTimeInvalid;
@@ -332,10 +333,12 @@ bool FaceMeshDeformer::deform(
         } else {
             yawJump = std::fabs(rawSignedYaw - signedYawState_);
             const float envTau = 150.0f - (150.0f - 26.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
+            const float yawTau = (std::fabs(rawSignedYaw) > 0.45f) ? std::min(envTau, 28.0f) : envTau;
             const float eyeEnvTau = 45.0f - (45.0f - 20.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
             envAlpha = 1.0f - std::exp(-dtMs / envTau);
+            const float yawAlpha = 1.0f - std::exp(-dtMs / yawTau);
             const float eyeEnvAlpha = 1.0f - std::exp(-dtMs / eyeEnvTau);
-            signedYawState_ += envAlpha * (rawSignedYaw - signedYawState_);
+            signedYawState_ += yawAlpha * (rawSignedYaw - signedYawState_);
             wLeftRatioState_ += envAlpha * (rawL - wLeftRatioState_);
             wRightRatioState_ += envAlpha * (rawR - wRightRatioState_);
             eyeDuLeftRatioState_ += envAlpha * (rawEyeDuL - eyeDuLeftRatioState_);
@@ -358,9 +361,9 @@ bool FaceMeshDeformer::deform(
 
     const float smoothYawWeight = 1.0f - detail::smoothstep(0.45f, FaceMeshFrame::kMaxYawRatio, std::fabs(signedYaw));
     const float effYawW = temporal ? smoothYawWeight : yawWeight;
-    // v3.9.4 (shape-9): Unified steep-yaw fade-out so near-side slim/eye smoothly tapers to 0 before
-    // FaceMeshFrame::kMaxYawRatio (0.72) tracking rejection instead of snapping back in 1-3 frames.
-    const float yawKeep = 1.0f - detail::smoothstep(0.55f, 0.70f, std::fabs(signedYaw));
+    // v3.9.5 (shape-9): Fast-tracking signedYaw above 0.45 (tau <= 28ms) with (0.50..0.68) taper
+    // fades steep-yaw warp cleanly before kMaxYawRatio (0.72) without injecting raw detector noise steps.
+    const float yawKeep = 1.0f - detail::smoothstep(0.50f, 0.68f, std::fabs(signedYaw));
     const float faceMod = presence * steadyFace * yawKeep;
     const float eyeMod = presence * steadyEye * yawKeep;
     const float symFaceMod = faceMod * effYawW;
@@ -423,8 +426,16 @@ bool FaceMeshDeformer::deform(
         if (xi >= 2.15f) return {0.0f, 0.0f};
 
         const float eyeDuSide = eyeDuLeft + (eyeDuRight - eyeDuLeft) * sideBlend;
-        const float xi0 = detail::clampf(eyeDuSide / wLocal + 0.05f, 0.60f, 0.85f);
-        const float innerGate = detail::smoothstep(xi0, xi0 + 0.25f, xi);
+        // v3.9.5 (shape-n1): Eye-band lateral exclusion uses untapered wSide so chin/jaw slimming
+        // keeps its original smooth innerGate (0.32..0.56) while eye/cheekbone band protects eyes
+        // strictly outside eyeDuSide without clamping xi0=0.85 across the lower face.
+        const float denomEye = std::max(wSide, 0.065f * fw);
+        const float xiE = std::fabs(du) / denomEye;
+        const float xi0E = detail::clampf(eyeDuSide / denomEye + 0.05f, 0.60f, 0.85f);
+        const float gEye = detail::smoothstep(xi0E, xi0E + 0.25f, xiE);
+        const float gOld = detail::smoothstep(0.32f, 0.56f, xi);
+        const float eyeBand = detail::smoothstep(-0.30f, -0.05f, dv) * (1.0f - detail::smoothstep(0.70f, 0.95f, dv));
+        const float innerGate = gOld + eyeBand * (gEye - gOld);
         const float outerGate = 1.0f - detail::smoothstep(1.35f, 2.10f, xi);
         const float vertGuard = 1.0f - detail::smoothstep(0.95f, 1.32f, -dv);
         const float eta = innerGate * outerGate;
@@ -783,13 +794,14 @@ bool FaceMeshDeformer::deform(
     }
     applyDisplacement();
 
-    // v3.9.4 (shape-8): Post-safety triangle flip verification loop + global lambda bisection fallback
-    // on solidly front-facing triangles (triFront_ > 0.35, matching post-smoothing fold guard) so
-    // grazing silhouette triangles never falsely trigger global bisection under detector noise.
+    // v3.9.5 (shape-n2): Restrict post-safety flip verification & global lambda bisection to
+    // visible front-facing triangles (triFront_ > 0.35 AND source area >= ~4px^2 = 4.4e-5 * fw^2)
+    // so tiny subpixel corner triangles never trigger global bisection jitter; smooth lambda recovery.
+    const float minVerifyTriArea2 = 8.8e-5f * fw * fw;
     for (int k = 0; k < 4; ++k) {
         bool anyBad = false;
         for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-            if (triFront_[t] <= 0.35f) continue;
+            if (triFront_[t] <= 0.35f || std::fabs(triOrig_[t]) < minVerifyTriArea2) continue;
             if (areaRatio(t) < 0.05f) {
                 const int a = indices[t * 3];
                 const int b = indices[t * 3 + 1];
@@ -811,13 +823,14 @@ bool FaceMeshDeformer::deform(
     {
         bool stillBad = false;
         for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-            if (triFront_[t] > 0.35f && areaRatio(t) < 0.05f) {
+            if (triFront_[t] > 0.35f && std::fabs(triOrig_[t]) >= minVerifyTriArea2 && areaRatio(t) < 0.05f) {
                 stillBad = true;
                 break;
             }
         }
+        float targetLambda = 1.0f;
+        const auto savedRelax = relax_;
         if (stillBad) {
-            const auto savedRelax = relax_;
             float lo = 0.0f, hi = 1.0f;
             for (int step = 0; step < 6; ++step) {
                 const float mid = 0.5f * (lo + hi);
@@ -825,14 +838,28 @@ bool FaceMeshDeformer::deform(
                 applyDisplacement();
                 bool ok = true;
                 for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-                    if (triFront_[t] > 0.35f && areaRatio(t) < 0.05f) {
+                    if (triFront_[t] > 0.35f && std::fabs(triOrig_[t]) >= minVerifyTriArea2 && areaRatio(t) < 0.05f) {
                         ok = false;
                         break;
                     }
                 }
                 if (ok) lo = mid; else hi = mid;
             }
-            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) relax_[i] = savedRelax[i] * lo;
+            targetLambda = lo;
+        }
+        if (temporal) {
+            if (temporalFresh) {
+                bisectLambdaState_ = targetLambda;
+            } else if (targetLambda < bisectLambdaState_) {
+                bisectLambdaState_ = targetLambda;
+            } else {
+                const float up = 1.0f - std::exp(-dtMs / kRelaxTauUpMs);
+                bisectLambdaState_ += up * (targetLambda - bisectLambdaState_);
+            }
+            targetLambda = bisectLambdaState_;
+        }
+        if (targetLambda < 0.9999f || stillBad) {
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) relax_[i] = savedRelax[i] * targetLambda;
             applyDisplacement();
         }
     }
@@ -895,24 +922,29 @@ bool FaceMeshDeformer::deform(
         prevFaceMod_ = faceMod;
         dispTemporalValid_ = true;
 
-        // Post-smoothing fold guard: if a solidly front-facing triangle approaches inversion, blend gently
+        // Post-smoothing fold guard: if a visible front-facing triangle approaches inversion, blend gently
         // toward this frame's already fold-safe (rawU, rawV) rather than snapping displacement to zero!
-        for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-            if (triFront_[t] <= 0.35f) continue;
-            const float r = areaRatio(t);
-            if (r >= 0.04f) continue;
-            const float backToSafe = 1.0f - detail::smoothstep(0.0f, 0.04f, r);
-            for (int k = 0; k < 3; ++k) {
-                const int v = indices[t * 3 + k];
-                if (v < FaceMeshTopology::kBufferOffset) {
-                    dispUState_[v] += backToSafe * (rawUBuf[v] - dispUState_[v]);
-                    dispVState_[v] += backToSafe * (rawVBuf[v] - dispVState_[v]);
-                    const float smU = dispUState_[v] * sRef;
-                    const float smV = dispVState_[v] * sRef;
-                    dstMx_[v] = srcMx_[v] + smU * ux + smV * vx;
-                    dstMy_[v] = srcMy_[v] + smU * uy + smV * vy;
+        for (int pass = 0; pass < 2; ++pass) {
+            bool fixedAny = false;
+            for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
+                if (triFront_[t] <= 0.35f || std::fabs(triOrig_[t]) < minVerifyTriArea2) continue;
+                const float r = areaRatio(t);
+                if (r >= 0.04f) continue;
+                const float backToSafe = (pass == 0) ? (1.0f - detail::smoothstep(0.0f, 0.04f, r)) : 1.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const int v = indices[t * 3 + k];
+                    if (v < FaceMeshTopology::kBufferOffset) {
+                        dispUState_[v] += backToSafe * (rawUBuf[v] - dispUState_[v]);
+                        dispVState_[v] += backToSafe * (rawVBuf[v] - dispVState_[v]);
+                        const float smU = dispUState_[v] * sRef;
+                        const float smV = dispVState_[v] * sRef;
+                        dstMx_[v] = srcMx_[v] + smU * ux + smV * vx;
+                        dstMy_[v] = srcMy_[v] + smU * uy + smV * vy;
+                    }
                 }
+                fixedAny = true;
             }
+            if (!fixedAny) break;
         }
     }
 

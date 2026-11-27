@@ -378,6 +378,7 @@ bool LiveBeautyEngine::submitAuxRgbaSample(
             stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
             stagedOccTsMs_ = kTimeInvalid;
             stagedLowerFaceOcc_ = localLowerOcc;
+            stagedSecLowerFaceOcc_ = 0.0f;
             stagedOccDirty_ = true;
         }
         if (computedResidual) {
@@ -917,8 +918,10 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         faces_.promoteSecondaryIfPrimaryEmpty();
     }
     auto& primaryTl = faces_.slot(0);
-    if (primaryTl.runId() != deformerRunId_) {
+    const uint64_t promoCount = faces_.promotionCount();
+    if (primaryTl.runId() != deformerRunId_ || promoCount != deformerPromotionCount_) {
         deformerRunId_ = primaryTl.runId();
+        deformerPromotionCount_ = promoCount;
         pipeline_.resetDeformerTemporal();
     }
     const float* state41 = primaryTl.at(displayTsMs);
@@ -1039,7 +1042,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     // Active hair styling and background hair merge already track live head motion via rigid hairAffine;
     // decouple both from the 16ms denoiseKeep_ micro-motion gate so slight head sway never flashes hair masks.
     const float hairMotionKeep = (hairAffineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
-    const float effHairShown = hairShown * (wantAutoHair ? hairMotionKeep : asyncMaskKeep);
+    // v3.9.5 (seg-3): When hairMask is supplied solely for background bokeh (without hairDye/hairShine
+    // or virtual background), feed it ONLY to kBgHairMerge (effHairBgShown) and never punch holes in rtSkinMask_.a.
+    const bool blurOnlyHair = !wantAutoHair && config_.backgroundBlur > 1e-4f &&
+                              config_.backgroundMode != BackgroundMode::kVirtualImage &&
+                              config_.backgroundMode != BackgroundMode::kVirtualBlur;
+    const float effHairShown = blurOnlyHair ? 0.0f : (hairShown * (wantAutoHair ? hairMotionKeep : asyncMaskKeep));
     const float effHairBgShown = hairBgShown * hairMotionKeep;
 
     in.secondaryFace.hasState = (secState41 != nullptr);
@@ -1072,8 +1080,11 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         std::lock_guard<std::mutex> lock(auxMutex_);
         if (semanticOccActive_ && lastSemanticSubmitMs_ != kTimeInvalid &&
             std::llabs(displayTsMs - lastSemanticSubmitMs_) > 800) {
-            // Multiclass stopped arriving (>800ms): yield cleanly back to fallback occlusionSolver_.
+            // Multiclass stopped arriving (>800ms): yield cleanly back to fallback occlusionSolver_
+            // and clear secondary-face occlusion state (v3.9.5 segmentation-c2).
             semanticOccActive_ = false;
+            stagedSecLowerFaceOcc_ = 0.0f;
+            secLowerFaceOcc_ = 0.0f;
         }
         semanticOccAlive = semanticOccActive_;
     }

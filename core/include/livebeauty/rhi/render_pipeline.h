@@ -179,6 +179,7 @@ public:
     /** Execute full beauty RenderGraph and return output RGBA texture handle. */
     TextureId render(const BeautyConfig& config, const FrameInputs& in);
     uint32_t lastActivePassesMask() const { return lastActivePassesMask_; }
+    bool lastWroteOutputRt() const { return lastWroteOutputRt_; }
 
 private:
     void ensureResources(int width, int height, bool useHalfFloat);
@@ -234,7 +235,6 @@ private:
     RenderTargetId rtComposite_ = kInvalidRenderTarget;
     RenderTargetId rtMakeup_ = kInvalidRenderTarget;
     RenderTargetId rtDenoise_[2] = {kInvalidRenderTarget, kInvalidRenderTarget};
-    int denoiseParity_ = 0;
     bool denoiseHistoryValid_ = false;
 
     // Guided filter (1/3 + 1/9 dual-band, feedback-loop isolated)
@@ -257,6 +257,23 @@ private:
     // P4: 3D head-occluder depth shell (1/4 res)
     RenderTargetId rtHeadDepth_ = kInvalidRenderTarget;
     uint32_t lastActivePassesMask_ = 0;
+    bool lastWroteOutputRt_ = false;
+
+    // v3.9.5 (skin-n1/tone-n1/skin-n4): Smoothly decaying portrait spatial prior state (primary + secondary)
+    // so face disappearance > 500ms decays smoothly to 0 instead of snapping portraitPrior back to 1.0.
+    std::array<float, 4> lastValidOval_{0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 2> lastValidAxis_{1.0f, 0.0f};
+    float bodyPriorPresence_ = 0.0f;
+    std::array<float, 4> secLastValidOval_{0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 2> secLastValidAxis_{1.0f, 0.0f};
+    float secBodyPriorPresence_ = 0.0f;
+    int64_t priorLastNowMs_ = kTimeInvalid;
+
+    // v3.9.5 (shape-n3): Temporally smoothed chin-aware neckBand ratio (tau = 150ms, holds during transient miss).
+    float neckBandRatio_ = 0.30f;
+    bool neckBandValid_ = false;
+    int64_t neckBandLastValidMs_ = kTimeInvalid;
+    int64_t neckBandLastNowMs_ = kTimeInvalid;
 
     // Owned 1x1 fallback white-alpha texture if host didn't provide one
     TextureId ownedFallbackTex_ = kInvalidTexture;
