@@ -241,8 +241,10 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive pipeline topology and [CH
 
 - **Commercial Use Allowed**: Released under the **[Apache License 2.0](./LICENSE)**. Free for personal, open-source, and commercial products with zero royalties, license keys, or online activation.
 - **Free Forever — No Paid Tiers**: We pledge that this project is **permanently free and will never charge fees or release any paid/pro/paywalled advanced features** — every beauty, reshape, makeup, hair-dyeing, 3D AR, virtual background, and optimization feature remains 100% open-source and free for everyone.
-- **Voluntary Sponsorship**: If this SDK helps your product or team, you can optionally support ongoing development at the following EVM address (ETH / USDT / USDC / BSC / Arbitrum / Polygon, etc.):
+- **Voluntary Sponsorship**: If this SDK helps your product or team, you can optionally support ongoing development via the EVM address or QR code below (ETH / USDT / USDC / BSC / Arbitrum / Polygon, etc.):
   - `0x70Ce069e59B3a5B0e3d83a8500094b6666666666`
+
+  <img src="./docs/assets/sponsor-evm-qr.png" width="180" alt="EVM Sponsor Address QR Code" />
 
 See [NOTICE](./NOTICE) for third-party attributions:
 - [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) (Apache License 2.0)

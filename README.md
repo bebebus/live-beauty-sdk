@@ -250,8 +250,10 @@ bash _tooling/run-all-tests.sh
 
 - **允许免费商用**：本项目基于 **[Apache License 2.0](./LICENSE)** 开源发布，可免费用于任意个人、开源或商业产品，无需申请商业授权或联网鉴权。
 - **永久免费承诺**：本项目郑重承诺**永不收费，永远不会推出任何收费版本、付费解锁或收费的高级功能**——所有美颜、微整、美妆、染发、3D AR、虚拟背景与性能优化能力全部平等开源，持续免费维护。
-- **自愿赞助支持**：如果本项目对你的产品或研发有所帮助，欢迎通过以下地址自愿赞助支持项目持续演进（EVM 链通用，如 ETH / USDT / USDC / BSC / Arbitrum / Polygon 等）：
+- **自愿赞助支持**：如果本项目对你的产品或研发有所帮助，欢迎通过以下地址或扫描二维码自愿赞助支持项目持续演进（EVM 链通用，如 ETH / USDT / USDC / BSC / Arbitrum / Polygon 等）：
   - `0x70Ce069e59B3a5B0e3d83a8500094b6666666666`
+
+  <img src="./docs/assets/sponsor-evm-qr.png" width="180" alt="EVM Sponsor Address QR Code" />
 
 第三方开源致谢详见 [NOTICE](./NOTICE)：
 - [Google MediaPipe](https://github.com/google-ai-edge/mediapipe)（Apache License 2.0）—— 端侧实时人脸/人体/分割视觉推理运行时与预训练模型。
