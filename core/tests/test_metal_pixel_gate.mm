@@ -2816,6 +2816,114 @@ void testV390SevenScenarioPortraitQualityBenchmark(MetalDevice& dev) {
               << ", low_light_lift=" << lowLightLift << ")\n";
 }
 
+// ============================================================================
+// v3.9.2 Regression Gate: 6-class semantic clothes/accessories on chest MUST NOT
+// zero out rtSkinMask_.a (nonHair) and create a dark un-whitened shadow patch on
+// the chest, while in-face occluders (hand/glasses/mask on cheek) stay protected.
+// ============================================================================
+void testV392MulticlassChestNoDarkShadowPatch(MetalDevice& dev) {
+    constexpr int kW = 180;
+    constexpr int kH = 320;
+    constexpr float kAspect = static_cast<float>(kW) / static_cast<float>(kH);
+    const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+    const float scale = 0.36f / FaceMeshFilter::canonicalFaceWidth();
+
+    // Place face in upper-middle frame (center y=0.35 top-down) leaving large neck & chest below (y=0.55..0.95)
+    std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+    for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+        const float mx = 0.50f + xyz[i * 3] * scale;
+        const float my = (0.65f / kAspect) + xyz[i * 3 + 1] * scale;
+        mpXy[i * 2] = mx;
+        mpXy[i * 2 + 1] = 1.0f - (my * kAspect);
+    }
+    for (int i = 468; i < 478; ++i) {
+        mpXy[i * 2] = 0.50f;
+        mpXy[i * 2 + 1] = 0.32f;
+    }
+
+    // Uniform warm skin frame across face, neck & chest
+    std::vector<uint8_t> camRgba(kW * kH * 4, 255);
+    for (int i = 0; i < kW * kH; ++i) {
+        camRgba[i * 4 + 0] = 185;
+        camRgba[i * 4 + 1] = 145;
+        camRgba[i * 4 + 2] = 125;
+        camRgba[i * 4 + 3] = 255;
+    }
+    const TextureId camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camRgba.data());
+
+    auto makeEngineWithConfig = [&]() {
+        auto eng = std::make_unique<LiveBeautyEngine>(dev);
+        BeautyConfig cfg{};
+        cfg.enabled = true;
+        cfg.performanceTier = PerformanceTier::kUltra;
+        cfg.smoothing = 0.45f;
+        cfg.whiten = 0.65f;
+        cfg.lipstick = 0.50f;
+        cfg.blush = 0.35f;
+        eng->setConfig(cfg);
+        return eng;
+    };
+
+    // 1. Baseline without multiclass semantic mask
+    auto engBase = makeEngineWithConfig();
+    int64_t ts = 9000;
+    TextureId outBase = kInvalidTexture;
+    for (int f = 0; f < 6; ++f) {
+        ts += 33;
+        engBase->submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts);
+        outBase = engBase->processFrame(camTex, kW, kH, ts, ts);
+    }
+    std::vector<uint8_t> basePixels(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(outBase, basePixels.data(), kW, kH));
+
+    // 2. Same setup WITH 6-class multiclass logits classifying ENTIRE chest (y >= 0.52) as clothes (class 4)
+    //    AND placing a small accessory occluder (class 5) strictly inside the left cheek (u=0.45..0.55, v=0.33..0.38).
+    auto engMc = makeEngineWithConfig();
+    ts = 9000;
+    for (int f = 0; f < 5; ++f) {
+        ts += 33;
+        engMc->submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts);
+        engMc->processFrame(camTex, kW, kH, ts, ts);
+    }
+    constexpr int kM = 64;
+    std::vector<float> logits(kM * kM * 6, -4.0f);
+    for (int y = 0; y < kM; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) / kM;
+        for (int x = 0; x < kM; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / kM;
+            float* lg = logits.data() + (y * kM + x) * 6;
+            if (v >= 0.52f) {
+                lg[4] = 6.0f;  // Clothes / chest occlusion outside face
+            } else if (u >= 0.42f && u <= 0.58f && v >= 0.31f && v <= 0.40f) {
+                lg[5] = 6.0f;  // In-face occluder (glasses/hand on mid-face)
+            } else {
+                lg[3] = 6.0f;  // Face skin
+            }
+        }
+    }
+    ts += 33;
+    engMc->submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts);
+    EXPECT_TRUE(engMc->submitMulticlass6Logits(logits.data(), kM, kM, ts));
+    const TextureId outMc = engMc->processFrame(camTex, kW, kH, ts, ts);
+    std::vector<uint8_t> mcPixels(kW * kH * 4, 0);
+    EXPECT_TRUE(dev.readbackTextureRgba8(outMc, mcPixels.data(), kW, kH));
+
+    // Probe chest pixel (center x=90, y=240 = 75% down): MUST match baseline (zero dark shadow patch!)
+    const int chestIdx = (240 * kW + 90) * 4;
+    EXPECT_TRUE(basePixels[chestIdx + 0] > 195);  // Chest skin IS whitened in baseline
+    EXPECT_TRUE(std::abs(int(mcPixels[chestIdx + 0]) - int(basePixels[chestIdx + 0])) <= 2);
+    EXPECT_TRUE(std::abs(int(mcPixels[chestIdx + 1]) - int(basePixels[chestIdx + 1])) <= 2);
+    EXPECT_TRUE(std::abs(int(mcPixels[chestIdx + 2]) - int(basePixels[chestIdx + 2])) <= 2);
+
+    // Probe occluded in-face pixel (center x=90, y=114 = 35.6% down): MUST remain un-whitened (occluder protected!)
+    const int faceOccIdx = (114 * kW + 90) * 4;
+    EXPECT_TRUE(int(basePixels[faceOccIdx + 0]) - int(mcPixels[faceOccIdx + 0]) >= 12);
+
+    engBase->releaseGpuResources();
+    engMc->releaseGpuResources();
+    dev.destroyTexture(camTex);
+}
+
 }  // namespace
 
 int main() {
@@ -2847,6 +2955,7 @@ int main() {
         testV370MetalCommercialBeautyPixelInvariants(dev);
         testV380MetalAtmosphereBloomGrainCat02AndOpenMouthLipProbes(dev);
         testV390SevenScenarioPortraitQualityBenchmark(dev);
+        testV392MulticlassChestNoDarkShadowPatch(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.2] - 2026-11-27
+
+### Fixed
+- **Eliminate Dark Shadow Patch on Chest under 6-Class Semantic Parsing**: Restricts full-frame semantic occlusion visibility masks (`submitMulticlass6Logits` / `submitMulticlass6Planar` / `submitFaceParsing*`) strictly to active face ellipse(s) (`primary` + `secondary`) so `clothes` (class 4) / `accessories` (class 5) / `hair` (class 1) below the chin never zero out `rtSkinMask_.a` (`nonHair`) in `kCompositePro` and leave an un-whitened dark shadow across the chest or collar.
+- **Metal GPU Pixel Regression Gate**: Adds `testV392MulticlassChestNoDarkShadowPatch` verifying chest pixels match baseline whitening (`<= 2/255` diff) even when 6-class logits mark the entire chest as clothes, while in-face occluders remain masked.
+
 ## [3.9.1] - 2026-11-27
 
 ### Added

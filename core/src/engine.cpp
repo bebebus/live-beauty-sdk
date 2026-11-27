@@ -6,6 +6,58 @@
 
 namespace livebeauty {
 
+namespace {
+
+// Restrict full-frame semantic occlusion visibility masks (255=visible, 0=occluded) strictly to active
+// face ellipse(s) so 6-class clothes (class 4) / accessories (class 5) / hair (class 1) on the neck,
+// collarbone, or chest NEVER zero out rtSkinMask_.a (nonHair) in kCompositePro and punch dark
+// un-whitened shadow patches across the chest.
+void restrictOccMaskToFaces(
+    uint8_t* occMaskR8,
+    int size,
+    const CropRect* primaryBounds,
+    const CropRect* secondaryBounds) {
+    if (!occMaskR8 || size <= 0) return;
+    auto validBounds = [](const CropRect* b) {
+        return b && b->width >= 0.04f && b->height >= 0.04f;
+    };
+    const bool hasP = validBounds(primaryBounds);
+    const bool hasS = validBounds(secondaryBounds);
+    if (!hasP && !hasS) {
+        std::fill(occMaskR8, occMaskR8 + static_cast<size_t>(size) * static_cast<size_t>(size), uint8_t{255});
+        return;
+    }
+    auto evalKeep = [](float u, float v, const CropRect& b) {
+        const float cx = b.left + 0.5f * b.width;
+        const float cy = b.top + 0.5f * b.height;
+        const float rx = std::max(0.50f * b.width, 0.02f);
+        const float ry = std::max(0.50f * b.height, 0.02f);
+        const float dx = (u - cx) / rx;
+        const float dy = (v - cy) / ry;
+        return 1.0f - detail::smoothstep(0.85f, 1.05f, dx * dx + dy * dy);
+    };
+    const float invSize = 1.0f / static_cast<float>(size);
+    for (int y = 0; y < size; ++y) {
+        const float v = (static_cast<float>(y) + 0.5f) * invSize;
+        const int row = y * size;
+        for (int x = 0; x < size; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) * invSize;
+            float keep = 0.0f;
+            if (hasP) keep = std::max(keep, evalKeep(u, v, *primaryBounds));
+            if (hasS) keep = std::max(keep, evalKeep(u, v, *secondaryBounds));
+            if (keep <= 1e-4f) {
+                occMaskR8[row + x] = 255;
+            } else if (keep < 0.999f) {
+                const float vis = static_cast<float>(occMaskR8[row + x]);
+                occMaskR8[row + x] = static_cast<uint8_t>(
+                    std::clamp(static_cast<int>(std::lround(255.0f - (255.0f - vis) * keep)), 0, 255));
+            }
+        }
+    }
+}
+
+}  // namespace
+
 LiveBeautyEngine::LiveBeautyEngine(rhi::IRhiDevice& device)
     : device_(device), pipeline_(device) {}
 
@@ -297,6 +349,10 @@ bool LiveBeautyEngine::submitFaceParsingClassMap(
     stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
         : 0.0f;
+    restrictOccMaskToFaces(
+        stagedOccMask_.data(), stagedOccSize_,
+        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
+        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -320,6 +376,10 @@ bool LiveBeautyEngine::submitFaceParsingLogits(
     stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
         : 0.0f;
+    restrictOccMaskToFaces(
+        stagedOccMask_.data(), stagedOccSize_,
+        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
+        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -344,6 +404,10 @@ bool LiveBeautyEngine::submitMulticlass6Logits(
     stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
         : 0.0f;
+    restrictOccMaskToFaces(
+        stagedOccMask_.data(), stagedOccSize_,
+        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
+        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
@@ -369,6 +433,10 @@ bool LiveBeautyEngine::submitMulticlass6Planar(
     stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
         ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
         : 0.0f;
+    restrictOccMaskToFaces(
+        stagedOccMask_.data(), stagedOccSize_,
+        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
+        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
     stagedOccDirty_ = true;
     stagedParseHairDirty_ = true;
     stagedParseHairTsMs_ = sampleTsMs;
