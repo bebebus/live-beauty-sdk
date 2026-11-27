@@ -248,13 +248,41 @@ bash _tooling/run-all-tests.sh
 
 ## 开源许可、永久免费承诺与赞助
 
-- **允许免费商用**：本项目基于 **[Apache License 2.0](./LICENSE)** 开源发布，可免费用于任意个人、开源或商业产品，无需申请商业授权或联网鉴权。
-- **永久免费承诺**：本项目郑重承诺**永不收费，永远不会推出任何收费版本、付费解锁或收费的高级功能**——所有美颜、微整、美妆、染发、3D AR、虚拟背景与性能优化能力全部平等开源，持续免费维护。
-- **自愿赞助支持**：如果本项目对你的产品或研发有所帮助，欢迎通过以下地址或扫描二维码自愿赞助支持项目持续演进（EVM 链通用，如 ETH / USDT / USDC / BSC / Arbitrum / Polygon 等）：
-  - `0x70Ce069e59B3a5B0e3d83a8500094b6666666666`
+> [!IMPORTANT]
+> **允许免费商用 · 永久免费 · 永不出收费高级功能**
+>
+> - 本项目基于 **[Apache License 2.0](./LICENSE)** 开源发布，可免费用于任意个人、开源与商业产品，**零商业授权费、零联网鉴权、无水印、无调用限制**。
+> - 我们郑重承诺**永不收费，永远不会推出任何收费版本、付费解锁或收费的高级功能**——所有美颜、微整、美妆、染发、3D AR、虚拟背景与性能优化能力全部平等开源，持续免费维护。
 
-  <img src="./docs/assets/sponsor-evm-qr.png" width="180" alt="EVM Sponsor Address QR Code" />
+### 自愿赞助支持
 
-第三方开源致谢详见 [NOTICE](./NOTICE)：
-- [Google MediaPipe](https://github.com/google-ai-edge/mediapipe)（Apache License 2.0）—— 端侧实时人脸/人体/分割视觉推理运行时与预训练模型。
-- [PixPark GPUPixel](https://github.com/pixpark/gpupixel)（Apache License 2.0）—— 标准 468 点人脸 UV 拓扑参考。
+<table>
+  <tr>
+    <td width="220" align="center" valign="middle">
+      <img src="./docs/assets/sponsor-evm-qr.png" width="196" alt="EVM Sponsor Address QR Code" />
+    </td>
+    <td valign="middle">
+      <p>如果 <strong>Bebebus Live Beauty SDK</strong> 为你的产品上线或研发节省了宝贵时间，欢迎通过下方地址或扫码自愿赞助，支持项目持续迭代与真机适配：</p>
+      <p>
+        <img src="https://img.shields.io/badge/ETH-627EEA?style=flat-square&logo=ethereum&logoColor=white" alt="ETH" />
+        <img src="https://img.shields.io/badge/USDT-26A17B?style=flat-square&logo=tether&logoColor=white" alt="USDT" />
+        <img src="https://img.shields.io/badge/USDC-2775CA?style=flat-square" alt="USDC" />
+        <img src="https://img.shields.io/badge/BSC-F0B90B?style=flat-square&logo=binance&logoColor=black" alt="BSC" />
+        <img src="https://img.shields.io/badge/Arbitrum-28A0F0?style=flat-square" alt="Arbitrum" />
+        <img src="https://img.shields.io/badge/Polygon-8247E5?style=flat-square&logo=polygon&logoColor=white" alt="Polygon" />
+      </p>
+      <p><strong>EVM 通用赞助地址（点击右侧按钮一键复制）：</strong></p>
+      <pre><code>0x70Ce069e59B3a5B0e3d83a8500094b6666666666</code></pre>
+      <sub>完全自愿，不与任何功能、授权或技术支持挂钩。感谢每一位支持开源生态的开发者 ❤️</sub>
+    </td>
+  </tr>
+</table>
+
+### 第三方开源致谢
+
+完整开源许可与声明详见 [NOTICE](./NOTICE)：
+
+| 项目 | 协议 | 说明 |
+| --- | --- | --- |
+| [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) | Apache License 2.0 | 端侧实时人脸 / 人体 / 分割视觉推理运行时与预训练模型 |
+| [PixPark GPUPixel](https://github.com/pixpark/gpupixel) | Apache License 2.0 | 标准 468 点人脸 UV 拓扑参考 |

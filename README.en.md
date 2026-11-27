@@ -239,13 +239,41 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive pipeline topology and [CH
 
 ## License, Free-Forever Pledge & Sponsorship
 
-- **Commercial Use Allowed**: Released under the **[Apache License 2.0](./LICENSE)**. Free for personal, open-source, and commercial products with zero royalties, license keys, or online activation.
-- **Free Forever — No Paid Tiers**: We pledge that this project is **permanently free and will never charge fees or release any paid/pro/paywalled advanced features** — every beauty, reshape, makeup, hair-dyeing, 3D AR, virtual background, and optimization feature remains 100% open-source and free for everyone.
-- **Voluntary Sponsorship**: If this SDK helps your product or team, you can optionally support ongoing development via the EVM address or QR code below (ETH / USDT / USDC / BSC / Arbitrum / Polygon, etc.):
-  - `0x70Ce069e59B3a5B0e3d83a8500094b6666666666`
+> [!IMPORTANT]
+> **Commercial Use Allowed · Free Forever · No Paid Tiers**
+>
+> - Released under the **[Apache License 2.0](./LICENSE)** — free for personal, open-source, and commercial products with **zero royalties, license keys, watermarks, or online activation**.
+> - We pledge that this project is **permanently free and will never charge fees or release any paid/pro/paywalled advanced features** — every beauty, reshape, makeup, hair-dyeing, 3D AR, virtual background, and optimization feature remains 100% open-source for everyone.
 
-  <img src="./docs/assets/sponsor-evm-qr.png" width="180" alt="EVM Sponsor Address QR Code" />
+### Voluntary Sponsorship
 
-See [NOTICE](./NOTICE) for third-party attributions:
-- [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) (Apache License 2.0)
-- [PixPark GPUPixel](https://github.com/pixpark/gpupixel) (Apache License 2.0)
+<table>
+  <tr>
+    <td width="220" align="center" valign="middle">
+      <img src="./docs/assets/sponsor-evm-qr.png" width="196" alt="EVM Sponsor Address QR Code" />
+    </td>
+    <td valign="middle">
+      <p>If <strong>Bebebus Live Beauty SDK</strong> saves your team engineering time or helps power your product, you can optionally sponsor ongoing development and device tuning:</p>
+      <p>
+        <img src="https://img.shields.io/badge/ETH-627EEA?style=flat-square&logo=ethereum&logoColor=white" alt="ETH" />
+        <img src="https://img.shields.io/badge/USDT-26A17B?style=flat-square&logo=tether&logoColor=white" alt="USDT" />
+        <img src="https://img.shields.io/badge/USDC-2775CA?style=flat-square" alt="USDC" />
+        <img src="https://img.shields.io/badge/BSC-F0B90B?style=flat-square&logo=binance&logoColor=black" alt="BSC" />
+        <img src="https://img.shields.io/badge/Arbitrum-28A0F0?style=flat-square" alt="Arbitrum" />
+        <img src="https://img.shields.io/badge/Polygon-8247E5?style=flat-square&logo=polygon&logoColor=white" alt="Polygon" />
+      </p>
+      <p><strong>Universal EVM Address (click copy button on the right):</strong></p>
+      <pre><code>0x70Ce069e59B3a5B0e3d83a8500094b6666666666</code></pre>
+      <sub>100% voluntary — never tied to features, licensing, or access. Thank you for supporting open source ❤️</sub>
+    </td>
+  </tr>
+</table>
+
+### Third-Party Acknowledgments
+
+Full attributions are listed in [NOTICE](./NOTICE):
+
+| Project | License | Role |
+| --- | --- | --- |
+| [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) | Apache License 2.0 | On-device real-time face / pose / segmentation runtime & pre-trained models |
+| [PixPark GPUPixel](https://github.com/pixpark/gpupixel) | Apache License 2.0 | Canonical 468-pt face UV topology reference |
