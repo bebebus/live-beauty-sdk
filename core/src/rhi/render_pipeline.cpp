@@ -1630,24 +1630,25 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     TextureId hairWeightTex = kInvalidTexture;
     const bool hasHairAlphaInput = in.tierCaps.enableHairAlpha && in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f;
     const bool hasOccAlphaInput = in.occlusionMaskTex != kInvalidTexture && in.occlusionShown > 1e-4f;
-    const bool wantHairOrOcc = hasHairAlphaInput || hasOccAlphaInput;
-    if (wantHairOrOcc) {
+    bool primaryMeshVboRestored = false;
+    if (hasHairAlphaInput) {
         // Re-upload primary mesh VBO if secondary face overwrote vbMeshWarp_ so hair alpha follows primary face warp.
         if (meshWarped && secWarped) {
             device_.updateVertexBuffer(
                 vbMeshWarp_, deformer_.vertexData(),
                 sizeof(float) * static_cast<size_t>(deformer_.vertexDataFloatCount()));
+            primaryMeshVboRestored = true;
         }
+        // Stage 4 writes ONLY real hairMask into rtSkinMask_.a (for Stage 5 hair-weighted guided filter).
+        // Occlusion masks (6-class hair/clothes/accessories or chroma occluders) are deferred to Stage 6c
+        // (after kCompositePro, right before Stage 7 makeup) so they NEVER punch dark un-whitened shadow
+        // patches into face/hairline/glasses/collar skin during kCompositePro.
         renderHairAlpha(
             in.hairMaskTex, in.hairShown, in.hairAffine.data(),
-            in.occlusionMaskTex, in.occlusionShown,
+            kInvalidTexture, 0.0f,
             activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
         hasSemanticTex = true;
-        // Only engage hair-weighted guided filter when a real hair mask is active; 64x64 makeup occlusion
-        // must never switch the full-face guided filter shader path on/off on cheeks!
-        if (hasHairAlphaInput) {
-            hairWeightTex = device_.textureOf(rtSkinMask_);
-        }
+        hairWeightTex = device_.textureOf(rtSkinMask_);
         lastActivePassesMask_ |= kPassHairAlpha;
     }
 
@@ -1878,11 +1879,36 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         lastActivePassesMask_ |= kPassHairDye;
     }
 
+    // 6c. v3.9.3: Composite makeup occlusion mask into rtSkinMask_.a strictly AFTER kCompositePro & kHairDye,
+    //     right before Stage 7 UV Makeup, so 6-class semantic occluders (bangs/hands/glasses/masks/clothes)
+    //     still block lipstick/blush/contour/eyeshadow with zero bleed while NEVER punching dark un-whitened
+    //     shadow patches into kCompositePro skin whitening or smoothing.
+    const bool willRenderPrimaryMakeup =
+        in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f && config.hasMakeup();
+    const bool willRenderSecondaryMakeup =
+        secActive && postSecLandmarks && config.hasMakeup();
+    if (hasOccAlphaInput && (willRenderPrimaryMakeup || willRenderSecondaryMakeup)) {
+        if (meshWarped && secWarped && !primaryMeshVboRestored) {
+            device_.updateVertexBuffer(
+                vbMeshWarp_, deformer_.vertexData(),
+                sizeof(float) * static_cast<size_t>(deformer_.vertexDataFloatCount()));
+            primaryMeshVboRestored = true;
+        }
+        renderHairAlpha(
+            hasHairAlphaInput ? in.hairMaskTex : kInvalidTexture,
+            hasHairAlphaInput ? in.hairShown : 0.0f,
+            in.hairAffine.data(),
+            in.occlusionMaskTex, in.occlusionShown,
+            activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
+        hasSemanticTex = true;
+        lastActivePassesMask_ |= kPassHairAlpha;
+    }
+
     // 7. 6-Layer Real-Time UV Makeup (with P1 ambient WB + micro-pore & P2 bangs/occlusion mask)
     bool makeupRendered = false;
     const TextureId compositeBaseTex = currentTex;
     const TextureId semanticForMakeup = hasSemanticTex ? device_.textureOf(rtSkinMask_) : kInvalidTexture;
-    if (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f && config.hasMakeup()) {
+    if (willRenderPrimaryMakeup) {
         renderMakeup(
             rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
@@ -1893,7 +1919,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
     }
-    if (secActive && postSecLandmarks && config.hasMakeup()) {
+    if (willRenderSecondaryMakeup) {
         renderMakeup(
             rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,

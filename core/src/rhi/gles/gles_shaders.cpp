@@ -201,8 +201,10 @@ constexpr const char* kGuidedWeightDiffFrag = LB_GLSL_BLUR_COMMON R"(
 uniform sampler2D uTex1;
 void main() {
     vec4 sum = blur5();
-    vec3 mean = clamp(sum.rgb / max(sum.a, 0.02), 0.0, 1.0);
-    vec3 diff = texture2D(uTex1, vC).rgb - mean;
+    vec3 orig = texture2D(uTex1, vC).rgb;
+    vec3 wMean = clamp(sum.rgb / max(sum.a, 0.001), 0.0, 1.0);
+    vec3 mean = mix(orig, wMean, smoothstep(0.02, 0.12, sum.a));
+    vec3 diff = orig - mean;
     float dev = sqrt(0.24 * diff.r * diff.r + 0.58 * diff.g * diff.g + 0.18 * diff.b * diff.b) * 1.73205;
     gl_FragColor = vec4(mean, clamp(dev * 2.5, 0.0, 1.0));
 }
@@ -729,7 +731,17 @@ void main() {
         smoothstep(0.010, 0.065, relRG + 0.015);
     float polyGate = smoothstep(0.05, 0.14, yFine) *
         mix(0.90 * smoothstep(0.04, 0.22, faceM) * warmPoly, 1.0, smoothstep(0.0, 0.25, gate));
-    float skin = clamp(faceM * polyGate + (1.0 - faceM) * gate * chromaGate * (1.0 - 0.70 * exclM), 0.0, 1.0) * nonHair;
+    // v3.9.3: Luminance-normalized body/neck skin gate eliminates dark un-whitened shadow cliffs on
+    // shaded or cool-LED collarbones, necks, chests, and arms while keeping neutral walls & dark hair at 0 bleed.
+    float normScale = clamp(0.68 / max(yFine, 0.14), 1.0, 3.0);
+    float gateNorm = skinWeight(clamp(fineLow * normScale, 0.0, 1.0));
+    float bodyChroma = smoothstep(0.080, 0.145, relRB) * smoothstep(0.042, 0.090, relRG);
+    float bodyGate = max(gate * chromaGate, gateNorm * bodyChroma * smoothstep(0.16, 0.25, yFine));
+    // Protect clearly lit warm skin inside the face polygon from coarse 128x128 hairMask edge bleed
+    // casting dark un-whitened bands along hairline/temples while still protecting actual dark hair.
+    float hairSkinGuard = faceM * smoothstep(0.22, 0.36, yFine) * warmPoly;
+    float effNonHair = max(nonHair, hairSkinGuard);
+    float skin = clamp(faceM * polyGate + (1.0 - faceM) * bodyGate * (1.0 - 0.70 * exclM), 0.0, 1.0) * effNonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
     float yOrig = luma(original.rgb);
     float hairStrand = smoothstep(0.022, 0.065, luma(wideLow) - yOrig) * (1.0 - smoothstep(0.18, 0.34, yOrig));

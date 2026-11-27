@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.3] - 2026-11-27
+
+### Fixed
+- **Decouple Semantic Occlusion from Skin Whitening/Smoothing (`RenderPipeline`)**: Defers `renderHairAlpha` for `occlusionMaskTex` (6-class hair/clothes/accessories & chroma occluders) to Stage 6c (strictly after Stage 6 `kCompositePro` and right before Stage 7 `renderMakeup`) so in-face hairlines/bangs, eyeglasses lenses, high collars, facial shadows, and motion-skewed occlusion edges NEVER zero out `rtSkinMask_.a` (`nonHair`) in `kCompositePro` and punch un-whitened dark shadow patches — while preserving 100% makeup occlusion on blush, contour, lipstick, and eyeshadow.
+- **Luminance-Normalized Body/Neck Skin Gating & Hairline Bleed Guard (`gles_shaders.cpp`, `metal_shaders.h`)**: Replaces the absolute `R - B` body skin cliff outside `faceM` with a luminance-normalized `bodyGate` (`gateNorm * bodyChroma * bodyLuma`) so mildly shaded or cool-LED collarbones, necks, chests, and arms whiten smoothly without dark shadow blotches while keeping neutral/warm-grey walls, black hair, and dark beard bristles at `<= 1/255` bleed; also adds `hairSkinGuard` inside `faceM` to prevent coarse 128×128 `hairMask` edge bleed from darkening lit forehead/temple skin.
+- **Eliminate Zero-Weight Pure-Black Poisoning in `kGuidedWeightDiff` (`gles_shaders.cpp`, `metal_shaders.h`)**: Smoothly falls back from `sum.rgb / max(sum.a, 0.001)` to original pixel RGB as `sum.a -> 0` (`smoothstep(0.02, 0.12, sum.a)`), preventing zero-weight hair pixels from collapsing to pure black `(0,0,0)` and bleeding dark halos through the 1/9-res `rtMacro_` blur.
+- **Pipeline & Metal GPU Pixel Regression Gates**: Adds `testV393OcclusionDeferredAfterCompositeBeforeMakeup` and `testV393NoDarkShadowPatchesBodyFaceHairGuided`, and updates `testV392MulticlassChestNoDarkShadowPatch`.
+
 ## [3.9.2] - 2026-11-27
 
 ### Fixed

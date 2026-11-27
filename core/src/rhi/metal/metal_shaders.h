@@ -324,8 +324,10 @@ fragment float4 fs_guided_weight_diff(BlurOut in [[stage_in]],
                                       texture2d<float> tex0 [[texture(0)]],
                                       texture2d<float> tex1 [[texture(1)]]) {
     float4 sum = blur5Sample(tex0, in);
-    float3 mean = clamp(sum.rgb / max(sum.a, 0.02f), 0.0f, 1.0f);
-    float3 diff = tex1.sample(kLinearClamp, toMtlUv(in.c)).rgb - mean;
+    float3 orig = tex1.sample(kLinearClamp, toMtlUv(in.c)).rgb;
+    float3 wMean = clamp(sum.rgb / max(sum.a, 0.001f), 0.0f, 1.0f);
+    float3 mean = mix(orig, wMean, smoothstep(0.02f, 0.12f, sum.a));
+    float3 diff = orig - mean;
     float dev = sqrt(0.24f * diff.r * diff.r + 0.58f * diff.g * diff.g + 0.18f * diff.b * diff.b) * 1.73205f;
     return float4(mean, clamp(dev * 2.5f, 0.0f, 1.0f));
 }
@@ -765,7 +767,17 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         smoothstep(0.010f, 0.065f, relRG + 0.015f);
     float polyGate = smoothstep(0.05f, 0.14f, yFine) *
         mix(0.90f * smoothstep(0.04f, 0.22f, faceM) * warmPoly, 1.0f, smoothstep(0.0f, 0.25f, gate));
-    float skin = clamp(faceM * polyGate + (1.0f - faceM) * gate * chromaGate * (1.0f - 0.70f * exclM), 0.0f, 1.0f) * nonHair;
+    // v3.9.3: Luminance-normalized body/neck skin gate eliminates dark un-whitened shadow cliffs on
+    // shaded or cool-LED collarbones, necks, chests, and arms while keeping neutral walls & dark hair at 0 bleed.
+    float normScale = clamp(0.68f / max(yFine, 0.14f), 1.0f, 3.0f);
+    float gateNorm = skinWeight(clamp(fineLow * normScale, 0.0f, 1.0f));
+    float bodyChroma = smoothstep(0.080f, 0.145f, relRB) * smoothstep(0.042f, 0.090f, relRG);
+    float bodyGate = max(gate * chromaGate, gateNorm * bodyChroma * smoothstep(0.16f, 0.25f, yFine));
+    // Protect clearly lit warm skin inside the face polygon from coarse 128x128 hairMask edge bleed
+    // casting dark un-whitened bands along hairline/temples while still protecting actual dark hair.
+    float hairSkinGuard = faceM * smoothstep(0.22f, 0.36f, yFine) * warmPoly;
+    float effNonHair = max(nonHair, hairSkinGuard);
+    float skin = clamp(faceM * polyGate + (1.0f - faceM) * bodyGate * (1.0f - 0.70f * exclM), 0.0f, 1.0f) * effNonHair;
     float3 guided = clamp(original.rgb * guidedA + guidedB, 0.0f, 1.0f);
     float yOrig = luma709(original.rgb);
     float hairStrand = smoothstep(0.022f, 0.065f, luma709(wideLow) - yOrig) * (1.0f - smoothstep(0.18f, 0.34f, yOrig));

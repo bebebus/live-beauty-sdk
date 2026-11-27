@@ -1704,6 +1704,110 @@ void testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion() {
     pipe.releaseGpuResources();
 }
 
+void testV393OcclusionDeferredAfterCompositeBeforeMakeup() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId camTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId atlasTex = dev.createTexture2D(32, 32, TextureFormat::kRgba8, nullptr);
+    PipelineAssets assets{};
+    assets.blushAtlas = atlasTex;
+    assets.contourHighlightAtlas = atlasTex;
+    assets.whiteAlphaFallbackTex = dev.createTexture2D(1, 1, TextureFormat::kRgba8, nullptr);
+    engine.setAssets(assets);
+
+    std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+    const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+    const float aspect = 720.0f / 1280.0f;
+    const float scale = 0.38f / math::FaceMeshFilter::canonicalFaceWidth();
+    for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+        mpXy[i * 2] = 0.50f + xyz[i * 3] * scale;
+        mpXy[i * 2 + 1] = 1.0f - ((0.50f / aspect) + xyz[i * 3 + 1] * scale) * aspect;
+    }
+    for (int i = 468; i < 478; ++i) { mpXy[i * 2] = 0.50f; mpXy[i * 2 + 1] = 0.45f; }
+
+    // 1. Makeup + 6-class semantic occlusion (no hairDye):
+    //    kHairAlpha MUST run strictly AFTER kCompositePro and BEFORE kMakeupLayer so occlusion NEVER
+    //    darkens skin whitening/smoothing in kCompositePro while still blocking UV makeup!
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.performanceTier = math::PerformanceTier::kUltra;
+    cfg.smoothing = 0.55f;
+    cfg.whiten = 0.50f;
+    cfg.blush = 0.35f;
+    cfg.lipstick = 0.40f;
+    engine.setConfig(cfg);
+
+    std::vector<float> logits(16 * 16 * 6, -4.0f);
+    for (int i = 0; i < 16 * 16; ++i) {
+        logits[static_cast<size_t>(i * 6 + (i < 64 ? 1 : 3))] = 5.0f;
+    }
+    for (int f = 0; f < 5; ++f) {
+        const int64_t ts = 7000 + f * 33;
+        engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts);
+        engine.processFrame(camTex, 720, 1280, ts, ts);
+    }
+    EXPECT_TRUE(engine.submitMulticlass6Logits(logits.data(), 16, 16, 7165));
+    engine.submitFaceLandmarks(7165, mpXy.data(), 478, 720, 1280, 7165);
+    dev.calls.clear();
+    engine.processFrame(camTex, 720, 1280, 7165, 7165);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+
+    int idxComposite = -1, idxHairAlpha = -1, idxMakeup = -1;
+    int hairAlphaCount = 0;
+    float hairAlphaOccWeight = 0.0f;
+    for (int i = 0; i < static_cast<int>(dev.calls.size()); ++i) {
+        const auto& c = dev.calls[i];
+        if (c.shader == ShaderId::kCompositePro) idxComposite = i;
+        if (c.shader == ShaderId::kHairAlpha) {
+            if (idxHairAlpha < 0) idxHairAlpha = i;
+            ++hairAlphaCount;
+            if (c.uniforms.count >= 2) hairAlphaOccWeight = c.uniforms.v[1].w;
+        }
+        if ((c.shader == ShaderId::kMakeupLayer || c.shader == ShaderId::kMakeupLip) && idxMakeup < 0) {
+            idxMakeup = i;
+        }
+    }
+    EXPECT_TRUE(idxComposite >= 0 && idxHairAlpha >= 0 && idxMakeup >= 0);
+    EXPECT_TRUE(idxHairAlpha > idxComposite && idxHairAlpha < idxMakeup);
+    EXPECT_TRUE(hairAlphaOccWeight > 0.5f);
+
+    // 2. Hair dye + makeup + 6-class logits:
+    //    Stage 4 runs kHairAlpha with hairMask ONLY (uU1.w == 0) before kCompositePro;
+    //    Stage 6c runs kHairAlpha with hairMask + occMask (uU1.w > 0) after kCompositePro and before kMakeupLayer!
+    cfg.hairDye = 0.70f;
+    engine.setConfig(cfg);
+    EXPECT_TRUE(engine.submitMulticlass6Logits(logits.data(), 16, 16, 7198));
+    engine.submitFaceLandmarks(7198, mpXy.data(), 478, 720, 1280, 7198);
+    dev.calls.clear();
+    engine.processFrame(camTex, 720, 1280, 7198, 7198);
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+
+    int idxPreHairAlpha = -1, idxPostHairAlpha = -1;
+    float preOccW = -1.0f, postOccW = -1.0f;
+    idxComposite = -1;
+    idxMakeup = -1;
+    for (int i = 0; i < static_cast<int>(dev.calls.size()); ++i) {
+        const auto& c = dev.calls[i];
+        if (c.shader == ShaderId::kCompositePro) idxComposite = i;
+        if ((c.shader == ShaderId::kMakeupLayer || c.shader == ShaderId::kMakeupLip) && idxMakeup < 0) idxMakeup = i;
+        if (c.shader == ShaderId::kHairAlpha && c.uniforms.count >= 2) {
+            if (idxComposite < 0) {
+                idxPreHairAlpha = i;
+                preOccW = c.uniforms.v[1].w;
+            } else {
+                idxPostHairAlpha = i;
+                postOccW = c.uniforms.v[1].w;
+            }
+        }
+    }
+    EXPECT_TRUE(idxPreHairAlpha >= 0 && idxPreHairAlpha < idxComposite);
+    EXPECT_TRUE(std::fabs(preOccW) < 1e-4f);
+    EXPECT_TRUE(idxPostHairAlpha > idxComposite && idxPostHairAlpha < idxMakeup);
+    EXPECT_TRUE(postOccW > 0.5f);
+
+    engine.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -1722,6 +1826,7 @@ int main() {
     testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise();
     testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute();
     testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion();
+    testV393OcclusionDeferredAfterCompositeBeforeMakeup();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

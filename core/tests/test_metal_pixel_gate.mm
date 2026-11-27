@@ -2915,13 +2915,236 @@ void testV392MulticlassChestNoDarkShadowPatch(MetalDevice& dev) {
     EXPECT_TRUE(std::abs(int(mcPixels[chestIdx + 1]) - int(basePixels[chestIdx + 1])) <= 2);
     EXPECT_TRUE(std::abs(int(mcPixels[chestIdx + 2]) - int(basePixels[chestIdx + 2])) <= 2);
 
-    // Probe occluded in-face pixel (center x=90, y=114 = 35.6% down): MUST remain un-whitened (occluder protected!)
+    // v3.9.3: Probe in-face occluded pixel (center x=90, y=114 = 35.6% down, e.g. skin behind glasses or
+    // bangs/INT8 false positive): kCompositePro whitening MUST ALSO match baseline (ZERO dark shadow hole!),
+    // while UV makeup occlusion is verified separately in testV393NoDarkShadowPatchesBodyFaceHairGuided.
     const int faceOccIdx = (114 * kW + 90) * 4;
-    EXPECT_TRUE(int(basePixels[faceOccIdx + 0]) - int(mcPixels[faceOccIdx + 0]) >= 12);
+    EXPECT_TRUE(basePixels[faceOccIdx + 0] > 195);
+    EXPECT_TRUE(std::abs(int(mcPixels[faceOccIdx + 0]) - int(basePixels[faceOccIdx + 0])) <= 2);
+    EXPECT_TRUE(std::abs(int(mcPixels[faceOccIdx + 1]) - int(basePixels[faceOccIdx + 1])) <= 2);
+    EXPECT_TRUE(std::abs(int(mcPixels[faceOccIdx + 2]) - int(basePixels[faceOccIdx + 2])) <= 2);
 
     engBase->releaseGpuResources();
     engMc->releaseGpuResources();
     dev.destroyTexture(camTex);
+}
+
+// v3.9.3: End-to-end GPU pixel regression gates covering all 3 root causes of inexplicable dark shadow patches:
+//   1) 6-class semantic occlusion deferred after kCompositePro: face skin stays evenly whitened even under
+//      in-face hair/glasses/accessories class labels while UV blush makeup is still cleanly occluded (0 bleed);
+//   2) Luminance-normalized body/neck skin gating in kCompositePro: shaded/cool-LED collarbones, necks, chests
+//      & arms whiten smoothly without dark shadow cliffs while neutral walls, black hair & dark beard keep <=1/255;
+//   3) Coarse hairMask hairline bleed guard inside face polygon + kGuidedWeightDiff zero-weight anti-black fallback.
+void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
+    // --- Part A: In-face 6-class occluder blocks UV blush WITHOUT punching a dark un-whitened shadow patch ---
+    {
+        constexpr int kW = 180, kH = 320;
+        const float aspect = static_cast<float>(kW) / static_cast<float>(kH);
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float scale = 0.36f / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            const float mx = 0.50f + xyz[i * 3] * scale;
+            const float my = (0.65f / aspect) + xyz[i * 3 + 1] * scale;
+            mpXy[i * 2] = mx;
+            mpXy[i * 2 + 1] = 1.0f - (my * aspect);
+        }
+        for (int i = 468; i < 478; ++i) { mpXy[i * 2] = 0.50f; mpXy[i * 2 + 1] = 0.32f; }
+
+        const TextureId camTex = makeSolidTex(dev, kW, kH, 185, 145, 125, 255);
+        // Full-coverage blush atlas (all channels = 255) so blush tints unoccluded cheeks noticeably
+        const TextureId solidAtlas = makeSolidTex(dev, 32, 32, 255, 255, 255, 255);
+
+        auto makeEng = [&]() {
+            auto eng = std::make_unique<LiveBeautyEngine>(dev);
+            PipelineAssets assets{};
+            assets.blushAtlas = solidAtlas;
+            assets.contourHighlightAtlas = solidAtlas;
+            eng->setAssets(assets);
+            BeautyConfig cfg{};
+            cfg.enabled = true;
+            cfg.performanceTier = PerformanceTier::kUltra;
+            cfg.smoothing = 0.40f;
+            cfg.whiten = 0.60f;
+            cfg.blush = 0.85f;
+            cfg.blushColor = BlushColor::kBerry;
+            eng->setConfig(cfg);
+            return eng;
+        };
+
+        auto engBase = makeEng();
+        auto engMc = makeEng();
+        int64_t ts = 11000;
+        TextureId outBase = kInvalidTexture;
+        for (int f = 0; f < 6; ++f) {
+            ts += 33;
+            engBase->submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts);
+            outBase = engBase->processFrame(camTex, kW, kH, ts, ts);
+            if (f < 5) {
+                engMc->submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts);
+                engMc->processFrame(camTex, kW, kH, ts, ts);
+            }
+        }
+        // Mark center/right face cheek (u=0.42..0.60, v=0.31..0.41) as class 5 occluder (e.g. hand/glasses)
+        constexpr int kM = 64;
+        std::vector<float> logits(kM * kM * 6, -4.0f);
+        for (int y = 0; y < kM; ++y) {
+            const float v = (static_cast<float>(y) + 0.5f) / kM;
+            for (int x = 0; x < kM; ++x) {
+                const float u = (static_cast<float>(x) + 0.5f) / kM;
+                float* lg = logits.data() + (y * kM + x) * 6;
+                if (u >= 0.42f && u <= 0.60f && v >= 0.31f && v <= 0.41f) {
+                    lg[5] = 6.0f;
+                } else {
+                    lg[3] = 6.0f;
+                }
+            }
+        }
+        engMc->submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts);
+        EXPECT_TRUE(engMc->submitMulticlass6Logits(logits.data(), kM, kM, ts));
+        const TextureId outMc = engMc->processFrame(camTex, kW, kH, ts, ts);
+
+        std::vector<uint8_t> basePx(kW * kH * 4, 0), mcPx(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(outBase, basePx.data(), kW, kH));
+        EXPECT_TRUE(dev.readbackTextureRgba8(outMc, mcPx.data(), kW, kH));
+
+        // At occluded mid-face (x=90, y=114):
+        //  1) Blush pigment IS cleanly blocked by occMask -> G/B stay HIGHER (less rose-berry tint) than blush baseline!
+        //  2) Skin is STILL whitened (R > 195 vs input 185) -> NOT turned into an un-whitened dark shadow hole!
+        const int occIdx = (114 * kW + 90) * 4;
+        EXPECT_TRUE(mcPx[occIdx + 0] > 195);
+        EXPECT_TRUE(int(mcPx[occIdx + 1]) - int(basePx[occIdx + 1]) >= 12);
+        EXPECT_TRUE(int(mcPx[occIdx + 2]) - int(basePx[occIdx + 2]) >= 10);
+
+        engBase->releaseGpuResources();
+        engMc->releaseGpuResources();
+        dev.destroyTexture(camTex);
+        dev.destroyTexture(solidAtlas);
+    }
+
+    // --- Part B: Luminance-normalized body/neck skin gating & coarse hairMask hairline guard in kCompositePro ---
+    {
+        constexpr int kSz = 32;
+        const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
+        auto evalComp = [&](Rgba src, uint8_t faceM, uint8_t nonHair, float whiten) -> Rgba {
+            const TextureId srcTex = makeSolidTex(dev, kSz, kSz, src.r, src.g, src.b, 255);
+            const TextureId semTex = makeSolidTex(dev, kSz, kSz, faceM, 0, 0, nonHair);
+            RenderState st{};
+            TextureBindings tb{};
+            tb.bind(0, srcTex);
+            tb.bind(1, srcTex);
+            tb.bind(2, semTex);
+            tb.bind(3, semTex);
+            UniformBlock ub{};
+            ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);  // framePresence=5.0 -> polySkinMask mode, pres=1.0
+            ub.push(16.0f, 0.0f, 0.0f, 0.5f);             // skinOnly=1, smoothing=0, brightness=0
+            ub.push(0.0f, 0.0f, 1.0f, 0.0f);              // radiance=0, sharp=0, sat=1, filter=0
+            ub.push(whiten, 0.0f, 0.0f, 0.0f);            // whiten, rosy=0, oil=0, relight=0
+            for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            ub.push(0.0f, 0.01f, 0.0f, 0.0f);             // lut=0, core=0.01, micro=0, ambient=0
+            dev.beginPass(rt, kSz, kSz, false, {});
+            dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+            dev.endPass();
+            std::vector<uint8_t> px(kSz * kSz * 4, 0);
+            EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), px.data(), kSz, kSz));
+            dev.destroyTexture(srcTex);
+            dev.destroyTexture(semTex);
+            const int mid = (16 * kSz + 16) * 4;
+            return {px[mid], px[mid + 1], px[mid + 2], px[mid + 3]};
+        };
+        auto yOf = [](Rgba c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; };
+
+        // 1. Body / neck / collarbone / arm shaded skin (faceM = 0) whitens smoothly without dark-shadow cliffs!
+        const Rgba litCollar{135, 114, 106, 255};
+        const Rgba hollowCollar{115, 102, 99, 255};
+        const Rgba deepNeck{85, 72, 66, 255};
+        const Rgba coolFairShaded{138, 126, 123, 255};
+
+        const Rgba outLit = evalComp(litCollar, 0, 255, 0.50f);
+        const Rgba outHollow = evalComp(hollowCollar, 0, 255, 0.50f);
+        const Rgba outDeep = evalComp(deepNeck, 0, 255, 0.50f);
+        const Rgba outCoolFair = evalComp(coolFairShaded, 0, 255, 0.50f);
+
+        const float dLit = yOf(outLit) - yOf(litCollar);
+        const float dHollow = yOf(outHollow) - yOf(hollowCollar);
+        const float dDeep = yOf(outDeep) - yOf(deepNeck);
+        const float dCoolFair = yOf(outCoolFair) - yOf(coolFairShaded);
+
+        EXPECT_TRUE(dLit >= 22.0f);
+        EXPECT_TRUE(dHollow >= 20.0f);  // Previously dropped to +4.4 -> stark dark shadow blotch!
+        EXPECT_TRUE(dDeep >= 18.0f);    // Previously dropped to +8.9 -> muddy neck shadow!
+        EXPECT_TRUE(dCoolFair >= 11.0f);
+        EXPECT_TRUE(std::fabs(dLit - dHollow) <= 6.0f);  // Smooth transition between lit & hollow collarbone
+
+        // 2. Non-skin surfaces outside face (faceM = 0) keep <= 1/255 whitening bleed!
+        const Rgba nonSkins[] = {
+            {185, 185, 187, 255},  // Cool grey wall
+            {78, 76, 72, 255},     // Dim warm-grey wall
+            {220, 215, 210, 255},  // Bright studio wall
+            {28, 26, 27, 255},     // Black hair
+            {38, 34, 32, 255},     // Dark beard bristle
+            {40, 55, 85, 255},     // Navy shirt
+            {200, 40, 40, 255},    // Saturated red shirt
+        };
+        for (const auto& ns : nonSkins) {
+            const Rgba outNs = evalComp(ns, 0, 255, 0.50f);
+            EXPECT_TRUE(std::abs(int(outNs.r) - int(ns.r)) <= 1);
+            EXPECT_TRUE(std::abs(int(outNs.g) - int(ns.g)) <= 1);
+            EXPECT_TRUE(std::abs(int(outNs.b) - int(ns.b)) <= 1);
+        }
+
+        // 3. Coarse 128x128 hairMask bleed (nonHair=0) onto lit forehead skin inside faceM=255 stays whitened,
+        //    while real black bangs inside faceM=255 stay 100% protected (<= 1/255)!
+        const Rgba foreheadSkin{178, 142, 126, 255};
+        const Rgba outForehead = evalComp(foreheadSkin, 255, 0, 0.55f);
+        EXPECT_TRUE(yOf(outForehead) - yOf(foreheadSkin) >= 18.0f);
+
+        const Rgba blackBangs{28, 26, 27, 255};
+        const Rgba outBangs = evalComp(blackBangs, 255, 0, 0.55f);
+        EXPECT_TRUE(std::abs(int(outBangs.r) - int(blackBangs.r)) <= 1);
+        EXPECT_TRUE(std::abs(int(outBangs.g) - int(blackBangs.g)) <= 1);
+        EXPECT_TRUE(std::abs(int(outBangs.b) - int(blackBangs.b)) <= 1);
+
+        dev.destroyRenderTarget(rt);
+    }
+
+    // --- Part C: kGuidedWeightDiff zero-weight hair pixels stay original RGB (NOT pure black 0,0,0) ---
+    {
+        constexpr int kW = 32, kH = 32;
+        const TextureId hairImg = makeSolidTex(dev, kW, kH, 135, 102, 82, 255);  // Medium brown hair
+        const TextureId zeroWeight = makeSolidTex(dev, kW, kH, 0, 0, 0, 0);      // nonHair = 0
+        const RenderTargetId rtBlur = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+        const RenderTargetId rtDiff = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        {
+            RenderState st{};
+            TextureBindings tb{}; tb.bind(0, hairImg); tb.bind(1, zeroWeight);
+            UniformBlock ub{}; ub.push(1.25f / kW, 0.0f, 0.0f, 0.0f);
+            dev.beginPass(rtBlur, kW, kH, false, {});
+            dev.drawFullScreenQuad(ShaderId::kGuidedWeightBlur, st, tb, ub);
+            dev.endPass();
+        }
+        {
+            RenderState st{};
+            TextureBindings tb{}; tb.bind(0, dev.textureOf(rtBlur)); tb.bind(1, hairImg);
+            UniformBlock ub{}; ub.push(0.0f, 1.25f / kH, 0.0f, 0.0f);
+            dev.beginPass(rtDiff, kW, kH, false, {});
+            dev.drawFullScreenQuad(ShaderId::kGuidedWeightDiff, st, tb, ub);
+            dev.endPass();
+        }
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rtDiff), out.data(), kW, kH));
+        const int mid = (16 * kW + 16) * 4;
+        // Previously collapsed to (0, 0, 0) pure black and poisoned rtMacro_ 46px blur!
+        EXPECT_TRUE(std::abs(int(out[mid + 0]) - 135) <= 2);
+        EXPECT_TRUE(std::abs(int(out[mid + 1]) - 102) <= 2);
+        EXPECT_TRUE(std::abs(int(out[mid + 2]) - 82) <= 2);
+
+        dev.destroyTexture(hairImg);
+        dev.destroyTexture(zeroWeight);
+        dev.destroyRenderTarget(rtBlur);
+        dev.destroyRenderTarget(rtDiff);
+    }
 }
 
 }  // namespace
@@ -2956,6 +3179,7 @@ int main() {
         testV380MetalAtmosphereBloomGrainCat02AndOpenMouthLipProbes(dev);
         testV390SevenScenarioPortraitQualityBenchmark(dev);
         testV392MulticlassChestNoDarkShadowPatch(dev);
+        testV393NoDarkShadowPatchesBodyFaceHairGuided(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";
