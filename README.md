@@ -5,6 +5,7 @@
 [![CI](https://github.com/bebebus/live-beauty-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/bebebus/live-beauty-sdk/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/badge/Version-v3.9.4-1E88E5.svg)](./CHANGELOG.md)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Free Forever](https://img.shields.io/badge/Commercial_Use-Free_Forever-2E7D32.svg)](#开源许可永久免费承诺与赞助)
 [![Live Demo: dh.video](https://img.shields.io/badge/在线体验-dh.video-FF4D6D?logo=googlechrome&logoColor=white)](https://dh.video)
 [![Android API](https://img.shields.io/badge/Android-API_24%2B-3DDC84?logo=android&logoColor=white)](./android)
 [![iOS](https://img.shields.io/badge/iOS-15.0%2B-000000?logo=apple&logoColor=white)](./ios)
@@ -245,9 +246,12 @@ bash _tooling/run-all-tests.sh
 
 ---
 
-## 开源许可与致谢
+## 开源许可、永久免费承诺与赞助
 
-本项目基于 **[Apache License 2.0](./LICENSE)** 开源发布，无需任何商业授权费用即可用于商业或开源产品。
+- **允许免费商用**：本项目基于 **[Apache License 2.0](./LICENSE)** 开源发布，可免费用于任意个人、开源或商业产品，无需申请商业授权或联网鉴权。
+- **永久免费承诺**：本项目郑重承诺**永不收费，永远不会推出任何收费版本、付费解锁或收费的高级功能**——所有美颜、微整、美妆、染发、3D AR、虚拟背景与性能优化能力全部平等开源，持续免费维护。
+- **自愿赞助支持**：如果本项目对你的产品或研发有所帮助，欢迎通过以下地址自愿赞助支持项目持续演进（EVM 链通用，如 ETH / USDT / USDC / BSC / Arbitrum / Polygon 等）：
+  - `0x70Ce069e59B3a5B0e3d83a8500094b6666666666`
 
 第三方开源致谢详见 [NOTICE](./NOTICE)：
 - [Google MediaPipe](https://github.com/google-ai-edge/mediapipe)（Apache License 2.0）—— 端侧实时人脸/人体/分割视觉推理运行时与预训练模型。

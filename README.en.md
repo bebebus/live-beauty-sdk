@@ -5,6 +5,7 @@
 [![CI](https://github.com/bebebus/live-beauty-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/bebebus/live-beauty-sdk/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/badge/Version-v3.9.4-1E88E5.svg)](./CHANGELOG.md)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Free Forever](https://img.shields.io/badge/Commercial_Use-Free_Forever-2E7D32.svg)](#license-free-forever-pledge--sponsorship)
 [![Live Demo: dh.video](https://img.shields.io/badge/Live_Demo-dh.video-FF4D6D?logo=googlechrome&logoColor=white)](https://dh.video)
 [![Android API](https://img.shields.io/badge/Android-API_24%2B-3DDC84?logo=android&logoColor=white)](./android)
 [![iOS](https://img.shields.io/badge/iOS-15.0%2B-000000?logo=apple&logoColor=white)](./ios)
@@ -236,9 +237,12 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive pipeline topology and [CH
 
 ---
 
-## License & Acknowledgments
+## License, Free-Forever Pledge & Sponsorship
 
-Released under the **[Apache License 2.0](./LICENSE)**. Free for both commercial and open-source use without royalties or license keys.
+- **Commercial Use Allowed**: Released under the **[Apache License 2.0](./LICENSE)**. Free for personal, open-source, and commercial products with zero royalties, license keys, or online activation.
+- **Free Forever — No Paid Tiers**: We pledge that this project is **permanently free and will never charge fees or release any paid/pro/paywalled advanced features** — every beauty, reshape, makeup, hair-dyeing, 3D AR, virtual background, and optimization feature remains 100% open-source and free for everyone.
+- **Voluntary Sponsorship**: If this SDK helps your product or team, you can optionally support ongoing development at the following EVM address (ETH / USDT / USDC / BSC / Arbitrum / Polygon, etc.):
+  - `0x70Ce069e59B3a5B0e3d83a8500094b6666666666`
 
 See [NOTICE](./NOTICE) for third-party attributions:
 - [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) (Apache License 2.0)
