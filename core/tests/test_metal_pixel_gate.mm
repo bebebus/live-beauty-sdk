@@ -3039,7 +3039,7 @@ void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
     {
         constexpr int kSz = 32;
         const RenderTargetId rt = dev.createRenderTarget(kSz, kSz, TextureFormat::kRgba8);
-        auto evalComp = [&](Rgba src, uint8_t faceM, uint8_t nonHair, float whiten) -> Rgba {
+        auto evalComp = [&](Rgba src, uint8_t faceM, uint8_t nonHair, float whiten, bool hasFaceOval = true) -> Rgba {
             const TextureId srcTex = makeSolidTex(dev, kSz, kSz, src.r, src.g, src.b, 255);
             const TextureId semTex = makeSolidTex(dev, kSz, kSz, faceM, 0, 0, nonHair);
             RenderState st{};
@@ -3049,12 +3049,24 @@ void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
             tb.bind(2, semTex);
             tb.bind(3, semTex);
             UniformBlock ub{};
-            ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);  // framePresence=5.0 -> polySkinMask mode, pres=1.0
-            ub.push(16.0f, 0.0f, 0.0f, 0.5f);             // skinOnly=1, smoothing=0, brightness=0
-            ub.push(0.0f, 0.0f, 1.0f, 0.0f);              // radiance=0, sharp=0, sat=1, filter=0
-            ub.push(whiten, 0.0f, 0.0f, 0.0f);            // whiten, rosy=0, oil=0, relight=0
-            for (int i = 0; i < 6; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
-            ub.push(0.0f, 0.01f, 0.0f, 0.0f);             // lut=0, core=0.01, micro=0, ambient=0
+            ub.push(1.0f / kSz, 1.0f / kSz, 1.0f, 5.0f);  // [0] framePresence=5.0 -> polySkinMask mode, pres=1.0
+            ub.push(16.0f, 0.0f, 0.0f, 0.5f);             // [1] skinOnly=1, smoothing=0, brightness=0
+            ub.push(0.0f, 0.0f, 1.0f, 0.0f);              // [2] radiance=0, sharp=0, sat=1, filter=0
+            ub.push(whiten, 0.0f, 0.0f, 0.0f);            // [3] whiten, rosy=0, oil=0, relight=0
+            ub.push(0.0f, 0.0f, 0.0f, hasFaceOval ? 1.0f : 0.0f);  // [4] uEye0.w = axis.x
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);                       // [5] uEye1.y = bodyPriorMute=0, uEye1.w = axis.y
+            // [6] uOval: place tracked face above probe center (0.5, 0.5) so probe lies in neck/chest portraitPrior=1.0
+            if (hasFaceOval) {
+                ub.push(0.50f, 0.72f, 0.18f, 0.22f);
+            } else {
+                ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // [7] uMouth
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // [8] uEyeMask0 (secondary oval inactive)
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // [9] uEyeMask1
+            ub.push(0.0f, 0.01f, 0.0f, 0.0f);             // [10] lut=0, core=0.01, micro=0, ambient=0
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // [11] uWbRow1
+            ub.push(0.0f, 0.0f, 0.0f, 0.0f);              // [12] uWbRow2
             dev.beginPass(rt, kSz, kSz, false, {});
             dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
             dev.endPass();
@@ -3067,7 +3079,8 @@ void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
         };
         auto yOf = [](Rgba c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; };
 
-        // 1. Body / neck / collarbone / arm shaded skin (faceM = 0) whitens smoothly without dark-shadow cliffs!
+        // 1. Body / neck / collarbone / arm shaded skin (faceM = 0, inside portraitPrior) whitens smoothly
+        //    without dark-shadow cliffs, while untracked frame (hasFaceOval=false, v3.9.5 skin-n1) stays 0 bleed!
         const Rgba litCollar{135, 114, 106, 255};
         const Rgba hollowCollar{115, 102, 99, 255};
         const Rgba deepNeck{85, 72, 66, 255};
@@ -3089,6 +3102,12 @@ void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
         EXPECT_TRUE(dCoolFair >= 11.0f);
         EXPECT_TRUE(std::fabs(dLit - dHollow) <= 6.0f);  // Smooth transition between lit & hollow collarbone
 
+        // v3.9.5 (skin-n1): When no face oval is tracked, portraitPrior defaults to 0.0 (no background flash)
+        const Rgba outNoFace = evalComp(litCollar, 0, 255, 0.50f, /*hasFaceOval=*/false);
+        EXPECT_TRUE(std::abs(int(outNoFace.r) - int(litCollar.r)) <= 1);
+        EXPECT_TRUE(std::abs(int(outNoFace.g) - int(litCollar.g)) <= 1);
+        EXPECT_TRUE(std::abs(int(outNoFace.b) - int(litCollar.b)) <= 1);
+
         // 2. Non-skin surfaces outside face (faceM = 0) keep <= 1/255 whitening bleed!
         const Rgba nonSkins[] = {
             {185, 185, 187, 255},  // Cool grey wall
@@ -3106,14 +3125,20 @@ void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
             EXPECT_TRUE(std::abs(int(outNs.b) - int(ns.b)) <= 1);
         }
 
-        // 3. Coarse 128x128 hairMask bleed (nonHair=0) onto lit forehead skin inside faceM=255 stays whitened,
-        //    while real black bangs inside faceM=255 stay 100% protected (<= 1/255)!
+        // 3. v3.9.5 (skin-n3): Coarse 128x128 hairMask transition-edge bleed (nonHair=96/255 ~ 0.37) onto lit
+        //    forehead skin inside faceM=255 stays whitened (no dark hairline band), while high-confidence bangs
+        //    interior (nonHair=0, even light/blonde) AND real black bangs stay 100% protected (<= 1/255)!
         const Rgba foreheadSkin{178, 142, 126, 255};
-        const Rgba outForehead = evalComp(foreheadSkin, 255, 0, 0.55f);
-        EXPECT_TRUE(yOf(outForehead) - yOf(foreheadSkin) >= 18.0f);
+        const Rgba outForeheadEdge = evalComp(foreheadSkin, 255, 96, 0.55f);
+        EXPECT_TRUE(yOf(outForeheadEdge) - yOf(foreheadSkin) >= 18.0f);
+
+        const Rgba outHighConfBangs = evalComp(foreheadSkin, 255, 0, 0.55f);
+        EXPECT_TRUE(std::abs(int(outHighConfBangs.r) - int(foreheadSkin.r)) <= 1);
+        EXPECT_TRUE(std::abs(int(outHighConfBangs.g) - int(foreheadSkin.g)) <= 1);
+        EXPECT_TRUE(std::abs(int(outHighConfBangs.b) - int(foreheadSkin.b)) <= 1);
 
         const Rgba blackBangs{28, 26, 27, 255};
-        const Rgba outBangs = evalComp(blackBangs, 255, 0, 0.55f);
+        const Rgba outBangs = evalComp(blackBangs, 255, 96, 0.55f);
         EXPECT_TRUE(std::abs(int(outBangs.r) - int(blackBangs.r)) <= 1);
         EXPECT_TRUE(std::abs(int(outBangs.g) - int(blackBangs.g)) <= 1);
         EXPECT_TRUE(std::abs(int(outBangs.b) - int(blackBangs.b)) <= 1);
