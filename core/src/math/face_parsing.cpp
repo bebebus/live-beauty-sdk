@@ -190,34 +190,94 @@ bool FaceParsingMapper::mapLogitsNchw(
     return mapClassIds(argmaxScratch_.data(), srcW, srcH, outOcclusionR8, outHairR8, outPersonR8);
 }
 
+namespace {
+
+inline float evalInnerFaceMask(float u, float v, const CropRect* primary, const CropRect* secondary) {
+    auto evalOne = [](float px, float py, const CropRect* b) -> float {
+        if (!b || b->width < 0.04f || b->height < 0.04f) return 0.0f;
+        const float cx = b->left + 0.5f * b->width;
+        const float cy = b->top + 0.5f * b->height;
+        const float rx = std::max(0.5f * b->width, 0.02f);
+        const float ry = std::max(0.5f * b->height, 0.02f);
+        const float dx = (px - cx) / rx;
+        const float dy = (py - cy) / ry;
+        // Inner face core (0.55..0.75) excludes jawline/neck boundary so jaw contour isn't muted.
+        return 1.0f - detail::smoothstep(0.55f, 0.75f, dx * dx + dy * dy);
+    };
+    return std::max(evalOne(u, v, primary), evalOne(u, v, secondary));
+}
+
+}  // namespace
+
 bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
     const float* logitsNhwc6,
     int srcW,
     int srcH,
     uint8_t* outOcclusionR8,
     uint8_t* outHairR8,
-    uint8_t* outPersonR8) {
+    uint8_t* outPersonR8,
+    const CropRect* primaryFaceBounds,
+    const CropRect* secondaryFaceBounds) {
+    return mapMulticlass6LogitsNhwcRegion(
+        logitsNhwc6, srcW, srcH, 0, 0, srcW, srcH,
+        outOcclusionR8, outHairR8, outPersonR8,
+        primaryFaceBounds, secondaryFaceBounds);
+}
+
+bool FaceParsingMapper::mapMulticlass6LogitsNhwcRegion(
+    const float* logitsNhwc6,
+    int srcW,
+    int srcH,
+    int padX,
+    int padY,
+    int validW,
+    int validH,
+    uint8_t* outOcclusionR8,
+    uint8_t* outHairR8,
+    uint8_t* outPersonR8,
+    const CropRect* primaryFaceBounds,
+    const CropRect* secondaryFaceBounds) {
     if (!logitsNhwc6 || srcW <= 0 || srcH <= 0 || srcW > 4096 || srcH > 4096 || !outOcclusionR8) {
         return false;
     }
+    const int rx0 = std::clamp(padX, 0, srcW - 1);
+    const int ry0 = std::clamp(padY, 0, srcH - 1);
+    const int rw = std::clamp(validW, 1, srcW - rx0);
+    const int rh = std::clamp(validH, 1, srcH - ry0);
+    const bool useBox2x2 = (rw >= kOutSize * 2 || rh >= kOutSize * 2);
+    const float invOut = 1.0f / static_cast<float>(kOutSize);
 
     for (int y = 0; y < kOutSize; ++y) {
-        const int sy = std::clamp(static_cast<int>((static_cast<int64_t>(y) * srcH) / kOutSize), 0, srcH - 1);
-        const size_t srcRow = static_cast<size_t>(sy) * static_cast<size_t>(srcW);
+        const float fy = static_cast<float>(ry0) + (static_cast<float>(y) + 0.5f) * static_cast<float>(rh) * invOut;
+        const int sy0 = std::clamp(static_cast<int>(std::floor(fy - 0.25f)), ry0, ry0 + rh - 1);
+        const int sy1 = useBox2x2 ? std::clamp(sy0 + 1, ry0, ry0 + rh - 1) : sy0;
+        const size_t row0 = static_cast<size_t>(sy0) * static_cast<size_t>(srcW);
+        const size_t row1 = static_cast<size_t>(sy1) * static_cast<size_t>(srcW);
+        const float vNorm = (static_cast<float>(y) + 0.5f) * invOut;
         const int dstRow = y * kOutSize;
         for (int x = 0; x < kOutSize; ++x) {
-            const int sx = std::clamp(static_cast<int>((static_cast<int64_t>(x) * srcW) / kOutSize), 0, srcW - 1);
-            const float* lg = logitsNhwc6 + (srcRow + static_cast<size_t>(sx)) * 6u;
+            const float fx = static_cast<float>(rx0) + (static_cast<float>(x) + 0.5f) * static_cast<float>(rw) * invOut;
+            const int sx0 = std::clamp(static_cast<int>(std::floor(fx - 0.25f)), rx0, rx0 + rw - 1);
+            const int sx1 = useBox2x2 ? std::clamp(sx0 + 1, rx0, rx0 + rw - 1) : sx0;
 
-            // Numerically stable 6-way softmax: [0:bg, 1:hair, 2:body_skin, 3:face_skin, 4:clothes, 5:accessories]
-            float maxL = -1e30f;
+            float lgAvg[6];
             bool finiteAll = true;
-            for (int c = 0; c < 6; ++c) {
-                if (!std::isfinite(lg[c])) {
-                    finiteAll = false;
-                    break;
+            if (useBox2x2 && (sx1 != sx0 || sy1 != sy0)) {
+                const float* l00 = logitsNhwc6 + (row0 + static_cast<size_t>(sx0)) * 6u;
+                const float* l10 = logitsNhwc6 + (row0 + static_cast<size_t>(sx1)) * 6u;
+                const float* l01 = logitsNhwc6 + (row1 + static_cast<size_t>(sx0)) * 6u;
+                const float* l11 = logitsNhwc6 + (row1 + static_cast<size_t>(sx1)) * 6u;
+                for (int c = 0; c < 6; ++c) {
+                    const float avg = 0.25f * (l00[c] + l10[c] + l01[c] + l11[c]);
+                    if (!std::isfinite(avg)) { finiteAll = false; break; }
+                    lgAvg[c] = avg;
                 }
-                if (lg[c] > maxL) maxL = lg[c];
+            } else {
+                const float* lg = logitsNhwc6 + (row0 + static_cast<size_t>(sx0)) * 6u;
+                for (int c = 0; c < 6; ++c) {
+                    if (!std::isfinite(lg[c])) { finiteAll = false; break; }
+                    lgAvg[c] = lg[c];
+                }
             }
             const int idx = dstRow + x;
             if (!finiteAll) {
@@ -226,25 +286,32 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwc(
                 rawPerson_[idx] = 0;
                 continue;
             }
+            // Numerically stable 6-way softmax: [0:bg, 1:hair, 2:body_skin(incl. hands), 3:face_skin, 4:clothes, 5:accessories]
+            float maxL = lgAvg[0];
+            for (int c = 1; c < 6; ++c) {
+                if (lgAvg[c] > maxL) maxL = lgAvg[c];
+            }
             float p[6];
             float sumE = 0.0f;
             for (int c = 0; c < 6; ++c) {
-                p[c] = std::exp(std::max(lg[c] - maxL, -20.0f));
+                p[c] = std::exp(std::max(lgAvg[c] - maxL, -20.0f));
                 sumE += p[c];
             }
             const float invSum = 1.0f / std::max(sumE, 1e-6f);
             for (int c = 0; c < 6; ++c) p[c] *= invSum;
 
-            // Hair wisps (1), clothes (4), and accessories/glasses/hands/hats (5) occlude bare face makeup & skin retouch,
-            // gated with strict margin against skin probability (p[2] + p[3]) so dynamic-INT8 hairline/temple spill
-            // never punches dark nonHair shadow holes across the forehead or face contour!
-            const float pSkin = p[2] + p[3];
-            const float rawOccluder = p[1] + p[4] + p[5];
-            const float pOcc = detail::smoothstep(0.62f, 0.90f, rawOccluder - 0.90f * pSkin);
-            // v3.6.13: Calibrated hair coverage ramp [0.32, 0.72] with 0.75*pSkin skin guard:
-            // lifts real portrait hair coverage from ~52-57% to ~80-87% without creating skin/wall bleed
-            // (still yields 0 on ambiguous dynamic-INT8 forehead spill c[1]=1.6 vs c[3]=1.2).
-            const float pHair = detail::smoothstep(0.32f, 0.72f, p[1] - 0.75f * pSkin);
+            // v3.9.4 (C1/makeup-1/seg-1): MediaPipe Selfie Multiclass classifies hands/arms as class 2 (body_skin).
+            // Inside the inner face core where body_skin clearly dominates face_skin, treat p[2] as a makeup occluder
+            // so lipstick/blush never paint onto fingers resting on chin/lips and lower-face mute triggers cleanly.
+            const float uNorm = (static_cast<float>(x) + 0.5f) * invOut;
+            const float inner = evalInnerFaceMask(uNorm, vNorm, primaryFaceBounds, secondaryFaceBounds);
+            const float bodyDom = detail::smoothstep(0.10f, 0.30f, p[2] - p[3]);
+            const float handInFace = inner * bodyDom;
+            const float pSkinOcc = p[3] + p[2] * (1.0f - handInFace);
+            const float rawOccluder = p[1] + p[4] + p[5] + p[2] * handInFace;
+            const float pOcc = detail::smoothstep(0.62f, 0.90f, rawOccluder - 0.90f * pSkinOcc);
+            const float pSkinHair = p[2] + p[3];
+            const float pHair = detail::smoothstep(0.32f, 0.72f, p[1] - 0.75f * pSkinHair);
             const float pPerson = detail::clampf(1.0f - p[0], 0.0f, 1.0f);
 
             rawOcc_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround((1.0f - pOcc) * 255.0f)), 0, 255));
@@ -272,17 +339,21 @@ bool FaceParsingMapper::mapMulticlass6PlanarProbabilities(
     int srcH,
     uint8_t* outOcclusionR8,
     uint8_t* outHairR8,
-    uint8_t* outPersonR8) {
+    uint8_t* outPersonR8,
+    const CropRect* primaryFaceBounds,
+    const CropRect* secondaryFaceBounds) {
     if (!planes || srcW <= 0 || srcH <= 0 || srcW > 4096 || srcH > 4096 || !outOcclusionR8) {
         return false;
     }
     for (int c = 0; c < 6; ++c) {
         if (!planes[c]) return false;
     }
+    const float invOut = 1.0f / static_cast<float>(kOutSize);
 
     for (int y = 0; y < kOutSize; ++y) {
         const int sy = std::clamp(static_cast<int>((static_cast<int64_t>(y) * srcH) / kOutSize), 0, srcH - 1);
         const size_t srcRow = static_cast<size_t>(sy) * static_cast<size_t>(srcW);
+        const float vNorm = (static_cast<float>(y) + 0.5f) * invOut;
         const int dstRow = y * kOutSize;
         for (int x = 0; x < kOutSize; ++x) {
             const int sx = std::clamp(static_cast<int>((static_cast<int64_t>(x) * srcW) / kOutSize), 0, srcW - 1);
@@ -309,10 +380,15 @@ bool FaceParsingMapper::mapMulticlass6PlanarProbabilities(
             const float invSum = 1.0f / sumP;
             for (int c = 0; c < 6; ++c) p[c] *= invSum;
 
-            const float pSkin = p[2] + p[3];
-            const float rawOccluder = p[1] + p[4] + p[5];
-            const float pOcc = detail::smoothstep(0.62f, 0.90f, rawOccluder - 0.90f * pSkin);
-            const float pHair = detail::smoothstep(0.32f, 0.72f, p[1] - 0.75f * pSkin);
+            const float uNorm = (static_cast<float>(x) + 0.5f) * invOut;
+            const float inner = evalInnerFaceMask(uNorm, vNorm, primaryFaceBounds, secondaryFaceBounds);
+            const float bodyDom = detail::smoothstep(0.10f, 0.30f, p[2] - p[3]);
+            const float handInFace = inner * bodyDom;
+            const float pSkinOcc = p[3] + p[2] * (1.0f - handInFace);
+            const float rawOccluder = p[1] + p[4] + p[5] + p[2] * handInFace;
+            const float pOcc = detail::smoothstep(0.62f, 0.90f, rawOccluder - 0.90f * pSkinOcc);
+            const float pSkinHair = p[2] + p[3];
+            const float pHair = detail::smoothstep(0.32f, 0.72f, p[1] - 0.75f * pSkinHair);
             const float pPerson = detail::clampf(1.0f - p[0], 0.0f, 1.0f);
 
             rawOcc_[idx] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround((1.0f - pOcc) * 255.0f)), 0, 255));

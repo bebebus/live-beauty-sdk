@@ -18,6 +18,9 @@ public:
     TextureId wrapExternalTexture(uint32_t glTexId);
     uint32_t unwrapGlTexture(TextureId tex) const;
 
+    /** Wrap an external GL framebuffer (owned by host) into a reusable RHI RenderTargetId for zero-copy final output. */
+    RenderTargetId wrapExternalFramebuffer(uint32_t glFboId, int width, int height);
+
     /**
      * One-step conversion of Android SurfaceTexture GL_TEXTURE_EXTERNAL_OES into an internal
      * RGBA8 GL_TEXTURE_2D owned by GlesDevice (with 4x4 SurfaceTexture transform matrix).
@@ -37,7 +40,8 @@ public:
     BufferId createStaticIndexBuffer(const uint16_t* indices, size_t count) override;
     void destroyBuffer(BufferId buf) override;
 
-    void beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor) override;
+    using IRhiDevice::beginPass;
+    void beginPass(RenderTargetId rt, int viewportW, int viewportH, LoadOp loadOp, const Vec4& clearColor = {}) override;
     void drawFullScreenQuad(
         ShaderId shader, const RenderState& state,
         const TextureBindings& textures, const UniformBlock& uniforms) override;
@@ -47,6 +51,10 @@ public:
         int indexOffset, int indexCount, VertexLayout layout,
         const TextureBindings& textures, const UniformBlock& uniforms) override;
     void endPass() override;
+    void prewarmShader(ShaderId shader) override;
+    void beginFrameGpuTimer() override;
+    void endFrameGpuTimer() override;
+    int64_t lastGpuFrameTimeNs() const override { return lastGpuFrameTimeNs_; }
 
 private:
     struct ProgramCache {
@@ -62,6 +70,7 @@ private:
         TextureId texId = kInvalidTexture;
         int width = 0;
         int height = 0;
+        bool external = false;
     };
     struct TexRecord {
         uint32_t glTex = 0;
@@ -74,6 +83,7 @@ private:
 
     const ProgramCache& ensureProgram(ShaderId id);
     void ensureQuadVbo();
+    void ensureExtensionsProbed();
     void applyStateAndUniforms(const ProgramCache& pc, const RenderState& state,
                                const TextureBindings& textures, const UniformBlock& uniforms);
     void restoreSharedState();
@@ -90,6 +100,31 @@ private:
     int oesH_ = 0;
     // 0 = unprobed, 1 = GLES3 RGBA16F + HALF_FLOAT, 2 = GLES2 RGBA + HALF_FLOAT_OES + linear, 3 = RGBA8 fallback
     int halfFloatMode_ = 0;
+    bool extProbed_ = false;
+    using FnInvalidateFramebuffer = void (*)(uint32_t, int, const uint32_t*);
+    FnInvalidateFramebuffer fnInvalidateFramebuffer_ = nullptr;
+    FnInvalidateFramebuffer fnDiscardFramebuffer_ = nullptr;
+    // Optional GL_EXT_disjoint_timer_query 3-slot ring for asynchronous GPU frame timing
+    using FnGenQueries = void (*)(int, uint32_t*);
+    using FnDeleteQueries = void (*)(int, const uint32_t*);
+    using FnBeginQuery = void (*)(uint32_t, uint32_t);
+    using FnEndQuery = void (*)(uint32_t);
+    using FnGetQueryObjectuiv = void (*)(uint32_t, uint32_t, uint32_t*);
+    using FnGetQueryObjectui64v = void (*)(uint32_t, uint32_t, uint64_t*);
+    FnGenQueries fnGenQueries_ = nullptr;
+    FnDeleteQueries fnDeleteQueries_ = nullptr;
+    FnBeginQuery fnBeginQuery_ = nullptr;
+    FnEndQuery fnEndQuery_ = nullptr;
+    FnGetQueryObjectuiv fnGetQueryObjectuiv_ = nullptr;
+    FnGetQueryObjectui64v fnGetQueryObjectui64v_ = nullptr;
+    bool timerQuerySupported_ = false;
+    static constexpr int kTimerRingSize = 3;
+    std::array<uint32_t, kTimerRingSize> timerQueries_{};
+    std::array<bool, kTimerRingSize> timerPending_{};
+    int timerSlot_ = 0;
+    bool timerActive_ = false;
+    int64_t lastGpuFrameTimeNs_ = 0;
+
     std::array<ProgramCache, static_cast<size_t>(ShaderId::kCount)> programs_{};
     std::unordered_map<RenderTargetId, RtRecord> rts_;
     std::unordered_map<TextureId, TexRecord> textures_;

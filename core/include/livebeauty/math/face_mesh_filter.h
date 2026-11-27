@@ -114,6 +114,10 @@ private:
     std::array<float, kPoseSize> qRaw_{};
     std::array<float, kPoseSize> qRawPrev_{};
     std::array<float, kPoseSize> dq_{};
+    std::array<float, kPoseSize> instVqPrev_{};
+    bool hasInstVqPrev_ = false;
+    float accPower_ = -1.0f;
+    float accMin_ = 0.0f;
     float cRot_ = 1.0f;
     float sRot_ = 0.0f;
     float p00_ = 1.0f;

@@ -27,7 +27,10 @@ public:
     virtual BufferId createStaticIndexBuffer(const uint16_t* indices, size_t count) = 0;
     virtual void destroyBuffer(BufferId buf) = 0;
 
-    virtual void beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor = {}) = 0;
+    virtual void beginPass(RenderTargetId rt, int viewportW, int viewportH, LoadOp loadOp, const Vec4& clearColor = {}) = 0;
+    void beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor = {}) {
+        beginPass(rt, viewportW, viewportH, clear ? LoadOp::kClear : LoadOp::kDontCare, clearColor);
+    }
     virtual void drawFullScreenQuad(
         ShaderId shader,
         const RenderState& state,
@@ -45,6 +48,10 @@ public:
         const UniformBlock& uniforms) = 0;
     virtual void endPass() = 0;
 
+    virtual void prewarmShader(ShaderId /*shader*/) {}
+    virtual void beginFrameGpuTimer() {}
+    virtual void endFrameGpuTimer() {}
+    virtual int64_t lastGpuFrameTimeNs() const { return 0; }
     virtual void flush() {}
 };
 

@@ -25,32 +25,26 @@ float BeautyQualityTuning::coreThreshold(float lightLuma, float pressure) {
 
 float BeautyQualityTuning::ambientSceneLift(float lightLuma) {
     if (!std::isfinite(lightLuma)) return 0.0f;
-    // v3.6.15 Douyin-style adaptive ambient environment brightness:
-    // - Dim indoor rooms (luma 0.12..0.40): lifts room shadows & midtones (~0.42..0.56)
-    // - Normal indoor lighting (luma 0.40..0.58): airy bright studio room (~0.20..0.42)
-    // - Bright daylight (luma >= 0.76): tapers cleanly to 0.0 to protect bright skies/highlights
-    const float dimBoost = 1.0f - detail::smoothstep(0.14f, 0.46f, lightLuma);
-    const float indoorKeep = 1.0f - detail::smoothstep(0.42f, 0.76f, lightLuma);
-    return detail::clampf(0.30f * indoorKeep + 0.26f * dimBoost, 0.0f, 0.56f);
+    // v3.9.4 (A1/tone-1): Cap low-light ambient compensation strictly to genuinely dark scenes (L < 0.30)
+    // with <= 0.18 ceiling so AE-normalized indoor rooms (L ~ 0.45..0.55) never receive unrequested lift.
+    return 0.18f * (1.0f - detail::smoothstep(0.12f, 0.30f, lightLuma));
 }
 
 float BeautyQualityTuning::indoorTemporalDenoise(float lightLuma) {
     if (!std::isfinite(lightLuma)) return 0.0f;
-    // v3.7.0 Clean-room indoor temporal stabilization weight:
-    // - Very dim light (<= 0.12): 0.18 (strong static sensor noise suppression)
-    // - Normal indoor (0.18..0.34): gentle 0.04..0.11 (steadies skin gate & clarity)
-    // - Bright scenes (>= 0.38): 0.0 (zero temporal cost in daylight)
-    const float dim = 1.0f - detail::smoothstep(0.08f, 0.20f, lightLuma);
-    const float indoor = 1.0f - detail::smoothstep(0.18f, 0.38f, lightLuma);
-    return detail::clampf(0.10f * dim + 0.08f * indoor, 0.0f, 0.18f);
+    // v3.9.4 (A5/tone-2/gpuperf-4): Zero out sub-LSB indoor range (>= 0.12) where 8-bit temporal
+    // denoise was a bit-exact no-op; only engage >= 0.15 in extreme darkness (<= 0.08 full 0.18).
+    const float w = 0.18f * (1.0f - detail::smoothstep(0.08f, 0.14f, lightLuma));
+    return (w >= 0.15f) ? w : 0.0f;
 }
 
 float BeautyQualityTuning::twoStageSmoothMix(float smoothing) {
     if (!std::isfinite(smoothing) || smoothing <= 0.0f) return 0.0f;
     const float s = detail::clampf(smoothing, 0.0f, 1.0f);
-    // Stage 1 (0..0.60): rapid clean skin coverage; Stage 2 (0.60..1.0): full coverage while softening detail keep.
-    const float stage1 = detail::clampf(s / 0.60f, 0.0f, 1.0f);
-    return detail::clampf(stage1 * (0.86f + 0.14f * stage1) * 0.96f, 0.0f, 0.96f);
+    // v3.9.4 (A4/skin-2): Recalibrated smoothing curve leaving headroom above default 0.55
+    // (0.55 -> k ~ 0.58 instead of 0.87) to prevent waxy/plastic skin while keeping 0.96 ceiling at 1.0.
+    const float stage1 = detail::clampf(s / 0.85f, 0.0f, 1.0f);
+    return detail::clampf(stage1 * (0.80f + 0.20f * stage1) * 0.96f, 0.0f, 0.96f);
 }
 
 float BeautyQualityTuning::twoStageDetailKeep(float smoothing) {
@@ -182,45 +176,14 @@ void BeautyQualityTuning::estimateAutoWhiteBalance(
 }
 
 void BeautyQualityTuning::resolveStyleAtmosphere(
-    const std::string& lutUrl, float lutIntensity,
-    int filterStyleId, float filterIntensity,
+    const std::string& /*lutUrl*/, float /*lutIntensity*/,
+    int /*filterStyleId*/, float /*filterIntensity*/,
     float& outBloom, float& outGrain) {
+    // v3.9.4 (D4/tone-5/gpuperf-v1/tone-v2): Do not implicitly attach un-disableable 4-pass Bloom
+    // (which duplicated LUT soft_glow for only 2-6 LSB flat lift) or sub-LSB no-op auto grain.
+    // Users retain full explicit control via config.bloom and config.filmGrain sliders.
     outBloom = 0.0f;
     outGrain = 0.0f;
-    const float ls = std::isfinite(lutIntensity) ? detail::clampf(lutIntensity, 0.0f, 1.0f) : 0.0f;
-    if (!lutUrl.empty() && ls > 1e-4f) {
-        if (lutUrl.find("night_vibe") != std::string::npos) {
-            outBloom = 0.30f * ls;
-            outGrain = 0.14f * ls;
-        } else if (lutUrl.find("soft_film") != std::string::npos) {
-            outBloom = 0.24f * ls;
-            outGrain = 0.10f * ls;
-        } else if (lutUrl.find("champagne_glam") != std::string::npos ||
-                   lutUrl.find("sweet_berry") != std::string::npos) {
-            outBloom = 0.26f * ls;
-            outGrain = 0.06f * ls;
-        } else if (lutUrl.find("pure_pink") != std::string::npos ||
-                   lutUrl.find("korean_glow") != std::string::npos ||
-                   lutUrl.find("peach_milk") != std::string::npos ||
-                   lutUrl.find("japanese_airy") != std::string::npos) {
-            outBloom = 0.20f * ls;
-            outGrain = 0.0f;
-        } else if (lutUrl.find("clear_white") != std::string::npos) {
-            outBloom = 0.12f * ls;
-            outGrain = 0.0f;
-        }
-        return;
-    }
-    const float fs = std::isfinite(filterIntensity) ? detail::clampf(filterIntensity, 0.0f, 1.0f) : 0.0f;
-    if (fs > 1e-4f) {
-        if (filterStyleId == 4) {  // kSepia fallback
-            outBloom = 0.18f * fs;
-            outGrain = 0.08f * fs;
-        } else if (filterStyleId == 1 || filterStyleId == 5) {  // kWarm / kRose fallback
-            outBloom = 0.14f * fs;
-            outGrain = 0.0f;
-        }
-    }
 }
 
 void GuidedSpread::reset() {

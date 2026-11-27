@@ -32,6 +32,8 @@ public:
 
     void submitAllMiss(int64_t sampleTsMs);
     void update(int64_t nowMs);
+    /** If primary slot 0 is empty while secondary slot 1 is active, promote slot 1 -> slot 0 cleanly. */
+    bool promoteSecondaryIfPrimaryEmpty();
 
     FaceTimeline& slot(int idx) { return timelines_[idx]; }
     const FaceTimeline& slot(int idx) const { return timelines_[idx]; }

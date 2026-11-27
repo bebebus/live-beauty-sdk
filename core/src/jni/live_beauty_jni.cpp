@@ -773,6 +773,66 @@ Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHandShield(
 }
 
 JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitBodyMiss(
+    JNIEnv*, jclass, jlong ptr, jlong sampleTsMs) {
+    auto* handle = fromHandle(ptr);
+    if (handle) handle->engine.submitBodyMiss(sampleTsMs);
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetHostLoadLevel(
+    JNIEnv*, jclass, jlong ptr, jint level) {
+    auto* handle = fromHandle(ptr);
+    if (handle) handle->engine.setHostLoadLevel(static_cast<int>(level));
+}
+
+JNIEXPORT void JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativePrewarm(
+    JNIEnv*, jclass, jlong ptr, jint startIdx, jint count) {
+    auto* handle = fromHandle(ptr);
+    if (handle) handle->engine.prewarmShaders(static_cast<int>(startIdx), static_cast<int>(count));
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeProcessFrameToFbo(
+    JNIEnv*, jclass, jlong ptr, jint inputGlTex, jint width, jint height,
+    jlong frameTsMs, jlong nowMs, jint personMaskGlTex, jint hairMaskGlTex,
+    jlong hairMaskStampMs, jfloat lightLuma, jfloat bitrateRatio, jint dstFbo) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || inputGlTex == 0 || dstFbo < 0) return JNI_FALSE;
+    const auto inTex = handle->device.wrapExternalTexture(static_cast<uint32_t>(inputGlTex));
+    const auto maskTex = (personMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(personMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    const auto hairTex = (hairMaskGlTex != 0)
+        ? handle->device.wrapExternalTexture(static_cast<uint32_t>(hairMaskGlTex))
+        : livebeauty::rhi::kInvalidTexture;
+    const auto outRt = handle->device.wrapExternalFramebuffer(static_cast<uint32_t>(dstFbo), width, height);
+    const auto outTex = handle->engine.processFrame(
+        inTex, width, height, frameTsMs, nowMs, maskTex, lightLuma, bitrateRatio, hairTex, hairMaskStampMs, outRt);
+    // When beauty actually processed and wrote to outRt, textureOf(outRt) == kInvalidTexture (outTex != inTex).
+    return (outTex != inTex) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSubmitMulticlassLogitsDirect(
+    JNIEnv* env, jclass, jlong ptr, jobject logitsDirectBuf,
+    jint srcWidth, jint srcHeight, jint padX, jint padY, jint validW, jint validH, jlong sampleTsMs) {
+    auto* handle = fromHandle(ptr);
+    if (!handle || !logitsDirectBuf || srcWidth <= 0 || srcHeight <= 0 ||
+        srcWidth > 2048 || srcHeight > 2048 || validW <= 0 || validH <= 0) {
+        return JNI_FALSE;
+    }
+    auto* raw = static_cast<const float*>(env->GetDirectBufferAddress(logitsDirectBuf));
+    const jlong capBytes = env->GetDirectBufferCapacity(logitsDirectBuf);
+    const jlong neededBytes = static_cast<jlong>(srcWidth) * static_cast<jlong>(srcHeight) * 6LL * static_cast<jlong>(sizeof(float));
+    if (!raw || capBytes < neededBytes) return JNI_FALSE;
+    const bool ok = handle->engine.submitMulticlass6LogitsRegion(
+        raw, srcWidth, srcHeight, padX, padY, validW, validH, sampleTsMs);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
 Java_io_bebebus_livebeauty_NativeBeautyBridge_nativeSetCameraShaking(
     JNIEnv*, jclass, jlong ptr, jboolean shaking) {
     auto* handle = fromHandle(ptr);

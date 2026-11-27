@@ -23,6 +23,18 @@ void MultiFaceTracker::submitAllMiss(int64_t sampleTsMs) {
     for (auto& tl : timelines_) tl.addMiss(sampleTsMs);
 }
 
+bool MultiFaceTracker::promoteSecondaryIfPrimaryEmpty() {
+    const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
+    const bool s1 = hasLastCenter_[1] && timelines_[1].latest() != kTimeInvalid;
+    if (s0 || !s1) return false;
+    std::swap(timelines_[0], timelines_[1]);
+    std::swap(lastCx_[0], lastCx_[1]);
+    std::swap(lastCy_[0], lastCy_[1]);
+    std::swap(hasLastCenter_[0], hasLastCenter_[1]);
+    timelines_[0].bumpRunId();
+    return true;
+}
+
 void MultiFaceTracker::update(int64_t nowMs) {
     for (int i = 0; i < kMaxFaces; ++i) {
         timelines_[i].update(nowMs);
@@ -30,6 +42,7 @@ void MultiFaceTracker::update(int64_t nowMs) {
             hasLastCenter_[i] = false;
         }
     }
+    promoteSecondaryIfPrimaryEmpty();
 }
 
 int MultiFaceTracker::activeFaceCount() const {
@@ -87,6 +100,23 @@ int MultiFaceTracker::submitFaces(
         return 0;
     }
 
+    // Pre-assignment duplicate-face NMS: suppress overlapping detections of the same physical face
+    // so a double-box detector glitch never splits into slot 0 + slot 1 and steals primary tracking.
+    if (validCount == 2) {
+        const float dist = std::sqrt(distSq(parsed[0].cx, parsed[0].cy, parsed[1].cx, parsed[1].cy, aspect));
+        if (dist < 0.45f * std::min(parsed[0].fw, parsed[1].fw)) {
+            const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
+            int keep = (parsed[0].fw >= parsed[1].fw) ? 0 : 1;
+            if (s0) {
+                const float d0 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[0], lastCy_[0], aspect);
+                const float d1 = distSq(parsed[1].cx, parsed[1].cy, lastCx_[0], lastCy_[0], aspect);
+                keep = (d0 <= d1) ? 0 : 1;
+            }
+            if (keep == 1) parsed[0] = parsed[1];
+            validCount = 1;
+        }
+    }
+
     // Slot assignment: assign[slotIdx] = parsedIdx (-1 means miss for that slot)
     int assign[kMaxFaces] = {-1, -1};
     if (validCount == 1) {
@@ -97,7 +127,9 @@ int MultiFaceTracker::submitFaces(
             const float d1 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[1], lastCy_[1], aspect);
             assign[d0 <= d1 ? 0 : 1] = 0;
         } else if (s1 && !s0) {
-            assign[1] = 0;
+            // Primary slot 0 is empty and only one face remains in slot 1: promote slot 1 -> slot 0.
+            promoteSecondaryIfPrimaryEmpty();
+            assign[0] = 0;
         } else {
             assign[0] = 0;
         }

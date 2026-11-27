@@ -78,8 +78,9 @@ public:
     FaceOcclusionSolver();
     void reset();
 
-    /** Extract padded normalized [0..1] face bounding box (and optional in-plane roll angle) from 468/478-pt landmarks. */
-    static bool boundsFromLandmarks(const float* mpXy, int pointCount, CropRect& outBounds, float* outRollRad = nullptr);
+    /** Extract padded normalized [0..1] face bounding box (and optional aspect-corrected in-plane roll angle). */
+    static bool boundsFromLandmarks(const float* mpXy, int pointCount, CropRect& outBounds,
+                                    float* outRollRad = nullptr, float aspect = 1.0f);
 
     /** Compute top-down 64x64 R8 visibility mask (`255` = visible, `0` = occluded). */
     void compute(

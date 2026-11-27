@@ -135,7 +135,7 @@ void FaceOcclusionSolver::reset() {
 }
 
 bool FaceOcclusionSolver::boundsFromLandmarks(
-    const float* mpXy, int pointCount, CropRect& outBounds, float* outRollRad) {
+    const float* mpXy, int pointCount, CropRect& outBounds, float* outRollRad, float aspect) {
     if (!mpXy || pointCount < 468) return false;
     float minX = 1.0f, minY = 1.0f;
     float maxX = 0.0f, maxY = 0.0f;
@@ -157,9 +157,10 @@ bool FaceOcclusionSolver::boundsFromLandmarks(
     const float b = detail::clampf(maxY + padY, t + 0.04f, 1.0f);
     outBounds = {l, t, r - l, b - t};
     if (outRollRad) {
-        // Vertical face axis from forehead(10) to chin(152) in top-down UV: upright is dx=0, dy>0
+        // Vertical face axis from forehead(10) to chin(152) in aspect-corrected top-down coords: upright is dx=0, dy>0
+        const float effAspect = (aspect > 0.05f && std::isfinite(aspect)) ? aspect : 1.0f;
         const float dx = mpXy[152 * 2] - mpXy[10 * 2];
-        const float dy = mpXy[152 * 2 + 1] - mpXy[10 * 2 + 1];
+        const float dy = (mpXy[152 * 2 + 1] - mpXy[10 * 2 + 1]) / effAspect;
         *outRollRad = (std::hypot(dx, dy) > 1e-4f) ? std::atan2(-dx, dy) : 0.0f;
     }
     return true;

@@ -21,6 +21,13 @@ enum class TextureFormat : uint8_t {
     kRgba16f = 2,
 };
 
+/** Tile-GPU render pass color attachment load action (avoids TBDR DRAM tile reload when overwriting). */
+enum class LoadOp : uint8_t {
+    kLoad = 0,
+    kClear = 1,
+    kDontCare = 2,
+};
+
 enum class VertexLayout : uint8_t {
     kQuadPos2Uv2 = 0,       // 4 floats: ndcX, ndcY, u, v
     kMeshPos2Uv2 = 1,       // 4 floats: dstNdcX, dstNdcY, srcU, srcV (FaceMeshDeformer)

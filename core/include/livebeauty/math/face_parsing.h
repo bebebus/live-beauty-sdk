@@ -72,9 +72,11 @@ public:
         uint8_t* outPersonR8 = nullptr);
 
     /**
-     * v3.6: Softmax-map 6-class MediaPipe Selfie Multiclass NHWC logits (`srcH x srcW x 6`:
-     * `[0=bg, 1=hair, 2=body_skin, 3=face_skin, 4=clothes, 5=accessories/glasses/hands]`)
+     * v3.6/v3.9.4: Softmax-map 6-class MediaPipe Selfie Multiclass NHWC logits (`srcH x srcW x 6`:
+     * `[0=bg, 1=hair, 2=body_skin (incl. hands/arms), 3=face_skin, 4=clothes, 5=others/accessories]`)
      * into continuous anti-aliased `128x128` R8 occlusion, hair, and person masks.
+     * Optional `primaryFaceBounds`/`secondaryFaceBounds` (top-down normalized) mark `body_skin`
+     * dominant pixels inside the inner face ellipse as hand occluders for makeup (C1/makeup-1/seg-1).
      */
     bool mapMulticlass6LogitsNhwc(
         const float* logitsNhwc6,
@@ -82,7 +84,27 @@ public:
         int srcH,
         uint8_t* outOcclusionR8,
         uint8_t* outHairR8 = nullptr,
-        uint8_t* outPersonR8 = nullptr);
+        uint8_t* outPersonR8 = nullptr,
+        const CropRect* primaryFaceBounds = nullptr,
+        const CropRect* secondaryFaceBounds = nullptr);
+
+    /**
+     * v3.9.4 (E2/cpuperf-6/seg-5/seg-8): Direct letterbox-region NHWC logits mapping with 2x2 box
+     * sampling directly inside `[padX, padX+validW) x [padY, padY+validH)` (eliminates host unletterbox).
+     */
+    bool mapMulticlass6LogitsNhwcRegion(
+        const float* logitsNhwc6,
+        int srcW,
+        int srcH,
+        int padX,
+        int padY,
+        int validW,
+        int validH,
+        uint8_t* outOcclusionR8,
+        uint8_t* outHairR8 = nullptr,
+        uint8_t* outPersonR8 = nullptr,
+        const CropRect* primaryFaceBounds = nullptr,
+        const CropRect* secondaryFaceBounds = nullptr);
 
     /**
      * v3.9: Direct planar probability ingestion for iOS/Android MediaPipe `ImageSegmenter`
@@ -94,7 +116,9 @@ public:
         int srcH,
         uint8_t* outOcclusionR8,
         uint8_t* outHairR8 = nullptr,
-        uint8_t* outPersonR8 = nullptr);
+        uint8_t* outPersonR8 = nullptr,
+        const CropRect* primaryFaceBounds = nullptr,
+        const CropRect* secondaryFaceBounds = nullptr);
 
     /** Estimate occluded fraction [0..1] inside the lower/mid face region of a top-down R8 visibility mask. */
     static float estimateLowerFaceOcclusion(

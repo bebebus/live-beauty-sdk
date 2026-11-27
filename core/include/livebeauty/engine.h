@@ -84,6 +84,12 @@ public:
     /** P4: Declare device hardware profile once so DeviceTierPolicy can auto-schedule Lite/Standard/Ultra. */
     void setHardwareProfile(const std::string& gpuRenderer, int cpuCores, int totalRamMb);
 
+    /** v3.9.4: Receive host thermal/frame-budget load level (0..3) and unify with internal governor via max(). */
+    void setHostLoadLevel(int level);
+
+    /** v3.9.4: Incrementally prewarm GPU shader programs during preview (startIdx..startIdx+count-1). */
+    void prewarmShaders(int startIdx, int count);
+
     /** P1: Update smoothed ambient illuminant white-balance RGB (normalized ~[0.6..1.4]) for natural makeup tint. */
     void setAmbientRgb(float r, float g, float b);
 
@@ -124,6 +130,16 @@ public:
      * from any worker thread. Softmax-maps anti-aliased `128x128` occlusion, hair, and person masks.
      */
     bool submitMulticlass6Logits(const float* logitsNhwc6, int srcWidth, int srcHeight, int64_t sampleTsMs);
+
+    /**
+     * v3.9.4: Zero-copy letterbox-aware 6-class multiclass logits submission directly from ORT direct buffer
+     * `(srcWidth x srcHeight x 6)` with valid sub-region `(padX, padY, validW, validH)` and 2x2 box sampling.
+     */
+    bool submitMulticlass6LogitsRegion(
+        const float* logitsNhwc6,
+        int srcWidth, int srcHeight,
+        int padX, int padY, int validW, int validH,
+        int64_t sampleTsMs);
 
     /**
      * v3.9: Submit 6 planar confidence mask buffers `[0=bg..5=accessories]` in `[0..1]`
@@ -192,9 +208,10 @@ public:
         float lightLuma = 0.30f,
         float bitrateRatio = 1.0f,
         rhi::TextureId hairMaskTex = rhi::kInvalidTexture,
-        int64_t hairMaskStampMs = kTimeInvalid);
+        int64_t hairMaskStampMs = kTimeInvalid,
+        rhi::RenderTargetId outputRt = rhi::kInvalidRenderTarget);
 
-    int loadLevel() const { return governor_.level(); }
+    int loadLevel() const { return std::max(governor_.level(), hostLoadLevel_.load(std::memory_order_relaxed)); }
     float facePresence() const { return faces_.slot(0).presence(); }
     int activeFaceCount() const { return faces_.activeFaceCount(); }
     const PerfStats& stats() const { return stats_; }
@@ -219,14 +236,20 @@ private:
     int ar3dCount_ = 0;
 
     math::PerformanceTier hardwareTier_ = math::PerformanceTier::kStandard;
+    std::atomic<int> hostLoadLevel_{0};
+    std::atomic<bool> blemishActive_{false};
     Vec3 ambientRgb_ = {1.0f, 1.0f, 1.0f};
+    Vec3 targetAmbientRgb_ = {1.0f, 1.0f, 1.0f};
+    int64_t lastAmbientNowMs_ = kTimeInvalid;
     rhi::TextureId occlusionMaskTex_ = rhi::kInvalidTexture;
     rhi::TextureId aiResidualTex_ = rhi::kInvalidTexture;
     CropRect aiResidualRect_ = CropRect::full();
     float aiResidualStrength_ = 0.0f;
 
     // v3.2 built-in C++17 + NEON occlusion, ROI residual & blendshape expression bus
+    // Heavy worker compute runs under mapperMutex_ so auxMutex_ is held only for ~10us buffer swaps.
     mutable std::mutex auxMutex_;
+    mutable std::mutex mapperMutex_;
     math::FaceOcclusionSolver occlusionSolver_;
     math::FaceRoiResidualSolver residualSolver_;
     math::FaceParsingMapper faceParsingMapper_;
@@ -239,6 +262,7 @@ private:
     bool hasLatestSecFaceBounds_ = false;
     CropRect latestSecFaceBounds_ = CropRect::full();
     bool semanticOccActive_ = false;
+    int64_t lastSemanticSubmitMs_ = kTimeInvalid;
     bool stagedOccDirty_ = false;
     int stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
     int64_t stagedOccTsMs_ = kTimeInvalid;
@@ -281,6 +305,8 @@ private:
     int deformerRunId_ = -1;
     bool hasPendingBody_ = false;
     std::array<float, math::BodyGeometry::kStateSize> pendingBodyState_{};
+    float pendingBodyVis_ = 1.0f;
+    float pendingKneeVis_ = 0.0f;
     std::array<float, math::FaceGeometryConstants::kStateSize> dilatedState_{};
     int64_t pendingBodyTs_ = kTimeInvalid;
 

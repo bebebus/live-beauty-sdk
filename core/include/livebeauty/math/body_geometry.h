@@ -25,6 +25,7 @@ struct BodyGeometry {
     float half = 0.0f;
     float legs = 0.0f;
     float visibility = 1.0f;
+    float kneeVisibility = 0.0f;
 
     void toState(float outState[kStateSize]) const {
         outState[0] = hipX;
@@ -43,13 +44,19 @@ class BodyGeometrySmoother {
 public:
     static constexpr float kHoldMs = 67.0f;
     static constexpr float kFadeOutMs = 100.0f;
+    static constexpr float kLegsRampMs = 300.0f;
 
     float presence() const { return presence_; }
     bool hasState() const { return hasState_; }
     const float* state() const { return hasState_ ? state_.data() : nullptr; }
 
     void reset();
-    const float* update(const float* targetState, int64_t sampleTimestampMs, int64_t nowMs);
+    const float* update(
+        const float* targetState,
+        int64_t sampleTimestampMs,
+        int64_t nowMs,
+        float torsoVis = 1.0f,
+        float kneeVis = -1.0f);
 
 private:
     static constexpr float kAlpha = 0.45f;
@@ -57,6 +64,9 @@ private:
 
     float presence_ = 0.0f;
     bool hasState_ = false;
+    bool legsOn_ = false;
+    int legsDropCount_ = 0;
+    float legsWeight_ = 0.0f;
     std::array<float, BodyGeometry::kStateSize> state_{};
     int64_t ts_ = kTimeInvalid;
     float missing_ = 0.0f;
@@ -64,12 +74,15 @@ private:
 };
 
 struct NeckLift {
-    static void applyFaceState(const float* face41, const float* body7, float neck, float aspect, float* out41);
+    static void applyFaceState(
+        const float* face41, const float* body7, float neck, float aspect, float* out41,
+        float bandOverride = -1.0f);
     static void applyLandmarks(
         const float* landmarks, int coordCount,
         float faceCenterX, float faceCenterY,
         const float* body7, float neck, float aspect,
-        float* outLandmarks);
+        float* outLandmarks,
+        float bandOverride = -1.0f);
 };
 
 }  // namespace livebeauty::math

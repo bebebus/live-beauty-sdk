@@ -495,7 +495,7 @@ float FaceTimeline::presenceAt(int64_t t) {
     if (e < 0) return fadeIn;
     const int idx = (eventHead_ - 1 - e + kEvents) % kEvents;
     const float fastMotion = detail::smoothstep(0.28f, 0.70f, std::max(speed_, sampleMotion_));
-    const float effExitRamp = std::max(kExitRampMs * (1.0f - 0.55f * fastMotion), 12.0f);
+    const float effExitRamp = std::max(kExitRampMs * (1.0f - 0.55f * fastMotion), 30.0f);
     float exitVal = 1.0f;
     if (eventFace_[idx]) {
         if (e == 0) {
@@ -505,7 +505,7 @@ float FaceTimeline::presenceAt(int64_t t) {
         }
     } else {
         const int64_t ms = missRunStart(e);
-        const float effMissDebounce = missDebounceMs() * (1.0f - 0.85f * fastMotion);
+        const float effMissDebounce = std::max(missDebounceMs() * (1.0f - 0.85f * fastMotion), sampleIntervalMs_ + 8.0f);
         const float over = detail::clampf(static_cast<float>(t - ms) - effMissDebounce, 0.0f, effExitRamp);
         exitVal = 1.0f - over / effExitRamp;
     }

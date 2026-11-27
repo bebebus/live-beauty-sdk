@@ -1,5 +1,6 @@
 #include "gles_device.h"
 
+#include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <cstdio>
@@ -76,7 +77,7 @@ GlesDevice::~GlesDevice() {
 void GlesDevice::releaseAll(bool contextAlive) {
     if (contextAlive) {
         for (auto& [id, rt] : rts_) {
-            if (rt.fbo) glDeleteFramebuffers(1, &rt.fbo);
+            if (!rt.external && rt.fbo) glDeleteFramebuffers(1, &rt.fbo);
         }
         for (auto& [id, tex] : textures_) {
             if (!tex.external && tex.glTex) glDeleteTextures(1, &tex.glTex);
@@ -89,6 +90,9 @@ void GlesDevice::releaseAll(bool contextAlive) {
         for (auto& pc : programs_) {
             if (pc.program) glDeleteProgram(pc.program);
         }
+        if (timerQuerySupported_ && fnDeleteQueries_) {
+            fnDeleteQueries_(kTimerRingSize, timerQueries_.data());
+        }
     }
     rts_.clear();
     textures_.clear();
@@ -99,6 +103,21 @@ void GlesDevice::releaseAll(bool contextAlive) {
     oesRt_ = kInvalidRenderTarget;
     oesW_ = oesH_ = 0;
     halfFloatMode_ = 0;
+    extProbed_ = false;
+    fnInvalidateFramebuffer_ = nullptr;
+    fnDiscardFramebuffer_ = nullptr;
+    fnGenQueries_ = nullptr;
+    fnDeleteQueries_ = nullptr;
+    fnBeginQuery_ = nullptr;
+    fnEndQuery_ = nullptr;
+    fnGetQueryObjectuiv_ = nullptr;
+    fnGetQueryObjectui64v_ = nullptr;
+    timerQuerySupported_ = false;
+    timerQueries_.fill(0);
+    timerPending_.fill(false);
+    timerSlot_ = 0;
+    timerActive_ = false;
+    lastGpuFrameTimeNs_ = 0;
     for (auto& pc : programs_) {
         pc = ProgramCache{};
         pc.uniLoc.fill(-1);
@@ -118,6 +137,19 @@ TextureId GlesDevice::wrapExternalTexture(uint32_t glTexId) {
 uint32_t GlesDevice::unwrapGlTexture(TextureId tex) const {
     auto it = textures_.find(tex);
     return (it != textures_.end()) ? it->second.glTex : 0u;
+}
+
+RenderTargetId GlesDevice::wrapExternalFramebuffer(uint32_t glFboId, int width, int height) {
+    for (auto& [id, rec] : rts_) {
+        if (rec.external && rec.fbo == glFboId) {
+            rec.width = width;
+            rec.height = height;
+            return id;
+        }
+    }
+    const RenderTargetId id = nextId_++;
+    rts_[id] = RtRecord{glFboId, kInvalidTexture, width, height, true};
+    return id;
 }
 
 TextureId GlesDevice::convertOesTo2D(uint32_t oesTexId, int width, int height, const float* stMatrix16) {
@@ -248,7 +280,7 @@ RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureForm
         const TextureId texId = nextId_++;
         textures_[texId] = TexRecord{glTex, false};
         const RenderTargetId rtId = nextId_++;
-        rts_[rtId] = RtRecord{fbo, texId, width, height};
+        rts_[rtId] = RtRecord{fbo, texId, width, height, false};
         return rtId;
     }
 
@@ -260,15 +292,17 @@ RenderTargetId GlesDevice::createRenderTarget(int width, int height, TextureForm
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, unwrapGlTexture(texId), 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     const RenderTargetId rtId = nextId_++;
-    rts_[rtId] = RtRecord{fbo, texId, width, height};
+    rts_[rtId] = RtRecord{fbo, texId, width, height, false};
     return rtId;
 }
 
 void GlesDevice::destroyRenderTarget(RenderTargetId rt) {
     auto it = rts_.find(rt);
     if (it == rts_.end()) return;
-    if (it->second.fbo) glDeleteFramebuffers(1, &it->second.fbo);
-    destroyTexture(it->second.texId);
+    if (!it->second.external) {
+        if (it->second.fbo) glDeleteFramebuffers(1, &it->second.fbo);
+        destroyTexture(it->second.texId);
+    }
     rts_.erase(it);
 }
 
@@ -407,15 +441,98 @@ const GlesDevice::ProgramCache& GlesDevice::ensureProgram(ShaderId id) {
     return pc;
 }
 
-void GlesDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor) {
+void GlesDevice::ensureExtensionsProbed() {
+    if (extProbed_) return;
+    extProbed_ = true;
+    const char* ver = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+    const bool isEs3 = ver && (std::strstr(ver, "OpenGL ES 3.") != nullptr);
+    if (isEs3) {
+        fnInvalidateFramebuffer_ = reinterpret_cast<FnInvalidateFramebuffer>(
+            eglGetProcAddress("glInvalidateFramebuffer"));
+    }
+    if (!fnInvalidateFramebuffer_ && hasGlExtension("GL_EXT_discard_framebuffer")) {
+        fnDiscardFramebuffer_ = reinterpret_cast<FnInvalidateFramebuffer>(
+            eglGetProcAddress("glDiscardFramebufferEXT"));
+    }
+    if (hasGlExtension("GL_EXT_disjoint_timer_query")) {
+        fnGenQueries_ = reinterpret_cast<FnGenQueries>(eglGetProcAddress("glGenQueriesEXT"));
+        fnDeleteQueries_ = reinterpret_cast<FnDeleteQueries>(eglGetProcAddress("glDeleteQueriesEXT"));
+        fnBeginQuery_ = reinterpret_cast<FnBeginQuery>(eglGetProcAddress("glBeginQueryEXT"));
+        fnEndQuery_ = reinterpret_cast<FnEndQuery>(eglGetProcAddress("glEndQueryEXT"));
+        fnGetQueryObjectuiv_ = reinterpret_cast<FnGetQueryObjectuiv>(eglGetProcAddress("glGetQueryObjectuivEXT"));
+        fnGetQueryObjectui64v_ = reinterpret_cast<FnGetQueryObjectui64v>(eglGetProcAddress("glGetQueryObjectui64vEXT"));
+        if (fnGenQueries_ && fnDeleteQueries_ && fnBeginQuery_ && fnEndQuery_ &&
+            fnGetQueryObjectuiv_ && fnGetQueryObjectui64v_) {
+            fnGenQueries_(kTimerRingSize, timerQueries_.data());
+            timerQuerySupported_ = (timerQueries_[0] != 0);
+        }
+    }
+}
+
+void GlesDevice::prewarmShader(ShaderId shader) {
+    if (static_cast<size_t>(shader) < static_cast<size_t>(ShaderId::kCount)) {
+        (void)ensureProgram(shader);
+    }
+}
+
+void GlesDevice::beginFrameGpuTimer() {
+    ensureExtensionsProbed();
+    if (!timerQuerySupported_) return;
+    constexpr uint32_t kGlTimeElapsedExt = 0x88BF;
+    constexpr uint32_t kGlQueryResultAvailableExt = 0x8867;
+    constexpr uint32_t kGlQueryResultExt = 0x8866;
+    constexpr uint32_t kGlGpuDisjointExt = 0x8FBB;
+    // Harvest oldest pending query (non-blocking)
+    if (timerPending_[timerSlot_]) {
+        uint32_t avail = 0;
+        fnGetQueryObjectuiv_(timerQueries_[timerSlot_], kGlQueryResultAvailableExt, &avail);
+        if (avail) {
+            GLint disjoint = 0;
+            glGetIntegerv(kGlGpuDisjointExt, &disjoint);
+            uint64_t elapsedNs = 0;
+            fnGetQueryObjectui64v_(timerQueries_[timerSlot_], kGlQueryResultExt, &elapsedNs);
+            if (!disjoint && elapsedNs > 0 && elapsedNs < 500000000ULL) {
+                lastGpuFrameTimeNs_ = static_cast<int64_t>(elapsedNs);
+            }
+            timerPending_[timerSlot_] = false;
+        }
+    }
+    if (!timerPending_[timerSlot_]) {
+        fnBeginQuery_(kGlTimeElapsedExt, timerQueries_[timerSlot_]);
+        timerActive_ = true;
+    }
+}
+
+void GlesDevice::endFrameGpuTimer() {
+    if (!timerActive_ || !timerQuerySupported_) return;
+    constexpr uint32_t kGlTimeElapsedExt = 0x88BF;
+    fnEndQuery_(kGlTimeElapsedExt);
+    timerActive_ = false;
+    timerPending_[timerSlot_] = true;
+    timerSlot_ = (timerSlot_ + 1) % kTimerRingSize;
+}
+
+void GlesDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, LoadOp loadOp, const Vec4& clearColor) {
+    ensureExtensionsProbed();
     auto it = rts_.find(rt);
-    glBindFramebuffer(GL_FRAMEBUFFER, (it != rts_.end()) ? it->second.fbo : 0);
+    const uint32_t fbo = (it != rts_.end()) ? it->second.fbo : 0u;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, viewportW, viewportH);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
-    if (clear) {
+    if (loadOp == LoadOp::kClear) {
         glClearColor(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
         glClear(GL_COLOR_BUFFER_BIT);
+    } else if (loadOp == LoadOp::kDontCare) {
+        // TBDR tile-load discard: use glInvalidateFramebuffer (ES3) or glDiscardFramebufferEXT (ES2).
+        // Never fall back to glClear here (on IMR / older drivers glClear triggers a full-screen write).
+        constexpr uint32_t kGlColorExt = 0x1800;
+        const uint32_t att = (fbo != 0u) ? static_cast<uint32_t>(GL_COLOR_ATTACHMENT0) : kGlColorExt;
+        if (fnInvalidateFramebuffer_) {
+            fnInvalidateFramebuffer_(GL_FRAMEBUFFER, 1, &att);
+        } else if (fnDiscardFramebuffer_) {
+            fnDiscardFramebuffer_(GL_FRAMEBUFFER, 1, &att);
+        }
     }
 }
 

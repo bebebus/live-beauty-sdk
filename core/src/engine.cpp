@@ -66,7 +66,13 @@ LiveBeautyEngine::~LiveBeautyEngine() {
 }
 
 void LiveBeautyEngine::setConfig(const BeautyConfig& config) {
+    if (config.hasBodyReshape() && !config_.hasBodyReshape()) {
+        bodySmoother_.reset();
+        hasPendingBody_ = false;
+        pendingBodyTs_ = kTimeInvalid;
+    }
     config_ = config;
+    blemishActive_.store(config_.blemishRemove > 0.05f, std::memory_order_relaxed);
 }
 
 void LiveBeautyEngine::resetTracking() {
@@ -78,18 +84,25 @@ void LiveBeautyEngine::resetTracking() {
     pipeline_.resetTemporal();
     hasPendingBody_ = false;
     pendingBodyTs_ = kTimeInvalid;
+    pendingBodyVis_ = 1.0f;
+    pendingKneeVis_ = 0.0f;
     {
         std::lock_guard<std::mutex> lock(auxMutex_);
-        occlusionSolver_.reset();
-        faceParsingMapper_.reset();
+        {
+            std::lock_guard<std::mutex> mlock(mapperMutex_);
+            occlusionSolver_.reset();
+            faceParsingMapper_.reset();
+        }
         expressionBus_.reset();
         particleSolver_.reset();
         activeGesture_ = math::GestureType::kNone;
         activeGestureUntilMs_ = kTimeInvalid;
         handShieldCoords_ = {-10.0f, -10.0f, -10.0f, -10.0f};
         hasLatestFaceBounds_ = false;
+        hasLatestSecFaceBounds_ = false;
         latestFaceRollRad_ = 0.0f;
         semanticOccActive_ = false;
+        lastSemanticSubmitMs_ = kTimeInvalid;
         stagedOccDirty_ = false;
         stagedOccTsMs_ = kTimeInvalid;
         stagedParseHairDirty_ = false;
@@ -104,6 +117,7 @@ void LiveBeautyEngine::resetTracking() {
     autoParseHairValid_ = false;
     autoParseHairTsMs_ = kTimeInvalid;
     autoParsePersonValid_ = false;
+    lastAmbientNowMs_ = kTimeInvalid;
 }
 
 void LiveBeautyEngine::releaseGpuResources() {
@@ -256,12 +270,28 @@ void LiveBeautyEngine::setHardwareProfile(const std::string& gpuRenderer, int cp
     hardwareTier_ = math::DeviceTierPolicy::classify(gpuRenderer, cpuCores, totalRamMb);
 }
 
+void LiveBeautyEngine::setHostLoadLevel(int level) {
+    hostLoadLevel_.store(std::clamp(level, 0, 3), std::memory_order_relaxed);
+}
+
+void LiveBeautyEngine::prewarmShaders(int startIdx, int count) {
+    const int total = static_cast<int>(rhi::ShaderId::kCount);
+    const int from = std::max(0, startIdx);
+    const int to = std::min(total, from + std::max(0, count));
+    for (int i = from; i < to; ++i) {
+        device_.prewarmShader(static_cast<rhi::ShaderId>(i));
+    }
+}
+
 void LiveBeautyEngine::setAmbientRgb(float r, float g, float b) {
-    ambientRgb_ = {
+    targetAmbientRgb_ = {
         detail::clampf(r, 0.65f, 1.35f),
         detail::clampf(g, 0.65f, 1.35f),
         detail::clampf(b, 0.65f, 1.35f),
     };
+    if (lastAmbientNowMs_ == kTimeInvalid) {
+        ambientRgb_ = targetAmbientRgb_;
+    }
 }
 
 void LiveBeautyEngine::setOcclusionMask(rhi::TextureId occlusionMaskTex) {
@@ -290,157 +320,291 @@ bool LiveBeautyEngine::submitAuxRgbaSample(
     int srcHeight,
     float retouchStrength) {
     if (!rgbaTopDown || srcWidth <= 0 || srcHeight <= 0) return false;
-    std::lock_guard<std::mutex> lock(auxMutex_);
-    if (!hasLatestFaceBounds_) {
-        stagedResidualActive_ = false;
-        stagedResidualDirty_ = true;
-        return false;
-    }
-    const CropRect bounds = latestFaceBounds_;
-    const float rollRad = latestFaceRollRad_;
-    // Do not overwrite 128x128 19-class semantic parsing mask when active
-    if (!semanticOccActive_) {
-        occlusionSolver_.compute(rgbaTopDown, srcWidth, srcHeight, &bounds, stagedOccMask_.data(), rollRad);
-        stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
-        stagedOccTsMs_ = kTimeInvalid;
-        stagedLowerFaceOcc_ = occlusionSolver_.lowerFaceOcclusion();
-        stagedOccDirty_ = true;
-    }
-    const float clampedStrength = detail::clampf(retouchStrength, 0.0f, 1.0f);
-    std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> biRes{};
-    std::array<uint8_t, math::NeuralSkinResidualAdapter::kOutPixels * 4> microRes{};
-    if (clampedStrength > 0.02f &&
-        residualSolver_.compute(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, biRes.data(), rollRad) &&
-        neuralResidualAdapter_.evaluateMicroKernel(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, microRes.data(), rollRad)) {
-        // Combine bilateral chroma de-speckling + multi-scale depthwise-separable structural shadow lift
-        for (size_t i = 0; i < stagedResidualRgba_.size(); i += 4) {
-            for (size_t c = 0; c < 3; ++c) {
-                const int d0 = static_cast<int>(biRes[i + c]) - 128;
-                const int d1 = static_cast<int>(microRes[i + c]) - 128;
-                stagedResidualRgba_[i + c] = static_cast<uint8_t>(std::clamp(128 + d0 + (d1 * 3) / 4, 0, 255));
-            }
-            stagedResidualRgba_[i + 3] = std::max(biRes[i + 3], microRes[i + 3]);
+    bool hasBounds = false;
+    CropRect bounds{};
+    float rollRad = 0.0f;
+    bool semanticAlive = false;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasBounds = hasLatestFaceBounds_;
+        bounds = latestFaceBounds_;
+        rollRad = latestFaceRollRad_;
+        semanticAlive = semanticOccActive_;
+        if (!hasBounds) {
+            stagedResidualActive_ = false;
+            stagedResidualDirty_ = true;
+            return false;
         }
-        stagedResidualActive_ = true;
-        stagedResidualRect_ = bounds;
-        stagedResidualStrength_ = clampedStrength;
-    } else {
-        stagedResidualActive_ = false;
-        stagedResidualStrength_ = 0.0f;
     }
-    stagedResidualDirty_ = true;
+
+    // Run heavy NEON occlusion & ROI residual compute under mapperMutex_ (never blocks GL thread's auxMutex_).
+    std::array<uint8_t, math::FaceOcclusionSolver::kMaskPixels> localOcc{};
+    float localLowerOcc = 0.0f;
+    bool computedOcc = false;
+
+    const float clampedStrength = detail::clampf(retouchStrength, 0.0f, 1.0f);
+    const bool wantResidual = (clampedStrength > 0.02f) && blemishActive_.load(std::memory_order_relaxed);
+    std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> localResidual{};
+    bool computedResidual = false;
+    {
+        std::lock_guard<std::mutex> mlock(mapperMutex_);
+        if (!semanticAlive) {
+            occlusionSolver_.compute(rgbaTopDown, srcWidth, srcHeight, &bounds, localOcc.data(), rollRad);
+            localLowerOcc = occlusionSolver_.lowerFaceOcclusion();
+            computedOcc = true;
+        }
+        if (wantResidual) {
+            std::array<uint8_t, math::FaceRoiResidualSolver::kRoiPixels * 4> biRes{};
+            std::array<uint8_t, math::NeuralSkinResidualAdapter::kOutPixels * 4> microRes{};
+            if (residualSolver_.compute(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, biRes.data(), rollRad) &&
+                neuralResidualAdapter_.evaluateMicroKernel(rgbaTopDown, srcWidth, srcHeight, bounds, clampedStrength, microRes.data(), rollRad)) {
+                for (size_t i = 0; i < localResidual.size(); i += 4) {
+                    for (size_t c = 0; c < 3; ++c) {
+                        const int d0 = static_cast<int>(biRes[i + c]) - 128;
+                        const int d1 = static_cast<int>(microRes[i + c]) - 128;
+                        localResidual[i + c] = static_cast<uint8_t>(std::clamp(128 + d0 + (d1 * 3) / 4, 0, 255));
+                    }
+                    localResidual[i + 3] = std::max(biRes[i + 3], microRes[i + 3]);
+                }
+                computedResidual = true;
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        if (computedOcc && !semanticOccActive_) {
+            std::copy(localOcc.begin(), localOcc.end(), stagedOccMask_.begin());
+            stagedOccSize_ = math::FaceOcclusionSolver::kMaskSize;
+            stagedOccTsMs_ = kTimeInvalid;
+            stagedLowerFaceOcc_ = localLowerOcc;
+            stagedOccDirty_ = true;
+        }
+        if (computedResidual) {
+            stagedResidualRgba_ = localResidual;
+            stagedResidualActive_ = true;
+            stagedResidualRect_ = bounds;
+            stagedResidualStrength_ = clampedStrength;
+        } else {
+            stagedResidualActive_ = false;
+            stagedResidualStrength_ = 0.0f;
+        }
+        stagedResidualDirty_ = true;
+    }
     return true;
 }
 
 bool LiveBeautyEngine::submitFaceParsingClassMap(
     const uint8_t* classIds, int srcWidth, int srcHeight, int64_t sampleTsMs) {
     if (!classIds || srcWidth <= 0 || srcHeight <= 0) return false;
-    std::lock_guard<std::mutex> lock(auxMutex_);
-    if (!faceParsingMapper_.mapClassIds(
-            classIds, srcWidth, srcHeight, stagedOccMask_.data(), stagedParseHair_.data(), nullptr)) {
-        return false;
+    bool hasP = false, hasS = false;
+    CropRect pBounds{}, sBounds{};
+    int64_t prevSemMs = kTimeInvalid;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasP = hasLatestFaceBounds_;
+        pBounds = latestFaceBounds_;
+        hasS = hasLatestSecFaceBounds_;
+        sBounds = latestSecFaceBounds_;
+        prevSemMs = lastSemanticSubmitMs_;
     }
-    semanticOccActive_ = true;
-    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
-    stagedOccTsMs_ = sampleTsMs;
-    stagedLowerFaceOcc_ = hasLatestFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
-        : 0.0f;
-    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
-        : 0.0f;
-    restrictOccMaskToFaces(
-        stagedOccMask_.data(), stagedOccSize_,
-        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
-        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
-    stagedOccDirty_ = true;
-    stagedParseHairDirty_ = true;
-    stagedParseHairTsMs_ = sampleTsMs;
+
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localOcc{};
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localHair{};
+    {
+        std::lock_guard<std::mutex> mlock(mapperMutex_);
+        if (prevSemMs != kTimeInvalid && std::llabs(sampleTsMs - prevSemMs) > 800) {
+            faceParsingMapper_.reset();
+        }
+        if (!faceParsingMapper_.mapClassIds(
+                classIds, srcWidth, srcHeight, localOcc.data(), localHair.data(), nullptr)) {
+            return false;
+        }
+    }
+    const int outS = math::FaceParsingMapper::kOutSize;
+    const float lowerOcc = hasP ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, pBounds) : 0.0f;
+    const float secLowerOcc = hasS ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, sBounds) : 0.0f;
+    restrictOccMaskToFaces(localOcc.data(), outS, hasP ? &pBounds : nullptr, hasS ? &sBounds : nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        stagedOccMask_ = localOcc;
+        stagedParseHair_ = localHair;
+        semanticOccActive_ = true;
+        lastSemanticSubmitMs_ = sampleTsMs;
+        stagedOccSize_ = outS;
+        stagedOccTsMs_ = sampleTsMs;
+        stagedLowerFaceOcc_ = lowerOcc;
+        stagedSecLowerFaceOcc_ = secLowerOcc;
+        stagedOccDirty_ = true;
+        stagedParseHairDirty_ = true;
+        stagedParseHairTsMs_ = sampleTsMs;
+    }
     return true;
 }
 
 bool LiveBeautyEngine::submitFaceParsingLogits(
     const float* logitsNchw, int numClasses, int srcWidth, int srcHeight, int64_t sampleTsMs) {
     if (!logitsNchw || numClasses < 19 || srcWidth <= 0 || srcHeight <= 0) return false;
-    std::lock_guard<std::mutex> lock(auxMutex_);
-    if (!faceParsingMapper_.mapLogitsNchw(
-            logitsNchw, numClasses, srcWidth, srcHeight, stagedOccMask_.data(), stagedParseHair_.data(), nullptr)) {
-        return false;
+    bool hasP = false, hasS = false;
+    CropRect pBounds{}, sBounds{};
+    int64_t prevSemMs = kTimeInvalid;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasP = hasLatestFaceBounds_;
+        pBounds = latestFaceBounds_;
+        hasS = hasLatestSecFaceBounds_;
+        sBounds = latestSecFaceBounds_;
+        prevSemMs = lastSemanticSubmitMs_;
     }
-    semanticOccActive_ = true;
-    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
-    stagedOccTsMs_ = sampleTsMs;
-    stagedLowerFaceOcc_ = hasLatestFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
-        : 0.0f;
-    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
-        : 0.0f;
-    restrictOccMaskToFaces(
-        stagedOccMask_.data(), stagedOccSize_,
-        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
-        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
-    stagedOccDirty_ = true;
-    stagedParseHairDirty_ = true;
-    stagedParseHairTsMs_ = sampleTsMs;
+
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localOcc{};
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localHair{};
+    {
+        std::lock_guard<std::mutex> mlock(mapperMutex_);
+        if (prevSemMs != kTimeInvalid && std::llabs(sampleTsMs - prevSemMs) > 800) {
+            faceParsingMapper_.reset();
+        }
+        if (!faceParsingMapper_.mapLogitsNchw(
+                logitsNchw, numClasses, srcWidth, srcHeight, localOcc.data(), localHair.data(), nullptr)) {
+            return false;
+        }
+    }
+    const int outS = math::FaceParsingMapper::kOutSize;
+    const float lowerOcc = hasP ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, pBounds) : 0.0f;
+    const float secLowerOcc = hasS ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, sBounds) : 0.0f;
+    restrictOccMaskToFaces(localOcc.data(), outS, hasP ? &pBounds : nullptr, hasS ? &sBounds : nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        stagedOccMask_ = localOcc;
+        stagedParseHair_ = localHair;
+        semanticOccActive_ = true;
+        lastSemanticSubmitMs_ = sampleTsMs;
+        stagedOccSize_ = outS;
+        stagedOccTsMs_ = sampleTsMs;
+        stagedLowerFaceOcc_ = lowerOcc;
+        stagedSecLowerFaceOcc_ = secLowerOcc;
+        stagedOccDirty_ = true;
+        stagedParseHairDirty_ = true;
+        stagedParseHairTsMs_ = sampleTsMs;
+    }
     return true;
 }
 
 bool LiveBeautyEngine::submitMulticlass6Logits(
     const float* logitsNhwc6, int srcWidth, int srcHeight, int64_t sampleTsMs) {
-    if (!logitsNhwc6 || srcWidth <= 0 || srcHeight <= 0) return false;
-    std::lock_guard<std::mutex> lock(auxMutex_);
-    if (!faceParsingMapper_.mapMulticlass6LogitsNhwc(
-            logitsNhwc6, srcWidth, srcHeight,
-            stagedOccMask_.data(), stagedParseHair_.data(), stagedParsePerson_.data())) {
-        return false;
+    return submitMulticlass6LogitsRegion(logitsNhwc6, srcWidth, srcHeight, 0, 0, srcWidth, srcHeight, sampleTsMs);
+}
+
+bool LiveBeautyEngine::submitMulticlass6LogitsRegion(
+    const float* logitsNhwc6,
+    int srcWidth, int srcHeight,
+    int padX, int padY, int validW, int validH,
+    int64_t sampleTsMs) {
+    if (!logitsNhwc6 || srcWidth <= 0 || srcHeight <= 0 || validW <= 0 || validH <= 0) return false;
+    bool hasP = false, hasS = false;
+    CropRect pBounds{}, sBounds{};
+    int64_t prevSemMs = kTimeInvalid;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasP = hasLatestFaceBounds_;
+        pBounds = latestFaceBounds_;
+        hasS = hasLatestSecFaceBounds_;
+        sBounds = latestSecFaceBounds_;
+        prevSemMs = lastSemanticSubmitMs_;
     }
-    semanticOccActive_ = true;
-    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
-    stagedOccTsMs_ = sampleTsMs;
-    stagedLowerFaceOcc_ = hasLatestFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
-        : 0.0f;
-    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
-        : 0.0f;
-    restrictOccMaskToFaces(
-        stagedOccMask_.data(), stagedOccSize_,
-        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
-        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
-    stagedOccDirty_ = true;
-    stagedParseHairDirty_ = true;
-    stagedParseHairTsMs_ = sampleTsMs;
-    stagedParsePersonDirty_ = true;
+
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localOcc{};
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localHair{};
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localPerson{};
+    {
+        std::lock_guard<std::mutex> mlock(mapperMutex_);
+        if (prevSemMs != kTimeInvalid && std::llabs(sampleTsMs - prevSemMs) > 800) {
+            faceParsingMapper_.reset();
+        }
+        if (!faceParsingMapper_.mapMulticlass6LogitsNhwcRegion(
+                logitsNhwc6, srcWidth, srcHeight, padX, padY, validW, validH,
+                localOcc.data(), localHair.data(), localPerson.data(),
+                hasP ? &pBounds : nullptr, hasS ? &sBounds : nullptr)) {
+            return false;
+        }
+    }
+    const int outS = math::FaceParsingMapper::kOutSize;
+    const float lowerOcc = hasP ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, pBounds) : 0.0f;
+    const float secLowerOcc = hasS ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, sBounds) : 0.0f;
+    restrictOccMaskToFaces(localOcc.data(), outS, hasP ? &pBounds : nullptr, hasS ? &sBounds : nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        stagedOccMask_ = localOcc;
+        stagedParseHair_ = localHair;
+        stagedParsePerson_ = localPerson;
+        semanticOccActive_ = true;
+        lastSemanticSubmitMs_ = sampleTsMs;
+        stagedOccSize_ = outS;
+        stagedOccTsMs_ = sampleTsMs;
+        stagedLowerFaceOcc_ = lowerOcc;
+        stagedSecLowerFaceOcc_ = secLowerOcc;
+        stagedOccDirty_ = true;
+        stagedParseHairDirty_ = true;
+        stagedParseHairTsMs_ = sampleTsMs;
+        stagedParsePersonDirty_ = true;
+    }
     return true;
 }
 
 bool LiveBeautyEngine::submitMulticlass6Planar(
     const float* const planes[6], int srcWidth, int srcHeight, int64_t sampleTsMs) {
     if (!planes || srcWidth <= 0 || srcHeight <= 0) return false;
-    std::lock_guard<std::mutex> lock(auxMutex_);
-    if (!faceParsingMapper_.mapMulticlass6PlanarProbabilities(
-            planes, srcWidth, srcHeight,
-            stagedOccMask_.data(), stagedParseHair_.data(), stagedParsePerson_.data())) {
-        return false;
+    bool hasP = false, hasS = false;
+    CropRect pBounds{}, sBounds{};
+    int64_t prevSemMs = kTimeInvalid;
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasP = hasLatestFaceBounds_;
+        pBounds = latestFaceBounds_;
+        hasS = hasLatestSecFaceBounds_;
+        sBounds = latestSecFaceBounds_;
+        prevSemMs = lastSemanticSubmitMs_;
     }
-    semanticOccActive_ = true;
-    stagedOccSize_ = math::FaceParsingMapper::kOutSize;
-    stagedOccTsMs_ = sampleTsMs;
-    stagedLowerFaceOcc_ = hasLatestFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestFaceBounds_)
-        : 0.0f;
-    stagedSecLowerFaceOcc_ = hasLatestSecFaceBounds_
-        ? math::FaceParsingMapper::estimateLowerFaceOcclusion(stagedOccMask_.data(), stagedOccSize_, latestSecFaceBounds_)
-        : 0.0f;
-    restrictOccMaskToFaces(
-        stagedOccMask_.data(), stagedOccSize_,
-        hasLatestFaceBounds_ ? &latestFaceBounds_ : nullptr,
-        hasLatestSecFaceBounds_ ? &latestSecFaceBounds_ : nullptr);
-    stagedOccDirty_ = true;
-    stagedParseHairDirty_ = true;
-    stagedParseHairTsMs_ = sampleTsMs;
-    stagedParsePersonDirty_ = true;
+
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localOcc{};
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localHair{};
+    std::array<uint8_t, math::FaceParsingMapper::kOutPixels> localPerson{};
+    {
+        std::lock_guard<std::mutex> mlock(mapperMutex_);
+        if (prevSemMs != kTimeInvalid && std::llabs(sampleTsMs - prevSemMs) > 800) {
+            faceParsingMapper_.reset();
+        }
+        if (!faceParsingMapper_.mapMulticlass6PlanarProbabilities(
+                planes, srcWidth, srcHeight,
+                localOcc.data(), localHair.data(), localPerson.data(),
+                hasP ? &pBounds : nullptr, hasS ? &sBounds : nullptr)) {
+            return false;
+        }
+    }
+    const int outS = math::FaceParsingMapper::kOutSize;
+    const float lowerOcc = hasP ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, pBounds) : 0.0f;
+    const float secLowerOcc = hasS ? math::FaceParsingMapper::estimateLowerFaceOcclusion(localOcc.data(), outS, sBounds) : 0.0f;
+    restrictOccMaskToFaces(localOcc.data(), outS, hasP ? &pBounds : nullptr, hasS ? &sBounds : nullptr);
+
+    {
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        stagedOccMask_ = localOcc;
+        stagedParseHair_ = localHair;
+        stagedParsePerson_ = localPerson;
+        semanticOccActive_ = true;
+        lastSemanticSubmitMs_ = sampleTsMs;
+        stagedOccSize_ = outS;
+        stagedOccTsMs_ = sampleTsMs;
+        stagedLowerFaceOcc_ = lowerOcc;
+        stagedSecLowerFaceOcc_ = secLowerOcc;
+        stagedOccDirty_ = true;
+        stagedParseHairDirty_ = true;
+        stagedParseHairTsMs_ = sampleTsMs;
+        stagedParsePersonDirty_ = true;
+    }
     return true;
 }
 
@@ -535,7 +699,7 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
             CropRect fb{};
             float roll = 0.0f;
             if (math::FaceOcclusionSolver::boundsFromLandmarks(
-                    faces[bestIdx].mpXy, faces[bestIdx].pointCount, fb, &roll)) {
+                    faces[bestIdx].mpXy, faces[bestIdx].pointCount, fb, &roll, aspect)) {
                 std::lock_guard<std::mutex> lock(auxMutex_);
                 latestFaceBounds_ = fb;
                 latestFaceRollRad_ = roll;
@@ -546,7 +710,7 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
             CropRect secFb{};
             for (int i = 0; i < cappedCount; ++i) {
                 if (i == bestIdx || !faces[i].mpXy || faces[i].pointCount < 468) continue;
-                if (math::FaceOcclusionSolver::boundsFromLandmarks(faces[i].mpXy, faces[i].pointCount, secFb)) {
+                if (math::FaceOcclusionSolver::boundsFromLandmarks(faces[i].mpXy, faces[i].pointCount, secFb, nullptr, aspect)) {
                     foundSec = true;
                     break;
                 }
@@ -555,6 +719,11 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
             hasLatestSecFaceBounds_ = foundSec;
             if (foundSec) latestSecFaceBounds_ = secFb;
         }
+    } else if (valid > 0 && fw <= 0.0f) {
+        // Primary slot 0 was not assigned in this submission (only secondary face present): clear stale primary bounds.
+        std::lock_guard<std::mutex> lock(auxMutex_);
+        hasLatestFaceBounds_ = false;
+        latestFaceRollRad_ = 0.0f;
     } else if (valid == 0) {
         std::lock_guard<std::mutex> lock(auxMutex_);
         hasLatestFaceBounds_ = false;
@@ -593,6 +762,8 @@ bool LiveBeautyEngine::submitBodyPose(
         return false;
     }
     bg.toState(pendingBodyState_.data());
+    pendingBodyVis_ = bg.visibility;
+    pendingKneeVis_ = bg.kneeVisibility;
     pendingBodyTs_ = sampleTsMs;
     hasPendingBody_ = true;
     return true;
@@ -600,6 +771,8 @@ bool LiveBeautyEngine::submitBodyPose(
 
 void LiveBeautyEngine::submitBodyMiss(int64_t /*sampleTsMs*/) {
     hasPendingBody_ = false;
+    pendingBodyVis_ = 0.0f;
+    pendingKneeVis_ = 0.0f;
 }
 
 CropRect LiveBeautyEngine::selectFaceRoi(int frameWidth, int frameHeight, int64_t nowMs) {
@@ -623,7 +796,8 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     float lightLuma,
     float bitrateRatio,
     rhi::TextureId hairMaskTex,
-    int64_t hairMaskStampMs) {
+    int64_t hairMaskStampMs,
+    rhi::RenderTargetId outputRt) {
     if (width <= 0 || height <= 0 || inputTexture == rhi::kInvalidTexture) return inputTexture;
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     if (width != lastWidth_ || height != lastHeight_) {
@@ -632,9 +806,22 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         lastHeight_ = height;
     }
 
+    // Smooth ambient RGB damping (tau = 4000ms) prevents sudden WB flicker when moving across lamps.
+    if (lastAmbientNowMs_ != kTimeInvalid && nowMs > lastAmbientNowMs_) {
+        const float dtAmb = static_cast<float>(std::min<int64_t>(nowMs - lastAmbientNowMs_, 500));
+        const float aAmb = 1.0f - std::exp(-dtAmb / 4000.0f);
+        ambientRgb_.x += aAmb * (targetAmbientRgb_.x - ambientRgb_.x);
+        ambientRgb_.y += aAmb * (targetAmbientRgb_.y - ambientRgb_.y);
+        ambientRgb_.z += aAmb * (targetAmbientRgb_.z - ambientRgb_.z);
+    } else {
+        ambientRgb_ = targetAmbientRgb_;
+    }
+    lastAmbientNowMs_ = nowMs;
+
     const auto t0 = std::chrono::steady_clock::now();
+    const int effLoadLevel = std::max(governor_.level(), hostLoadLevel_.load(std::memory_order_relaxed));
     const math::TierCapabilities tierCaps =
-        math::DeviceTierPolicy::resolve(config_.performanceTier, hardwareTier_, governor_.level());
+        math::DeviceTierPolicy::resolve(config_.performanceTier, hardwareTier_, effLoadLevel);
     const math::PerformanceTier resolvedTier = tierCaps.resolvedTier;
 
     // Sync staged C++17 + NEON occlusion, multiclass parsing, particles & residual maps onto GPU RHI textures
@@ -714,7 +901,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
          (stickerCount_ > 0 || ar3dCount_ > 0 || particleQuads > 0 ||
           (aiResidualTex_ != rhi::kInvalidTexture && aiResidualStrength_ > 1e-4f) ||
           (autoResidualTex_ != rhi::kInvalidTexture && autoResidualStrength_ > 1e-4f)));
-    loadFades_.update(governor_.level(), nowMs);
+    loadFades_.update(effLoadLevel, nowMs);
 
     // Optional cross-backend FrameDelayRing (0..4 frames; aligns displayed camera frame with async MediaPipe landmarks)
     rhi::TextureId displayTex = inputTexture;
@@ -725,6 +912,10 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
 
     faces_.update(nowMs);
+    const int effectiveMaxFaces = std::min(config_.maxFaces, tierCaps.maxFacesCap);
+    if (effectiveMaxFaces < 2) {
+        faces_.promoteSecondaryIfPrimaryEmpty();
+    }
     auto& primaryTl = faces_.slot(0);
     if (primaryTl.runId() != deformerRunId_) {
         deformerRunId_ = primaryTl.runId();
@@ -741,14 +932,18 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
 
     // Optional secondary face (slot 1), gated by resolved hardware tier
-    const int effectiveMaxFaces = std::min(config_.maxFaces, tierCaps.maxFacesCap);
     auto& secondaryTl = faces_.slot(1);
     const float* secState41 = (effectiveMaxFaces >= 2) ? secondaryTl.at(displayTsMs) : nullptr;
     math::FaceTimeline::SmoothedMeshView secMeshView{};
     const bool hasSecMesh = (effectiveMaxFaces >= 2) && secondaryTl.meshAt(displayTsMs, secMeshView);
 
+    // Stale body pose timeout (>250ms without fresh pose -> fade out body warp cleanly)
+    if (hasPendingBody_ && pendingBodyTs_ != kTimeInvalid && frameTimestampMs - pendingBodyTs_ > 250) {
+        hasPendingBody_ = false;
+    }
     const float* bodyState = bodySmoother_.update(
-        hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs);
+        hasPendingBody_ ? pendingBodyState_.data() : nullptr, pendingBodyTs_, nowMs,
+        pendingBodyVis_, pendingKneeVis_);
 
     // Hair semantic temporal gate & rigid head-motion compensation affine (using aligned displayTsMs).
     // Internal 11Hz multiclass hair mask only binds when hairDye / hairShine is active so dynamic-INT8
@@ -777,12 +972,9 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     }
     const float shakeGate = shaking ? 0.0f : 1.0f;
 
-    std::array<float, math::HairMaskTuning::kAffineSize> hairAffine{};
-    math::HairMaskTuning::identity(hairAffine.data());
-    bool affineValid = true;
-    const int64_t maskPoseStamp = hasHairTex ? effHairStamp : autoOccTsMs_;
-    if (((hasHairTex && hairLevel > 1e-4f) || (autoOccTex_ != rhi::kInvalidTexture && maskPoseStamp != kTimeInvalid)) &&
-        state41 != nullptr && maskPoseStamp != kTimeInvalid) {
+    auto computePoseAffine = [&](int64_t stamp, std::array<float, math::HairMaskTuning::kAffineSize>& outAff) -> bool {
+        math::HairMaskTuning::identity(outAff.data());
+        if (state41 == nullptr || stamp == kTimeInvalid) return true;
         float poseDisplay[math::HairMaskTuning::kPoseSize];
         for (int i = 0; i < math::HairMaskTuning::kPoseSize; ++i) {
             poseDisplay[i] = state41[22 + i];
@@ -791,12 +983,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         const int64_t newest = primaryTl.latest();
         bool hasMaskPose = false;
         if (newest != kTimeInvalid) {
-            if (maskPoseStamp <= newest) {
-                hasMaskPose = primaryTl.poseAt(maskPoseStamp, poseMask);
+            if (stamp <= newest) {
+                hasMaskPose = primaryTl.poseAt(stamp, poseMask);
             } else if (primaryTl.poseAt(newest, poseMask)) {
                 if (displayTsMs > newest) {
                     const float g = std::min(1.0f,
-                        static_cast<float>(maskPoseStamp - newest) / static_cast<float>(displayTsMs - newest));
+                        static_cast<float>(stamp - newest) / static_cast<float>(displayTsMs - newest));
                     for (int i = 0; i < math::HairMaskTuning::kPoseSize; ++i) {
                         poseMask[i] += g * (poseDisplay[i] - poseMask[i]);
                     }
@@ -805,12 +997,23 @@ rhi::TextureId LiveBeautyEngine::processFrame(
             }
         }
         if (hasMaskPose) {
-            // If head/camera displacement since mask capture exceeds kAffineMaxShift (0.18), suppress stale mask instead of snapping to uncompensated identity!
-            affineValid = math::HairMaskTuning::affine(poseMask, poseDisplay, aspect, hairAffine.data());
-        } else if (newest != kTimeInvalid) {
-            // Mask timestamp precedes the current continuous face-tracking run (e.g. a fast shake triggered jump/gap reset): suppress pre-jump mask!
-            affineValid = false;
+            return math::HairMaskTuning::affine(poseMask, poseDisplay, aspect, outAff.data());
         }
+        return (newest == kTimeInvalid);
+    };
+
+    std::array<float, math::HairMaskTuning::kAffineSize> hairAffine{};
+    math::HairMaskTuning::identity(hairAffine.data());
+    bool hairAffineValid = true;
+    if (hasHairTex && hairLevel > 1e-4f) {
+        hairAffineValid = computePoseAffine(effHairStamp, hairAffine);
+    }
+
+    std::array<float, math::HairMaskTuning::kAffineSize> occAffine{};
+    math::HairMaskTuning::identity(occAffine.data());
+    bool occAffineValid = true;
+    if (autoOccTex_ != rhi::kInvalidTexture && autoOccTsMs_ != kTimeInvalid) {
+        occAffineValid = computePoseAffine(autoOccTsMs_, occAffine);
     }
 
     rhi::FrameInputs in{};
@@ -818,6 +1021,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.width = width;
     in.height = height;
     in.nowMs = nowMs;
+    in.outputRt = outputRt;
     in.hasFaceState = (state41 != nullptr);
     in.faceState41 = state41;
     in.dilatedFaceState41 = dilatedState41;
@@ -831,13 +1035,12 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.eyeMakeupKeep = primaryTl.eyeMakeupKeep();
     in.denoiseKeep = primaryTl.denoiseKeep() * shakeGate;
 
-    const float asyncMaskKeep = affineValid ? (in.denoiseKeep * shakeGate) : 0.0f;
-    // v3.6.13: Active hair styling already tracks live head motion via rigid hairAffine + GPU RGB boundary matting;
-    // decouple effHairShown from the 16ms denoiseKeep_ micro-motion gate so slight head sway never flashes hair dye
-    // off/on, while still gating strictly on affineValid (>kAffineMaxShift suppression), shakeGate, and steadyFace.
-    const float hairMotionKeep = (affineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
+    const float asyncMaskKeep = hairAffineValid ? (in.denoiseKeep * shakeGate) : 0.0f;
+    // Active hair styling and background hair merge already track live head motion via rigid hairAffine;
+    // decouple both from the 16ms denoiseKeep_ micro-motion gate so slight head sway never flashes hair masks.
+    const float hairMotionKeep = (hairAffineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
     const float effHairShown = hairShown * (wantAutoHair ? hairMotionKeep : asyncMaskKeep);
-    const float effHairBgShown = hairBgShown * asyncMaskKeep;
+    const float effHairBgShown = hairBgShown * hairMotionKeep;
 
     in.secondaryFace.hasState = (secState41 != nullptr);
     in.secondaryFace.state41 = secState41;
@@ -867,6 +1070,11 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     bool semanticOccAlive = false;
     {
         std::lock_guard<std::mutex> lock(auxMutex_);
+        if (semanticOccActive_ && lastSemanticSubmitMs_ != kTimeInvalid &&
+            std::llabs(displayTsMs - lastSemanticSubmitMs_) > 800) {
+            // Multiclass stopped arriving (>800ms): yield cleanly back to fallback occlusionSolver_.
+            semanticOccActive_ = false;
+        }
         semanticOccAlive = semanticOccActive_;
     }
     const bool wantAutoOcc = config_.enabled && !config_.compareOriginal && config_.hasMakeup();
@@ -877,9 +1085,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         const float occFresh = (autoOccTsMs_ != kTimeInvalid)
             ? math::HairMaskTuning::fresh(static_cast<float>(autoOccTsMs_ - displayTsMs))
             : 1.0f;
-        // Decouple internal 10Hz makeup occlusion from 16ms denoiseKeep_ binary toggles so slight handheld sway
-        // never pumps cheek whitening/blush on and off; still gate cleanly on shakeGate / affineValid / steadyFace.
-        const float occMotionKeep = (affineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
+        const float occMotionKeep = (occAffineValid ? 1.0f : 0.0f) * shakeGate * in.steadyFace;
         in.occlusionShown = detail::clampf(occFresh * occMotionKeep, 0.0f, 1.0f);
         in.occlusionMaskTex = (in.occlusionShown > 1e-4f) ? autoOccTex_ : rhi::kInvalidTexture;
         if (in.occlusionShown > 1e-4f) {
@@ -894,6 +1100,8 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.hairShown = effHairShown;
     in.hairBgShown = effHairBgShown;
     in.hairAffine = hairAffine;
+    in.occAffine = occAffine;
+    in.hasOccAffine = (autoOccTex_ != rhi::kInvalidTexture && autoOccTsMs_ != kTimeInvalid);
     in.ambientRgb = ambientRgb_;
     const bool wantAutoResidual = config_.enabled && !config_.compareOriginal &&
                                   config_.blemishRemove > 0.05f &&
@@ -965,10 +1173,14 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.lightLuma = lightLuma;
     in.bitratePressure = math::BitrateEffectsTuning::pressure(bitrateRatio);
 
+    device_.beginFrameGpuTimer();
     const rhi::TextureId outTex = pipeline_.render(config_, in);
+    device_.endFrameGpuTimer();
 
     const auto t1 = std::chrono::steady_clock::now();
-    const int64_t workNs = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    const int64_t cpuWorkNs = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    const int64_t gpuWorkNs = device_.lastGpuFrameTimeNs();
+    const int64_t workNs = std::max(cpuWorkNs, gpuWorkNs);
     governor_.onFrame(frameTimestampMs * 1000000LL, workNs, processing, nowMs);
 
     const float frameMs = static_cast<float>(workNs) * 1e-6f;
@@ -979,7 +1191,7 @@ rhi::TextureId LiveBeautyEngine::processFrame(
         stats_.fps = (stats_.fps <= 0.0f) ? instFps : (stats_.fps * 0.9f + instFps * 0.1f);
     }
     lastStatsNowMs_ = nowMs;
-    stats_.loadLevel = governor_.level();
+    stats_.loadLevel = std::max(governor_.level(), hostLoadLevel_.load(std::memory_order_relaxed));
     stats_.resolvedTier = static_cast<int>(resolvedTier);
     stats_.facePresence = std::max(primaryTl.presence(), (effectiveMaxFaces >= 2) ? secondaryTl.presence() : 0.0f);
     stats_.hairShown = hairShown;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(livebeauty_core VERSION 3.9.3 LANGUAGES CXX)
+project(livebeauty_core VERSION 3.9.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -64,7 +64,7 @@ if(LIVEBEAUTY_ENABLE_GLES)
     target_include_directories(livebeauty_gles PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/rhi/gles>
     )
-    target_link_libraries(livebeauty_gles PUBLIC livebeauty_engine GLESv2)
+    target_link_libraries(livebeauty_gles PUBLIC livebeauty_engine GLESv2 EGL)
     target_compile_options(livebeauty_gles PRIVATE
         $<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-Wall -Wextra -Wno-unused-parameter>
     )

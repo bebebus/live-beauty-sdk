@@ -62,6 +62,7 @@ public:
     float eyeMakeupKeep() const { return eyeMakeupKeep_; }
     float denoiseKeep() const { return denoiseKeep_; }
     int runId() const { return runId_; }
+    void bumpRunId() { ++runId_; }
     float sampleIntervalMs() const { return sampleIntervalMs_; }
     int64_t latest() const;
     int64_t missSince() const;

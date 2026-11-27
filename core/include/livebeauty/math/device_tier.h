@@ -14,6 +14,7 @@ enum class PerformanceTier : int {
 
 struct TierCapabilities {
     PerformanceTier resolvedTier = PerformanceTier::kStandard;
+    PerformanceTier hardwareTier = PerformanceTier::kStandard;
     bool enableRelight3d = true;
     bool enableNeckTone = true;
     bool enableOilControl = true;

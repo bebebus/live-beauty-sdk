@@ -65,7 +65,7 @@ public:
     static constexpr float kSafetyR1 = 0.04f;
     static constexpr float kSafetyDepth = 0.5f;
     static constexpr float kRelaxTauUpMs = 120.0f;
-    static constexpr float kRelaxTauDownMs = 35.0f;
+    static constexpr float kRelaxTauDownMs = 90.0f;
     static constexpr float kDispTauSteadyMs = 95.0f;
     static constexpr float kDispTauInnerMs = 28.0f;
     static constexpr float kDispTauFastMs = 18.0f;
@@ -135,6 +135,8 @@ private:
     Params prevParams_{};
     float wLeftRatioState_ = 0.0f;
     float wRightRatioState_ = 0.0f;
+    float eyeDuLeftRatioState_ = 0.0f;
+    float eyeDuRightRatioState_ = 0.0f;
     float rEyeWRatioState_ = 0.0f;
     float lEyeWRatioState_ = 0.0f;
     float rEyeHRatioState_ = 0.0f;

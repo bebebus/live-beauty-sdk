@@ -166,8 +166,10 @@ void testDeformerInvariantsAndCranialTop() {
     const float origJaw = std::fabs(lm[397 * 2] - lm[172 * 2]);
     const float newJaw = std::fabs(wl[397 * 2] - wl[172 * 2]);
     EXPECT_TRUE(newJaw < origJaw - 0.01f);
-    EXPECT_TRUE(newH < origH - 0.01f);
-    EXPECT_TRUE(newH > origH * 0.90f);
+    // v3.9.4 (A6/shape-2): faceSlim narrows jaw cleanly without uniformly shrinking the face or pulling hairline down.
+    EXPECT_TRUE(newH < origH);
+    EXPECT_TRUE(newH > origH * 0.94f);
+    EXPECT_TRUE(std::fabs(wl[10 * 2 + 1] - lm[10 * 2 + 1]) < 1e-4f);
 
     // Forehead bare hairline vertex 10 must NOT be pulled upward by cranialTop.
     EXPECT_TRUE(def1.warpedLandmarks()[10 * 2 + 1] <= def0.warpedLandmarks()[10 * 2 + 1] + 1e-5f);
@@ -1807,33 +1809,38 @@ void testV3613HairCoverageGhostFreeEmaAndAffineMargin() {
 void testV3615DouyinAmbientSceneLiftCurve() {
     // Non-finite (unmeasured) stays 0.0
     EXPECT_NEAR(BeautyQualityTuning::ambientSceneLift(std::numeric_limits<float>::quiet_NaN()), 0.0f, 1e-6f);
-    // Dim indoor room receives strong lift (~0.45..0.56); normal office room stays bright (~0.25..0.40);
-    // bright daylight tapers smoothly down to 0.0 (monotonic non-increasing)
+    // v3.9.4 (A1/tone-1): Strictly capped to <= 0.18 in genuine darkness (L < 0.30);
+    // normal AE-normalized indoor room (0.42) and sunny daylight (0.78) receive 0.0 lift.
+    const float veryDark = BeautyQualityTuning::ambientSceneLift(0.10f);
     const float dim = BeautyQualityTuning::ambientSceneLift(0.18f);
     const float indoor = BeautyQualityTuning::ambientSceneLift(0.42f);
     const float sunny = BeautyQualityTuning::ambientSceneLift(0.78f);
-    EXPECT_TRUE(dim >= 0.48f && dim <= 0.56f);
-    EXPECT_TRUE(indoor >= 0.28f && indoor < dim);
+    EXPECT_NEAR(veryDark, 0.18f, 1e-5f);
+    EXPECT_TRUE(dim > 0.05f && dim < veryDark);
+    EXPECT_NEAR(indoor, 0.0f, 1e-5f);
     EXPECT_NEAR(sunny, 0.0f, 1e-5f);
 }
 
 void testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard() {
-    // 1. Adaptive indoor temporal stabilization curve
+    // 1. Adaptive extreme-dark temporal stabilization curve (v3.9.4 A5/tone-2: zero in normal indoor >= 0.14)
     EXPECT_NEAR(BeautyQualityTuning::indoorTemporalDenoise(std::numeric_limits<float>::quiet_NaN()), 0.0f, 1e-6f);
     const float dDim = BeautyQualityTuning::indoorTemporalDenoise(0.08f);
     const float dIndoor = BeautyQualityTuning::indoorTemporalDenoise(0.24f);
     const float dBright = BeautyQualityTuning::indoorTemporalDenoise(0.40f);
     EXPECT_NEAR(dDim, 0.18f, 1e-4f);
-    EXPECT_TRUE(dIndoor >= 0.04f && dIndoor <= 0.11f && dIndoor < dDim);
+    EXPECT_NEAR(dIndoor, 0.0f, 1e-5f);
     EXPECT_NEAR(dBright, 0.0f, 1e-5f);
 
-    // 2. Two-stage commercial smoothing curve: 0..0.60 ramps coverage to 0.96 with 100% detail keep;
-    //    0.60..1.0 holds coverage and tapers detail keep smoothly down to 0.45.
+    // 2. Two-stage commercial smoothing curve (v3.9.4 A4/skin-2): headroom above 0.55..0.60, ceiling 0.96 at 0.85..1.0
     EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(0.0f), 0.0f, 1e-6f);
-    EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(0.60f), 0.96f, 1e-4f);
+    EXPECT_TRUE(BeautyQualityTuning::twoStageSmoothMix(0.55f) > 0.54f &&
+                BeautyQualityTuning::twoStageSmoothMix(0.55f) < 0.62f);
+    EXPECT_TRUE(BeautyQualityTuning::twoStageSmoothMix(0.60f) > 0.60f &&
+                BeautyQualityTuning::twoStageSmoothMix(0.60f) < 0.70f);
+    EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(0.85f), 0.96f, 1e-4f);
     EXPECT_NEAR(BeautyQualityTuning::twoStageSmoothMix(1.0f), 0.96f, 1e-4f);
-    EXPECT_TRUE(BeautyQualityTuning::twoStageSmoothMix(0.30f) > 0.40f &&
-                BeautyQualityTuning::twoStageSmoothMix(0.30f) < 0.55f);
+    EXPECT_TRUE(BeautyQualityTuning::twoStageSmoothMix(0.30f) > 0.25f &&
+                BeautyQualityTuning::twoStageSmoothMix(0.30f) < 0.36f);
     EXPECT_NEAR(BeautyQualityTuning::twoStageDetailKeep(0.0f), 1.0f, 1e-6f);
     EXPECT_NEAR(BeautyQualityTuning::twoStageDetailKeep(0.60f), 1.0f, 1e-6f);
     EXPECT_TRUE(BeautyQualityTuning::twoStageDetailKeep(0.80f) > 0.65f &&
@@ -1912,12 +1919,12 @@ void testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion() {
     applyMat(grnM, 0.5f, 0.5f, 0.5f, r, g, b);
     EXPECT_TRUE(g > 0.5f * (r + b) + 0.03f);
 
-    // 2. Style-coupled atmosphere resolver
+    // 2. Style-coupled atmosphere resolver (v3.9.4 D4/tone-5: automatic bloom & grain disabled by default)
     float bl = 0.0f, gr = 0.0f;
     BeautyQualityTuning::resolveStyleAtmosphere("asset://luts/night_vibe.png", 1.0f, 0, 0.0f, bl, gr);
-    EXPECT_NEAR(bl, 0.30f, 1e-4f); EXPECT_NEAR(gr, 0.14f, 1e-4f);
+    EXPECT_NEAR(bl, 0.0f, 1e-5f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
     BeautyQualityTuning::resolveStyleAtmosphere("asset://luts/pure_pink.png", 0.8f, 0, 0.0f, bl, gr);
-    EXPECT_NEAR(bl, 0.16f, 1e-4f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
+    EXPECT_NEAR(bl, 0.0f, 1e-5f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
     BeautyQualityTuning::resolveStyleAtmosphere("asset://luts/natural_studio.png", 1.0f, 0, 0.0f, bl, gr);
     EXPECT_NEAR(bl, 0.0f, 1e-5f); EXPECT_NEAR(gr, 0.0f, 1e-5f);
     BeautyQualityTuning::resolveStyleAtmosphere("", 0.0f, 0, 0.0f, bl, gr);
@@ -2048,6 +2055,161 @@ void testV390AutoWhiteBalanceAndMulticlass6PlanarProbabilities() {
     EXPECT_TRUE(mf.beauty.isProcessing());
 }
 
+void testV394AuditFixesMathAndTracking() {
+    constexpr float kAspect = 9.0f / 16.0f;
+
+    // 1. C1 (makeup-1/seg-1): Hand (class 2 body_skin) inside inner face ellipse occludes makeup & triggers lowerFaceOcc,
+    //    while body_skin outside face ellipse (neck/chest) remains 255 (visible).
+    {
+        constexpr int kW = 64, kH = 64;
+        std::vector<float> logits(kW * kH * 6, -5.0f);
+        const CropRect faceBounds{0.25f, 0.20f, 0.50f, 0.50f};
+        for (int y = 0; y < kH; ++y) {
+            const float v = (y + 0.5f) / kH;
+            for (int x = 0; x < kW; ++x) {
+                const float u = (x + 0.5f) / kW;
+                const int base = (y * kW + x) * 6;
+                if (u >= 0.35f && u <= 0.65f && v >= 0.45f && v <= 0.68f) {
+                    // Hand (body_skin = class 2) resting on lower face/mouth
+                    logits[base + 2] = 6.0f;
+                } else if (v >= 0.72f && v <= 0.95f && u >= 0.30f && u <= 0.70f) {
+                    // Neck/chest (body_skin = class 2) outside face bounds
+                    logits[base + 2] = 6.0f;
+                } else if (u >= 0.25f && u <= 0.75f && v >= 0.20f && v <= 0.70f) {
+                    // Visible face_skin (class 3)
+                    logits[base + 3] = 6.0f;
+                } else {
+                    logits[base + 0] = 6.0f;
+                }
+            }
+        }
+        FaceParsingMapper mapper;
+        std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+        EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwc(
+            logits.data(), kW, kH, occ.data(), hair.data(), person.data(), &faceBounds, nullptr));
+        const int S = FaceParsingMapper::kOutSize;
+        const int handIdx = static_cast<int>(0.55f * S) * S + static_cast<int>(0.50f * S);
+        const int foreheadIdx = static_cast<int>(0.30f * S) * S + static_cast<int>(0.50f * S);
+        const int neckIdx = static_cast<int>(0.85f * S) * S + static_cast<int>(0.50f * S);
+        EXPECT_TRUE(occ[handIdx] < 40);
+        EXPECT_TRUE(occ[foreheadIdx] >= 240);
+        EXPECT_TRUE(occ[neckIdx] >= 240);
+        EXPECT_TRUE(FaceParsingMapper::estimateLowerFaceOcclusion(occ.data(), S, faceBounds) > 0.35f);
+
+        // E2: Letterbox-aware mapMulticlass6LogitsNhwcRegion produces identical hand occlusion with padding
+        std::vector<float> lbLogits(128 * 128 * 6, -5.0f);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                for (int c = 0; c < 6; ++c) {
+                    lbLogits[((y + 32) * 128 + (x + 32)) * 6 + c] = logits[(y * kW + x) * 6 + c];
+                }
+            }
+        }
+        mapper.reset();
+        std::array<uint8_t, FaceParsingMapper::kOutPixels> occLb{};
+        EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwcRegion(
+            lbLogits.data(), 128, 128, 32, 32, kW, kH, occLb.data(), nullptr, nullptr, &faceBounds, nullptr));
+        EXPECT_TRUE(occLb[handIdx] < 40);
+        EXPECT_TRUE(occLb[neckIdx] >= 240);
+    }
+
+    // 2. C4 (shape-3): faceNarrow + cheekboneSlim must NOT squash eye width horizontally (< 2.5% drift).
+    {
+        std::array<float, FaceMeshFrame::kCoordCount> lm{};
+        makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.40f, 0.0f, 0.0f, 0.0f, lm);
+        std::array<float, FaceMeshFrame::kMetaSize> meta{};
+        EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, meta.data()));
+
+        FaceMeshDeformer def;
+        FaceMeshDeformer::Params p{};
+        p.faceNarrow = 1.0f;
+        p.cheekboneSlim = 1.0f;
+        EXPECT_TRUE(def.deform(
+            lm.data(), kAspect, meta[FaceMeshFrame::kMetaAxisX], meta[FaceMeshFrame::kMetaAxisY],
+            meta[FaceMeshFrame::kMetaFaceWidth], meta[FaceMeshFrame::kMetaFaceHeight],
+            meta[FaceMeshFrame::kMetaLeftWeight], meta[FaceMeshFrame::kMetaRightWeight],
+            meta[FaceMeshFrame::kMetaYawWeight], 1.0f, 1.0f, 1.0f, p));
+        const float* wl = def.warpedLandmarks();
+        const float origREye = std::hypot(lm[133 * 2] - lm[33 * 2], (lm[133 * 2 + 1] - lm[33 * 2 + 1]) / kAspect);
+        const float newREye = std::hypot(wl[133 * 2] - wl[33 * 2], (wl[133 * 2 + 1] - wl[33 * 2 + 1]) / kAspect);
+        const float origLEye = std::hypot(lm[263 * 2] - lm[362 * 2], (lm[263 * 2 + 1] - lm[362 * 2 + 1]) / kAspect);
+        const float newLEye = std::hypot(wl[263 * 2] - wl[362 * 2], (wl[263 * 2 + 1] - wl[362 * 2 + 1]) / kAspect);
+        EXPECT_TRUE(std::fabs(newREye - origREye) / origREye < 0.025f);
+        EXPECT_TRUE(std::fabs(newLEye - origLEye) / origLEye < 0.025f);
+    }
+
+    // 3. C7 (shape-v2): BodyGeometrySmoother knee visibility hysteresis smoothly ramps legsWeight
+    {
+        BodyGeometrySmoother sm;
+        const float st[7] = {0.5f, 0.5f, 0.0f, -1.0f, 0.35f, 0.25f, 1.0f};
+        const float* out = nullptr;
+        for (int i = 0; i < 6; ++i) {
+            out = sm.update(st, 1000 + i * 33, 1000 + i * 33, 0.9f, 0.8f);
+        }
+        EXPECT_TRUE(out != nullptr && out[6] > 0.40f);
+        // Drop knee visibility below 0.35 for >= 3 consecutive samples -> legsWeight ramps smoothly down toward 0
+        for (int i = 0; i < 15; ++i) {
+            out = sm.update(st, 1200 + i * 33, 1200 + i * 33, 0.9f, 0.2f);
+        }
+        EXPECT_TRUE(out != nullptr && out[6] < 0.05f);
+    }
+
+    // 4. B4 (tracking-4): MultiFaceTracker duplicate-face NMS + slot 1 -> slot 0 promotion
+    {
+        MultiFaceTracker tracker;
+        tracker.setAspect(kAspect);
+        std::array<float, FaceMeshFrame::kCoordCount> glA{}, glB{}, mpA{}, mpB{};
+        makeCanonicalFace(kAspect, 0.48f, 0.50f, 0.34f, 0.0f, 0.0f, 0.0f, glA);
+        makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.32f, 0.0f, 0.0f, 0.0f, glB);  // Overlapping duplicate (< 0.45 * fw)
+        for (int i = 0; i < FaceMeshFrame::kLandmarkCount; ++i) {
+            mpA[i * 2] = glA[i * 2]; mpA[i * 2 + 1] = 1.0f - glA[i * 2 + 1];
+            mpB[i * 2] = glB[i * 2]; mpB[i * 2 + 1] = 1.0f - glB[i * 2 + 1];
+        }
+        MultiFaceTracker::RawFaceInput dupInputs[2] = {{mpA.data(), 478}, {mpB.data(), 478}};
+        const int accepted = tracker.submitFaces(1000, dupInputs, 2, 720, 1280, 1000);
+        EXPECT_TRUE(accepted == 1);
+        EXPECT_TRUE(tracker.slot(1).latest() == kTimeInvalid);
+
+        // Two distinct faces, then primary (left) disappears and expires -> right face promotes to slot 0
+        tracker.reset();
+        makeCanonicalFace(kAspect, 0.25f, 0.50f, 0.28f, 0.0f, 0.0f, 0.0f, glA);
+        makeCanonicalFace(kAspect, 0.75f, 0.50f, 0.24f, 0.0f, 0.0f, 0.0f, glB);
+        for (int i = 0; i < FaceMeshFrame::kLandmarkCount; ++i) {
+            mpA[i * 2] = glA[i * 2]; mpA[i * 2 + 1] = 1.0f - glA[i * 2 + 1];
+            mpB[i * 2] = glB[i * 2]; mpB[i * 2 + 1] = 1.0f - glB[i * 2 + 1];
+        }
+        MultiFaceTracker::RawFaceInput twoFaces[2] = {{mpA.data(), 478}, {mpB.data(), 478}};
+        EXPECT_TRUE(tracker.submitFaces(2000, twoFaces, 2, 720, 1280, 2000) == 2);
+        // Feed only face B for > 550ms so slot 0 clears -> slot 1 auto-promotes to slot 0
+        MultiFaceTracker::RawFaceInput onlyB[1] = {{mpB.data(), 478}};
+        for (int f = 1; f <= 20; ++f) {
+            const int64_t ts = 2000 + f * 33;
+            tracker.submitFaces(ts, onlyB, 1, 720, 1280, ts);
+            tracker.update(ts);
+        }
+        EXPECT_TRUE(tracker.slot(0).latest() != kTimeInvalid);
+        EXPECT_TRUE(tracker.slot(1).latest() == kTimeInvalid);
+    }
+
+    // 5. B5 (tracking-1): 2nd-order acceleration rigid noise floor catches pure coherent rigid jitter
+    {
+        FaceMeshFilter flt;
+        std::array<float, FaceMeshFrame::kCoordCount> lm{}, out{};
+        float pose[8]{};
+        for (int f = 0; f < 30; ++f) {
+            const float j = (f % 2 == 0) ? 0.004f : -0.004f;  // Pure coherent rigid jitter (0 residual!)
+            makeCanonicalFace(kAspect, 0.50f + j, 0.50f, 0.36f, 0.0f, 0.0f, 0.0f, lm);
+            flt.filter(1000 + f * 33, lm.data(), kAspect, out.data(), pose);
+        }
+        EXPECT_TRUE(flt.poseDead() > 0.03f);
+    }
+
+    // 6. E4 (cpuperf-14): Modern Mali-G1 & PowerVR D-Series/DXT classification
+    EXPECT_TRUE(DeviceTierPolicy::classify("Mali-G1-Ultra MC12", 8, 12288) == PerformanceTier::kUltra);
+    EXPECT_TRUE(DeviceTierPolicy::classify("Mali-G1 MC6", 8, 8192) == PerformanceTier::kStandard);
+    EXPECT_TRUE(DeviceTierPolicy::classify("PowerVR DXT-48-1536", 8, 12288) == PerformanceTier::kUltra);
+}
+
 }  // namespace
 
 int main() {
@@ -2078,6 +2240,7 @@ int main() {
     testV370TwoStageSmoothIndoorDenoiseMouthGateAndProfileGuard();
     testV380Cat02WhiteBalanceStyleAtmosphereAndLowerFaceOcclusion();
     testV390AutoWhiteBalanceAndMulticlass6PlanarProbabilities();
+    testV394AuditFixesMathAndTracking();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

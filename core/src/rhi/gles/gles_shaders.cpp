@@ -170,11 +170,14 @@ float guidedCoeff(float s, float eps) {
 vec3 evenMean(vec3 fineMean, float s, float evenness) {
     if (evenness <= 0.0) return fineMean;
     vec3 macroMean = texture2D(uTex1, vC).rgb;
-    float dy = abs(dot(macroMean - fineMean, vec3(0.2126, 0.7152, 0.0722))) / 0.068;
+    vec3 d = macroMean - fineMean;
+    float dY = dot(d, vec3(0.2126, 0.7152, 0.0722));
+    float dy = abs(dY) / 0.068;
     float dy2 = dy * dy;
     float boneKeep = 1.0 / (1.0 + dy2 * dy2);
     float flatKeep = 1.0 - smoothstep(0.05, 0.14, s);
-    return mix(fineMean, macroMean, evenness * boneKeep * flatKeep);
+    // v3.9.4 (skin-4): Even chroma at 100% while keeping 65% of macro luminance shading to preserve bone structure & prevent halos.
+    return fineMean + (evenness * boneKeep * flatKeep) * (d - 0.65 * vec3(dY));
 }
 void main() {
     float s = blur5().a;
@@ -224,11 +227,13 @@ float guidedCoeff(float s, float eps) {
 vec3 evenMean(vec3 fineMean, float s, float evenness, float maskW) {
     if (evenness <= 0.0) return fineMean;
     vec3 macroMean = texture2D(uTex1, vC).rgb;
-    float dy = abs(dot(macroMean - fineMean, vec3(0.2126, 0.7152, 0.0722))) / 0.068;
+    vec3 d = macroMean - fineMean;
+    float dY = dot(d, vec3(0.2126, 0.7152, 0.0722));
+    float dy = abs(dY) / 0.068;
     float dy2 = dy * dy;
     float boneKeep = 1.0 / (1.0 + dy2 * dy2);
     float flatKeep = 1.0 - smoothstep(0.05, 0.14, s);
-    return mix(fineMean, macroMean, evenness * boneKeep * flatKeep * maskW);
+    return fineMean + (evenness * boneKeep * flatKeep * maskW) * (d - 0.65 * vec3(dY));
 }
 void main() {
     float s = blur5().a;
@@ -259,22 +264,31 @@ void main() {
     vec3 target = c;
     if (wTear > wFold) {
         vec3 cheekRef = texture2D(uTex0, clamp(vSrcCoord + off, 0.0, 1.0)).rgb;
-        float yBase = dot(c, vec3(0.2126, 0.7152, 0.0722));
-        float yRef = dot(cheekRef, vec3(0.2126, 0.7152, 0.0722));
+        float yBase = dot(c, vec3(0.299, 0.587, 0.114));
+        float yRef = dot(cheekRef, vec3(0.299, 0.587, 0.114));
         float deficit = clamp((yRef - yBase) * 2.4, 0.0, 0.22);
-        // Also neutralize cool/bluish under-eye cast relative to lower cheek (exact 0 on uniform skin).
+        // v3.9.4 (makeup-10): YCbCr dark-circle correction neutralizes bluish/purple vascular cast
+        // (allowing B reduction via bounded Cb/Cr transfer <= 0.04) while keeping Y strictly non-darkening.
         float coolCast = clamp(((c.b - cheekRef.b) - (c.r - cheekRef.r)) * 1.8, 0.0, 0.16);
         float liftMask = clamp((deficit + coolCast * 0.55) * 3.8, 0.0, 0.78);
-        vec3 lifted = c + max(cheekRef - c, vec3(0.0)) * liftMask + vec3(0.058, 0.046, 0.032) * liftMask * (1.0 - yBase);
-        target = clamp(max(c, lifted), 0.0, 1.0);
+        float cbBase = (c.b - yBase) * 0.564;
+        float crBase = (c.r - yBase) * 0.713;
+        float cbRef = (cheekRef.b - yRef) * 0.564;
+        float crRef = (cheekRef.r - yRef) * 0.713;
+        float yT = max(yBase, mix(yBase, yRef, liftMask));
+        float cbT = cbBase + clamp((cbRef - cbBase) * (0.8 * liftMask), -0.04, 0.04);
+        float crT = crBase + clamp((crRef - crBase) * (0.8 * liftMask), -0.04, 0.04);
+        vec3 yccRgb = vec3(yT + 1.402 * crT, yT - 0.344136 * cbT - 0.714136 * crT, yT + 1.772 * cbT);
+        target = clamp(yccRgb, 0.0, 1.0);
     } else {
         vec3 sideA = texture2D(uTex0, clamp(vSrcCoord + off, 0.0, 1.0)).rgb;
         vec3 sideB = texture2D(uTex0, clamp(vSrcCoord - off, 0.0, 1.0)).rgb;
         vec3 sideAvg = 0.5 * (sideA + sideB);
         vec3 foldDef = max(sideAvg - c, vec3(0.0));
         float maxDef = max(foldDef.r, max(foldDef.g, foldDef.b));
-        float creaseGate = smoothstep(0.008, 0.038, maxDef);
-        vec3 lift = clamp(foldDef * 1.32 + sideAvg * (0.045 * creaseGate), vec3(0.0), vec3(0.24));
+        float creaseGate = smoothstep(0.012, 0.038, maxDef);
+        // v3.9.4 (makeup-11): Cap fold lift at 1.0x deficit without constant overshoot to prevent bright reverse line.
+        vec3 lift = clamp(foldDef * creaseGate, vec3(0.0), vec3(0.20));
         target = clamp(c + lift, 0.0, 1.0);
     }
     gl_FragColor = vec4(target, alpha);
@@ -521,7 +535,8 @@ uniform vec4 uU2;
 varying vec2 vScreenUv;
 varying vec2 vMakeupUv;
 void main() {
-    float blink = smoothstep(0.10, 0.22, uU1.z);
+    // v3.9.4 (makeup-6): Tighter blink gate prevents smiling-eye dimming while eye polygon handles lid occlusion.
+    float blink = smoothstep(0.06, 0.13, uU1.z);
     if (blink <= 0.001) { discard; }
     float aspect = max(uU0.w, 0.001);
     vec2 m = vec2(vScreenUv.x, vScreenUv.y / aspect);
@@ -533,10 +548,11 @@ void main() {
     vec2 localUv = clamp(d * 0.5 + 0.5, 0.005, 0.995);
     vec2 atlasUv = vec2(uU1.x + localUv.x * 0.5, uU1.y + (1.0 - localUv.y) * 0.5);
     vec4 lens = texture2D(uTex1, atlasUv);
-    float lensA = lens.a * uU2.x * blink;
+    // Protect real corneal specular catchlights from being painted over by contact lens pigment.
+    float specGuard = 1.0 - smoothstep(0.70, 0.90, baseY);
+    float lensA = clamp(lens.a * uU2.x * blink * specGuard, 0.0, 1.0);
     float lidShadow = mix(1.0, 0.65, smoothstep(0.25, 0.95, d.y));
     vec3 lensRgb = clamp(lens.rgb * mix(0.45, 1.15, clamp(baseY * 2.4, 0.0, 1.0)) * lidShadow, 0.0, 1.0);
-    vec3 outRgb = mix(base, lensRgb, lensA);
     float clA = 0.0;
     if (uU2.y > 0.0) {
         vec2 parallax = vec2(clamp(uU1.w * 0.18, -0.12, 0.12), 0.0);
@@ -544,11 +560,13 @@ void main() {
         vec2 p1 = d - (vec2(0.22, -0.18) + parallax * 0.65);
         float spot = exp(-dot(p0, p0) * 32.0) + 0.45 * exp(-dot(p1, p1) * 58.0);
         clA = clamp(spot * uU2.y * blink, 0.0, 0.92);
-        outRgb = mix(outRgb, vec3(1.0, 0.99, 0.97), clA);
     }
-    float finalA = clamp(max(lensA, clA), 0.0, 1.0);
+    // v3.9.4 (C2/makeup-v1): Decoupled Porter-Duff over composite so SRC_ALPHA blending yields exact
+    // linear opacity instead of squaring alpha (~lensA^2).
+    float finalA = 1.0 - (1.0 - lensA) * (1.0 - clA);
     if (finalA <= 0.001) { discard; }
-    gl_FragColor = vec4(outRgb, finalA);
+    vec3 premul = lensRgb * lensA * (1.0 - clA) + vec3(1.0, 0.99, 0.97) * clA;
+    gl_FragColor = vec4(clamp(premul / finalA, 0.0, 1.0), finalA);
 }
 )";
 
@@ -558,6 +576,7 @@ uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
 uniform vec4 uU3;
+uniform vec4 uU4;
 varying vec2 vTextureCoord;
 void main() {
     float aspect = max(uU2.z, 0.001);
@@ -574,14 +593,23 @@ void main() {
         float torso = uU1.x;
         float width = uU1.y;
         if (legs > 0.0 && t > 0.0) {
-            float legKeep = 1.0 - smoothstep(1.15 * width, 1.85 * width, abs(s));
-            t = t / (1.0 + legs * legKeep * smoothstep(0.0, 0.15 * torso, t));
+            // v3.9.4 (shape-10): Integral C1 monotonic leg lengthening (strictly <= 1+L local stretch)
+            // with wider horizontal transition (1.3w..3.5w) to prevent 21-50deg shear kinks.
+            float legKeep = 1.0 - smoothstep(1.30 * width, 3.50 * width, abs(s));
+            float effL = legs * legKeep;
+            float k = effL / (1.0 + effL);
+            float c = max(0.15 * torso, 0.001);
+            t = (t < c) ? (t - k * t * t / (2.0 * c)) : (t - k * (t - 0.5 * c));
         }
         if (uU2.y > 0.0) {
             float u = -(t + torso);
             if (u > 0.0) {
-                float band = 0.3 * torso;
-                float lifted = u <= band * (1.0 + uU2.y) ? u / (1.0 + uU2.y) : u - band * uU2.y;
+                // v3.9.4 (shape-10/shape-v1): Chin-aware C1 swan-neck band (uU4.x when valid, else 0.3*torso)
+                // using smoothstep S(r)=r*r*(3-2r) so slope is 1 at both shoulder & chin with exact rigid face shift.
+                float band = (uU4.x > 0.001) ? uU4.x : (0.3 * torso);
+                float span = max(band * (1.0 + uU2.y), 0.001);
+                float rn = clamp(u / span, 0.0, 1.0);
+                float lifted = u - uU2.y * band * (rn * rn * (3.0 - 2.0 * rn));
                 float keep = 1.0 - smoothstep(1.2 * width, 2.2 * width, abs(s));
                 t = -torso - mix(u, lifted, keep);
             }
@@ -639,6 +667,8 @@ uniform vec4 uU7;
 uniform vec4 uU8;
 uniform vec4 uU9;
 uniform vec4 uU10;
+uniform vec4 uU11;
+uniform vec4 uU12;
 varying vec2 vTextureCoord;
 float luma(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
 float skinWeight(vec3 color) {
@@ -741,16 +771,52 @@ void main() {
     // casting dark un-whitened bands along hairline/temples while still protecting actual dark hair.
     float hairSkinGuard = faceM * smoothstep(0.22, 0.36, yFine) * warmPoly;
     float effNonHair = max(nonHair, hairSkinGuard);
-    float skin = clamp(faceM * polyGate + (1.0 - faceM) * bodyGate * (1.0 - 0.70 * exclM), 0.0, 1.0) * effNonHair;
+    // v3.9.4 (A2/tone-v1/skin-5): Portrait spatial prior restricts non-face body skin gating to head halo
+    // (ears/forehead border, excluding above-crown hair) + neck/collarbone/chest/shoulders below chin,
+    // preventing whitening/smoothing bleed onto warm beige walls, wooden furniture, and brown hair.
+    float portraitPrior = 1.0;
+    if (uU6.z > 0.001 && uU6.w > 0.001) {
+        vec2 fAxis = vec2(uU4.w, uU5.w);
+        float fLen = length(fAxis);
+        vec2 fu = fLen > 0.001 ? (fAxis / fLen) : vec2(1.0, 0.0);
+        vec2 dp = vec2(uv.x - uU6.x, (uv.y - uU6.y) / max(uU0.z, 0.0001));
+        float pa = dot(dp, fu) / max(uU6.z, 0.0001);
+        float pb = dot(dp, vec2(-fu.y, fu.x)) / max(uU6.w, 0.0001);
+        float headHalo = (1.0 - smoothstep(1.15, 1.65, length(vec2(pa, pb)))) * (1.0 - smoothstep(0.75, 1.15, pb));
+        float down = -pb;
+        float neckChest = smoothstep(0.45, 0.95, down) * (1.0 - smoothstep(3.80, 5.20, down)) *
+                          (1.0 - smoothstep(1.80, 3.00, abs(pa)));
+        portraitPrior = clamp(max(headHalo, neckChest), 0.0, 1.0);
+    }
+    float skin = clamp(faceM * polyGate + (1.0 - faceM) * bodyGate * portraitPrior * (1.0 - 0.70 * exclM), 0.0, 1.0) * effNonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
     float yOrig = luma(original.rgb);
+    float core = max(uU10.y, 0.005);
     float hairStrand = smoothstep(0.022, 0.065, luma(wideLow) - yOrig) * (1.0 - smoothstep(0.18, 0.34, yOrig));
     float bleedGuard = (1.0 - (1.0 - smoothstep(0.10, 0.18, yFine)) *
         smoothstep(0.045, 0.105, luma(guided) - yFine)) * (1.0 - 0.82 * hairStrand);
-    float fineDark = (1.0 - smoothstep(0.025, 0.070, yFine - yOrig) * smoothstep(0.28, 0.58, guidedA)) * bleedGuard;
+    // v3.9.4 (A3/skin-1/skin-v1): Anisotropic 1D line detector preserves 1px eyebrows, lashes, beard stubble,
+    // hair wisps & bright metallic glasses frames while retaining guidedA gating so 1-2px blackheads & noise still smooth.
+    float loLine = 0.025 + 2.5 * (core - 0.005);
+    float dk = yFine - yOrig;
+    float lineScore = 0.0;
+    if (abs(dk) > loLine && skin > 0.01) {
+        vec2 tx = uU0.xy;
+        float p0 = 0.5 * (luma(texture2D(uTex0, uv + vec2(tx.x, 0.0)).rgb) + luma(texture2D(uTex0, uv - vec2(tx.x, 0.0)).rgb)) - yOrig;
+        float p1 = 0.5 * (luma(texture2D(uTex0, uv + vec2(0.0, tx.y)).rgb) + luma(texture2D(uTex0, uv - vec2(0.0, tx.y)).rgb)) - yOrig;
+        float p2 = 0.5 * (luma(texture2D(uTex0, uv + tx).rgb) + luma(texture2D(uTex0, uv - tx).rgb)) - yOrig;
+        float p3 = 0.5 * (luma(texture2D(uTex0, uv + vec2(tx.x, -tx.y)).rgb) + luma(texture2D(uTex0, uv + vec2(-tx.x, tx.y)).rgb)) - yOrig;
+        float sgn = dk >= 0.0 ? 1.0 : -1.0;
+        vec4 lp = sgn * vec4(p0, p1, p2, p3);
+        float pmax = max(max(lp.x, lp.y), max(lp.z, lp.w));
+        float pmin = min(min(lp.x, lp.y), min(lp.z, lp.w));
+        lineScore = smoothstep(0.45, 0.75, (pmax - pmin) / max(pmax, 0.004));
+    }
+    float darkKeep = smoothstep(loLine, loLine + 0.045, dk) * max(smoothstep(0.28, 0.58, guidedA), lineScore);
+    float brightKeep = smoothstep(loLine + 0.01, loLine + 0.055, -dk) * lineScore;
+    float fineDark = (1.0 - max(darkKeep, brightKeep)) * bleedGuard;
     float featureKeep = clamp(1.0 - exclM, 0.0, 1.0);
     float toneKeep = 1.0 - smoothstep(0.58, 0.88, exclM);
-    float core = max(uU10.y, 0.005);
     float band = luma(fineLow - wideLow);
     float micro = luma(original.rgb - fineLow);
     vec3 color = original.rgb;
@@ -767,13 +833,14 @@ void main() {
         vec3 dEdge = preLifted - guided;
         float rEdge = sqrt(0.24 * dEdge.r * dEdge.r + 0.58 * dEdge.g * dEdge.g + 0.18 * dEdge.b * dEdge.b) * 1.73205 / 0.36;
         float rEdge2 = rEdge * rEdge;
-        // Two-stage commercial smoothing curve: 0..0.60 ramps clean coverage with full micro-grain, 0.60..1.0 softens grain
-        float stage1 = clamp(uU1.y / 0.60, 0.0, 1.0);
-        float smoothCover = stage1 * (0.86 + 0.14 * stage1);
+        // v3.9.4 (A4/skin-2): Recalibrated smoothing curve leaving natural pore headroom at default 0.55.
+        float stage1 = clamp(uU1.y / 0.85, 0.0, 1.0);
+        float smoothCover = stage1 * (0.80 + 0.20 * stage1);
         float detailKeep = 1.0 - 0.55 * smoothstep(0.60, 1.0, uU1.y);
         float k = smoothCover * 0.96 * skinGateSmooth * featureKeep * fineDark / (1.0 + rEdge2 * rEdge2);
         float preMicro = luma(preLifted - fineLow);
-        float tex = clamp(band, -0.035, 0.035) * smoothstep(core, 2.5 * core, abs(band));
+        // v3.9.4 (skin-3): Asymmetric band clamp (-0.018..+0.035) reduces dark spot re-injection without hurting pores.
+        float tex = clamp(band, -0.018, 0.035) * smoothstep(core, 2.5 * core, abs(band));
         float microTex = clamp(preMicro, -0.022, 0.022) * smoothstep(core * 0.85, core * 2.2, abs(preMicro));
         color = mix(preLifted, guided, k) + vec3((tex * mix(0.35, 0.85, uU1.w) + microTex * uU10.z) * k * detailKeep);
     }
@@ -821,6 +888,13 @@ void main() {
         float satRestore = 1.0 + clamp((yNewAmb - yAmb) * 0.45, 0.0, 0.08);
         color = vec3(yNewAmb) + (color - vec3(yNewAmb)) * satRestore;
         color = fitGamut(color, yNewAmb);
+    } else if (uU1.z < -0.001) {
+        // v3.9.4 (tone-12): Bidirectional brightness supports dimming via inverse Reinhard.
+        float yAmb = luma(color);
+        float bDim = clamp(-uU1.z, 0.0, 1.0) * 0.55;
+        float yNewAmb = yAmb / (1.0 + bDim * (1.0 - yAmb));
+        color *= yNewAmb / max(yAmb, 0.0001);
+        color = fitGamut(color, yNewAmb);
     }
     float yPre = luma(color);
     float relightFill = 0.22 * uU3.w * w * faceM * (1.0 - smoothstep(0.20, 0.55, yPre));
@@ -848,11 +922,17 @@ void main() {
         color *= y2 / y1;
         if (uU3.x > 0.0) {
             float coolW = clamp(uU3.x * w, 0.0, 1.0) * mix(0.32, 1.0, smoothstep(0.18, 0.42, y2));
-            vec3 ivory = vec3(min(y2 * 1.04, 1.0), y2 * 0.99, min(y2 * 1.03, 1.0));
+            // v3.9.4 (tone-7): Warm porcelain target preserves natural skin hue instead of blue-magenta gray.
+            vec3 kPorcelain = vec3(1.0, 0.94, 0.90) / luma(vec3(1.0, 0.94, 0.90));
+            vec3 ivory = min(y2 * kPorcelain, vec3(1.0));
             color = mix(color, ivory, 0.32 * coolW);
             y2 = luma(color);
         }
-        if (rosyA > 0.0) color = vec3(y2) + (color - vec3(y2)) * (1.0 + rosyA * 4.0 * y2 * (1.0 - y2));
+        if (rosyA > 0.0) {
+            // v3.9.4 (tone-8): Luminance-normalized rose tint adds healthy pink hue instead of amplifying yellow chroma.
+            vec3 kRose = vec3(1.0, 0.90, 0.93) / luma(vec3(1.0, 0.90, 0.93));
+            color = mix(color, color * kRose, clamp(rosyA * 4.0 * y2 * (1.0 - y2) * 1.6, 0.0, 0.65));
+        }
         color = fitGamut(color, y2);
     }
     float faceExp = clamp(uU3.x + 0.35 * uU3.w, 0.0, 1.35);
@@ -862,12 +942,14 @@ void main() {
         float notSeam = smoothstep(0.125, 0.205, yLip);
         float notTeeth = 1.0 - smoothstep(0.42, 0.64, yLip) * (1.0 - smoothstep(0.025, 0.095, redEx));
         float careGate = mouthZone * notSeam * notTeeth;
-        float careW = clamp(careGate * smoothstep(0.0, 0.35, faceExp + uU3.y), 0.0, 1.0);
-        float purpleCast = max(color.b - color.g, 0.0);
-        color.b = clamp(color.b - purpleCast * 0.92 * careW, 0.0, 1.0);
+        // v3.9.4 (tone-9): Trigger purple neutralization only on genuinely cyan/purple lips (b > max(g, 0.80*r))
+        // and scale smoothly with faceExp so natural pink lips aren't pushed toward orange/coral.
+        float careW = clamp(careGate * smoothstep(0.15, 0.80, faceExp), 0.0, 1.0);
+        float purpleCast = max(color.b - max(color.g, 0.80 * color.r), 0.0);
+        color.b = clamp(color.b - purpleCast * 0.50 * careW, 0.0, 1.0);
         float yCur = max(luma(color), 0.0001);
         float hiRoll = 1.0 - 0.72 * smoothstep(0.46, 0.74, yCur);
-        float shadowFill = 0.32 * (1.0 - smoothstep(0.22, 0.42, yCur)) * clamp(faceExp + 0.35 * uU3.y, 0.0, 1.0);
+        float shadowFill = 0.20 * (1.0 - smoothstep(0.22, 0.42, yCur)) * clamp(faceExp + 0.35 * uU3.y, 0.0, 1.0);
         float lipA = (0.48 * faceExp * hiRoll + shadowFill) * careGate;
         float yNew = yCur * (1.0 + lipA) / (1.0 + lipA * yCur);
         color *= yNew / yCur;
@@ -888,8 +970,11 @@ void main() {
         vec3 high = texture2D(uTex3, lutCell(ceil(level), color.rg)).rgb;
         color = mix(color, mix(low, high, level - floor(level)), uU10.x);
     }
-    // v3.9.0 Fused zero-extra-pass CAT02 white balance & non-darkening filmic grain (reuses unused uU4.xyz & uU5.x -> 15 active uniforms)
-    if (uU4.x > 0.0001) {
+    // v3.9.4 (D6/gpuperf-9): Full 3x3 CAT02 WB matrix via uU4.xyz / uU11.xyz / uU12.xyz (flag uU11.w > 0.5)
+    // matches standalone kPostAtmosphere bit-for-bit (0 DeltaE jump on layer toggle); falls back to diagonal uU4.xyz.
+    if (uU11.w > 0.5) {
+        color = clamp(vec3(dot(color, uU4.xyz), dot(color, uU11.xyz), dot(color, uU12.xyz)), 0.0, 1.0);
+    } else if (uU4.x > 0.0001) {
         color = clamp(color * uU4.xyz, 0.0, 1.0);
     }
     float fusedGrain = fract(uU5.x);
@@ -941,8 +1026,28 @@ constexpr const char* kBgPremaskFrag = LB_GLSL_PREC R"(
 uniform sampler2D uTex0;
 uniform sampler2D uTex1;
 uniform vec4 uU0;
+uniform vec4 uU1;
 varying vec2 vTextureCoord;
 void main() {
+    if (uU1.x > 0.0 && uU1.y > 0.0) {
+        // v3.9.4 (gpuperf-10/seg-4): Exact 4x4 box premask downsample prevents high-frequency aliasing.
+        vec2 d = uU1.xy;
+        vec4 acc = vec4(0.0);
+        vec2 uv0 = clamp(vTextureCoord + vec2(-d.x, -d.y), 0.0, 1.0);
+        float bg0 = 1.0 - smoothstep(uU0.y, uU0.z, texture2D(uTex1, vec2(uv0.x, 1.0 - uv0.y)).r);
+        acc += vec4(texture2D(uTex0, uv0).rgb * bg0, bg0);
+        vec2 uv1 = clamp(vTextureCoord + vec2( d.x, -d.y), 0.0, 1.0);
+        float bg1 = 1.0 - smoothstep(uU0.y, uU0.z, texture2D(uTex1, vec2(uv1.x, 1.0 - uv1.y)).r);
+        acc += vec4(texture2D(uTex0, uv1).rgb * bg1, bg1);
+        vec2 uv2 = clamp(vTextureCoord + vec2(-d.x,  d.y), 0.0, 1.0);
+        float bg2 = 1.0 - smoothstep(uU0.y, uU0.z, texture2D(uTex1, vec2(uv2.x, 1.0 - uv2.y)).r);
+        acc += vec4(texture2D(uTex0, uv2).rgb * bg2, bg2);
+        vec2 uv3 = clamp(vTextureCoord + vec2( d.x,  d.y), 0.0, 1.0);
+        float bg3 = 1.0 - smoothstep(uU0.y, uU0.z, texture2D(uTex1, vec2(uv3.x, 1.0 - uv3.y)).r);
+        acc += vec4(texture2D(uTex0, uv3).rgb * bg3, bg3);
+        gl_FragColor = acc * 0.25;
+        return;
+    }
     vec3 color = texture2D(uTex0, vTextureCoord).rgb;
     float person = texture2D(uTex1, vec2(vTextureCoord.x, 1.0 - vTextureCoord.y)).r;
     float bg = 1.0 - smoothstep(uU0.y, uU0.z, person);
@@ -991,7 +1096,8 @@ void main() {
 }
 )";
 
-// uU0=(a00, a01, a02, hairShown), uU1=(a10, a11, a12, hasOcclusion), uU2=oval(cx,cy,rx,ry), uU3=(ax,ay,aspect,hasFace)
+// uU0=(h00, h01, h02, hairShown), uU1=(h10, h11, h12, occShown), uU2=oval, uU3=(ax,ay,aspect,hasFace),
+// uU4=(o00, o01, o02, hasSepOccAffine), uU5=(o10, o11, o12, 0)
 constexpr const char* kHairAlphaFrag = LB_GLSL_PREC R"(
 varying vec2 vSrc;
 varying vec2 vDst;
@@ -1001,6 +1107,8 @@ uniform vec4 uU0;
 uniform vec4 uU1;
 uniform vec4 uU2;
 uniform vec4 uU3;
+uniform vec4 uU4;
+uniform vec4 uU5;
 float ellipseE(vec2 p, vec4 o, vec2 a, float aspect) {
     vec2 d = vec2(p.x - o.x, (p.y - o.y) / aspect);
     float u = clamp(dot(d, a) / max(o.z, 0.0001), -4.0, 4.0);
@@ -1030,8 +1138,11 @@ void main() {
         nonHair = clamp(1.0 - uU0.w * h, 0.0, 1.0);
     }
     if (uU1.w > 0.001) {
-        vec2 ouv = vec2(uU0.x * vSrc.x + uU0.y * vSrc.y + uU0.z,
-                        uU1.x * vSrc.x + uU1.y * vSrc.y + uU1.z);
+        // v3.9.4 (C5/seg-2): Use independent occlusion timestamp affine (uU4/uU5) when provided.
+        vec3 oa0 = (uU4.w > 0.5) ? uU4.xyz : uU0.xyz;
+        vec3 oa1 = (uU4.w > 0.5) ? uU5.xyz : uU1.xyz;
+        vec2 ouv = vec2(oa0.x * vSrc.x + oa0.y * vSrc.y + oa0.z,
+                        oa1.x * vSrc.x + oa1.y * vSrc.y + oa1.z);
         float occIn = step(0.0, ouv.x) * step(ouv.x, 1.0) * step(0.0, ouv.y) * step(ouv.y, 1.0);
         float occ = mix(1.0, texture2D(uTex1, vec2(ouv.x, 1.0 - ouv.y)).r, occIn);
         nonHair *= mix(1.0, smoothstep(0.25, 0.70, occ), clamp(uU1.w, 0.0, 1.0));
@@ -1253,7 +1364,9 @@ void main() {
         float effRgbDiff = max(rgbDiff - 0.36 * spatialGrad, 0.0);
         float shrinkClear = max((pMask - guidedMask) - 0.48, 0.0) * 0.12;
         float motion = max(effRgbDiff, shrinkClear);
-        float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion));
+        // v3.9.4 (seg-7): Release temporal hold on large mask transitions accompanied by above-noise RGB change.
+        float lowContrastRelease = smoothstep(0.35, 0.70, abs(guidedMask - pMask)) * smoothstep(0.008, 0.025, rgbDiff);
+        float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion)) * (1.0 - lowContrastRelease);
         outMask = mix(guidedMask, pMask, keep);
     }
     gl_FragColor = vec4(outMask, outMask, outMask, 1.0);

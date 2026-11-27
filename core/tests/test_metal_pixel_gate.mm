@@ -3147,6 +3147,203 @@ void testV393NoDarkShadowPatchesBodyFaceHairGuided(MetalDevice& dev) {
     }
 }
 
+void testV394MetalAuditPixelInvariants(MetalDevice& dev) {
+    // 1. A1 + A2: Under default Natural beauty (with face tracked at center), neutral gray wall
+    //    AND warm skin-colored wood background outside the head/neck/chest prior must stay untouched (<= 2/255),
+    //    while face skin and chest below chin still whiten cleanly.
+    {
+        constexpr int kW = 128, kH = 128;
+        std::vector<uint8_t> camPx(kW * kH * 4, 255);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int o = (y * kW + x) * 4;
+                if (x < 24) {
+                    // Neutral gray wall on far left (A1)
+                    camPx[o] = 120; camPx[o + 1] = 120; camPx[o + 2] = 120;
+                } else if (x >= kW - 24) {
+                    // Warm beige/wood wall on far right (A2: matches skin chroma!)
+                    camPx[o] = 185; camPx[o + 1] = 148; camPx[o + 2] = 122;
+                } else {
+                    // Center face / neck / chest skin
+                    camPx[o] = 185; camPx[o + 1] = 148; camPx[o + 2] = 122;
+                }
+            }
+        }
+        const TextureId camTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camPx.data());
+        LiveBeautyEngine engine(dev);
+        BeautyConfig cfg{};
+        cfg.enabled = true;
+        cfg.smoothing = 0.60f;
+        cfg.whiten = 0.55f;
+        cfg.rosy = 0.35f;
+        engine.setConfig(cfg);
+
+        // Place tracked face centered at (0.50, 0.38) top-down with fw ~ 0.26
+        const auto& xyz = FaceMeshTopology::kCanonicalXyz;
+        const float scale = 0.26f / FaceMeshFilter::canonicalFaceWidth();
+        std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+        for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+            mpXy[i * 2] = 0.50f + xyz[i * 3] * scale;
+            mpXy[i * 2 + 1] = 0.38f - xyz[i * 3 + 1] * scale;
+        }
+        for (int i = 468; i < 478; ++i) { mpXy[i * 2] = 0.50f; mpXy[i * 2 + 1] = 0.35f; }
+        TextureId outTex = kInvalidTexture;
+        for (int f = 0; f < 5; ++f) {
+            const int64_t ts = 1000 + f * 33;
+            EXPECT_TRUE(engine.submitFaceLandmarks(ts, mpXy.data(), 478, kW, kH, ts));
+            outTex = engine.processFrame(camTex, kW, kH, ts, ts, kInvalidTexture, 0.30f, 1.0f);
+        }
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(outTex, out.data(), kW, kH));
+
+        // Neutral gray wall (x=10, y=64): max drift <= 2/255 (was +11..25/255!)
+        const int grayIdx = (64 * kW + 10) * 4;
+        EXPECT_TRUE(std::abs(int(out[grayIdx + 0]) - 120) <= 2);
+        EXPECT_TRUE(std::abs(int(out[grayIdx + 1]) - 120) <= 2);
+        EXPECT_TRUE(std::abs(int(out[grayIdx + 2]) - 120) <= 2);
+
+        // Warm wood wall on far right (x=118, y=48, outside head/chest prior): max drift <= 2/255!
+        const int woodIdx = (48 * kW + 118) * 4;
+        EXPECT_TRUE(std::abs(int(out[woodIdx + 0]) - 185) <= 2);
+        EXPECT_TRUE(std::abs(int(out[woodIdx + 1]) - 148) <= 2);
+        EXPECT_TRUE(std::abs(int(out[woodIdx + 2]) - 122) <= 2);
+
+        // Face skin center (x=64, y=48): visibly whitened (> +8 luma)
+        const int faceIdx = (48 * kW + 64) * 4;
+        const float faceY = 0.299f * out[faceIdx] + 0.587f * out[faceIdx + 1] + 0.114f * out[faceIdx + 2];
+        const float origY = 0.299f * 185.0f + 0.587f * 148.0f + 0.114f * 122.0f;
+        EXPECT_TRUE(faceY - origY >= 8.0f);
+
+        engine.releaseGpuResources();
+        dev.destroyTexture(camTex);
+    }
+
+    // 2. A3 (skin-1): 1px dark eyebrow/stubble strand retains >= 75% contrast while isolated 1px dot still smooths.
+    {
+        constexpr int kW = 64, kH = 64;
+        std::vector<uint8_t> camPx(kW * kH * 4, 255);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int o = (y * kW + x) * 4;
+                camPx[o] = 190; camPx[o + 1] = 152; camPx[o + 2] = 132;
+            }
+        }
+        // Horizontal 1px dark hair/stubble line across y=24 (x=12..52)
+        for (int x = 12; x <= 52; ++x) {
+            const int o = (24 * kW + x) * 4;
+            camPx[o] = 90; camPx[o + 1] = 68; camPx[o + 2] = 58;
+        }
+        // Isolated 1px dark blackhead dot at (32, 42)
+        {
+            const int o = (42 * kW + 32) * 4;
+            camPx[o] = 90; camPx[o + 1] = 68; camPx[o + 2] = 58;
+        }
+        const TextureId srcTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, camPx.data());
+        // Simulate guided smooth output: guidedA=0.05 (flat skin), guidedB=skin*(1-0.05) -> heavily smoothed
+        const TextureId guidedTex = makeSolidTex(dev, kW, kH,
+            static_cast<uint8_t>(190 * 0.95f), static_cast<uint8_t>(152 * 0.95f),
+            static_cast<uint8_t>(132 * 0.95f), static_cast<uint8_t>(0.05f * 255.0f));
+        const TextureId skinMask = makeSolidTex(dev, kW, kH, 255, 0, 0, 255);
+        const TextureId fallback = makeSolidTex(dev, 1, 1, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, guidedTex); tb.bind(2, skinMask); tb.bind(3, fallback);
+        UniformBlock ub{};
+        ub.push(1.0f / kW, 1.0f / kH, 1.0f, 5.0f);  // framePresence = 1 + 4 (poly mask)
+        ub.push(0.0f, 0.70f, 0.0f, 0.20f);           // smooth = 0.70
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.5f, 0.5f, 0.4f, 0.4f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.025f, 0.09f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        dev.beginPass(rt, kW, kH, LoadOp::kDontCare);
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        auto yPx = [&](int x, int y) {
+            const int o = (y * kW + x) * 4;
+            return 0.299f * out[o] + 0.587f * out[o + 1] + 0.114f * out[o + 2];
+        };
+        const float skinY = yPx(32, 16);
+        const float lineY = yPx(32, 24);
+        const float dotY = yPx(32, 42);
+        const float origContrast = (0.299f * 190 + 0.587f * 152 + 0.114f * 132) - (0.299f * 90 + 0.587f * 68 + 0.114f * 58);
+        const float lineContrast = skinY - lineY;
+        const float dotContrast = skinY - dotY;
+        // 1px dark hair line must retain >= 75% contrast, while isolated 1px dot is smoothed noticeably more!
+        EXPECT_TRUE(lineContrast >= origContrast * 0.75f);
+        EXPECT_TRUE(dotContrast < lineContrast * 0.75f);
+
+        dev.destroyTexture(srcTex);
+        dev.destroyTexture(guidedTex);
+        dev.destroyTexture(skinMask);
+        dev.destroyTexture(fallback);
+        dev.destroyRenderTarget(rt);
+    }
+
+    // 3. C2 (makeup-v1): kMakeupIris contactLens linear strength (no alpha^2 attenuation)
+    {
+        constexpr int kW = 64, kH = 64;
+        const TextureId baseTex = makeSolidTex(dev, kW, kH, 40, 40, 40, 255);  // Dark pupil/iris base
+        // Iris atlas with bright blue lens RGB(40, 140, 240) and alpha=255 (no catchlight: G=0)
+        const TextureId irisAtlas = makeSolidTex(dev, 32, 32, 40, 140, 240, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        // Fullscreen mesh quad using kMakeupPos2Uv2Uv2 (pos, screenUv, makeupUv)
+        const float verts[4 * 6] = {
+            -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+             1.0f, -1.0f, 1.0f, 0.0f, 1.0f, 0.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f, 0.0f, 1.0f,
+             1.0f,  1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        };
+        const uint16_t idx[6] = {0, 1, 2, 2, 1, 3};
+        const BufferId vb = dev.createDynamicVertexBuffer(sizeof(verts));
+        dev.updateVertexBuffer(vb, verts, sizeof(verts));
+        const BufferId ib = dev.createStaticIndexBuffer(idx, 6);
+
+        // Copy baseTex into rt first, then alpha-blend kMakeupIris at lensS=0.50 (clS=0)
+        {
+            RenderState st{};
+            TextureBindings tb{}; tb.bind(0, baseTex);
+            UniformBlock ub{};
+            dev.beginPass(rt, kW, kH, LoadOp::kDontCare);
+            dev.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
+
+            RenderState blendSt{};
+            blendSt.blendEnable = true;
+            TextureBindings itb{}; itb.bind(0, baseTex); itb.bind(1, irisAtlas);
+            UniformBlock iub{};
+            iub.push(0.50f, 0.50f, 0.40f, 1.0f);  // iris center (0.5, 0.5), radius=0.40, aspect=1.0
+            iub.push(0.0f, 0.0f, 0.30f, 0.0f);    // tile=(0,0), effOpen=0.30 (fully open), yaw=0
+            iub.push(0.50f, 0.0f, 0.0f, 0.0f);    // lensS=0.50, clS=0.0
+            dev.drawIndexed(ShaderId::kMakeupIris, blendSt, vb, ib, 0, 6, VertexLayout::kMakeupPos2Uv2Uv2, itb, iub);
+            dev.endPass();
+        }
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        // Sample ring r=0.55*radius (x=32+14=46, y=32): base B=40, atlas B=240, lensA ~ 0.50*0.65 = 0.325
+        // Linear blend expects B ~ 40 + 0.325*(240-40) = 105 (old squared alpha gave only ~61!).
+        const int ringIdx = (32 * kW + 46) * 4;
+        EXPECT_TRUE(out[ringIdx + 2] >= 92 && out[ringIdx + 2] <= 122);
+
+        dev.destroyBuffer(vb);
+        dev.destroyBuffer(ib);
+        dev.destroyTexture(baseTex);
+        dev.destroyTexture(irisAtlas);
+        dev.destroyRenderTarget(rt);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -3180,6 +3377,7 @@ int main() {
         testV390SevenScenarioPortraitQualityBenchmark(dev);
         testV392MulticlassChestNoDarkShadowPatch(dev);
         testV393NoDarkShadowPatchesBodyFaceHairGuided(dev);
+        testV394MetalAuditPixelInvariants(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

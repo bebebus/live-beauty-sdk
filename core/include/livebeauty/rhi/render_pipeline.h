@@ -96,6 +96,11 @@ struct FrameInputs {
     float hairBgShown = 0.0f;   // Background hair-merge strength [0..1] (pre-warp coordinates)
     float occlusionShown = 1.0f; // Semantic occlusion strength [0..1] (motion & freshness gated)
     std::array<float, math::HairMaskTuning::kAffineSize> hairAffine = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    std::array<float, math::HairMaskTuning::kAffineSize> occAffine = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    bool hasOccAffine = false;
+
+    // Optional external output render target for zero-copy final pass directly into host FBO
+    RenderTargetId outputRt = kInvalidRenderTarget;
 
     // P1: Ambient illuminant RGB white-balance estimate [0.6..1.4] for natural makeup color adaptation
     Vec3 ambientRgb = {1.0f, 1.0f, 1.0f};
@@ -187,10 +192,11 @@ private:
                         bool clearFirst = true);
     void blurSkinMask();
     void renderHairAlpha(TextureId hairMaskTex, float hairShown, const float* hairAffine8,
-                         TextureId occlusionMaskTex, float occlusionShown,
+                         TextureId occlusionMaskTex, float occlusionShown, const float* occAffine8,
                          const float* ovalState41, float aspect, bool clearRgbToZero,
                          bool meshWarped, bool frontFaceCw);
-    TextureId renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, float matteTemporal);
+    TextureId renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, int srcW, int srcH,
+                                  float matteTemporal);
     void renderMakeup(
         RenderTargetId targetRt, TextureId baseTex, TextureId semanticTex, int width, int height,
         const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,

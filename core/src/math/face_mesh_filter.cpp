@@ -23,7 +23,7 @@ constexpr int kRightLids[6] = {160, 144, 159, 145, 158, 153};
 constexpr int kLeftLids[6] = {387, 373, 386, 374, 385, 380};
 constexpr int kCenterPoints[4] = {234, 454, 10, 152};
 constexpr float kResFcMin[4] = {0.85f, 1.25f, 1.30f, 0.52f};
-constexpr float kResBeta[4] = {24.0f, 68.0f, 72.0f, 10.0f};
+constexpr float kResBeta[4] = {24.0f, 68.0f, 72.0f, 18.0f};
 
 struct FilterStaticData {
     float canonicalFaceWidth = 1.0f;
@@ -321,6 +321,10 @@ void FaceMeshFilter::reset(bool keepBaseline) {
     lastTs_ = kTimeInvalid;
     vp_ = 0.0f;
     dq_.fill(0.0f);
+    instVqPrev_.fill(0.0f);
+    hasInstVqPrev_ = false;
+    accPower_ = -1.0f;
+    accMin_ = 0.0f;
     dLogScale_ = 0.0f;
     noisePower_ = -1.0f;
     noiseMin_ = 0.0f;
@@ -345,8 +349,9 @@ int FaceMeshFilter::filter(int64_t ts, const float* raw478x2, float aspect, floa
     if (!restart) {
         const float s = scaleOf(q_.data());
         const float sRaw = scaleOf(qRaw_.data());
+        const float dtScale = std::sqrt(std::max(1.0f, static_cast<float>(ts - lastTs_) / kTeRefMs));
         if (detOf(qRaw_.data()) * detOf(q_.data()) <= 0.0f ||
-            std::hypot(qRaw_[0] - q_[0], qRaw_[1] - q_[1]) > kJumpT * s ||
+            std::hypot(qRaw_[0] - q_[0], qRaw_[1] - q_[1]) > kJumpT * dtScale * s ||
             !(sRaw > 0.0f) || std::fabs(std::log(sRaw / s)) > kJumpLogS) {
             restart = true;
             jumped_ = true;
@@ -390,6 +395,10 @@ void FaceMeshFilter::startRun() {
     q_ = qRaw_;
     qRawPrev_ = qRaw_;
     dq_.fill(0.0f);
+    instVqPrev_.fill(0.0f);
+    hasInstVqPrev_ = false;
+    accPower_ = -1.0f;
+    accMin_ = 0.0f;
     const float s3d = std::sqrt(std::max(viewScale2(qRaw_.data()), 1e-10f));
     logScale_ = std::log(s3d);
     logScaleRawPrev_ = logScale_;
@@ -452,16 +461,18 @@ void FaceMeshFilter::step(float teMs) {
 
     const float adPoseUp = detail::oneEuroAlpha(kPoseDcut, teMs);
     const float adPoseDown = detail::oneEuroAlpha(kPoseDcutDown, teMs);
+    std::array<float, kPoseSize> instVq{};
     for (int k = 0; k < kPoseSize; ++k) {
-        const float instVq = (qRaw_[k] - qRawPrev_[k]) / teSec;
+        instVq[k] = (qRaw_[k] - qRawPrev_[k]) / teSec;
         // Signed velocity decays fast when motion stops (|instVq| < 0.55*|dq_|), while keeping symmetric adPoseUp on alternating noise!
-        const float adk = (std::fabs(instVq) < 0.55f * std::fabs(dq_[k])) ? adPoseDown : adPoseUp;
-        dq_[k] += adk * (instVq - dq_[k]);
+        const float adk = (std::fabs(instVq[k]) < 0.55f * std::fabs(dq_[k])) ? adPoseDown : adPoseUp;
+        dq_[k] += adk * (instVq[k] - dq_[k]);
     }
 
     float rawRigidAcc = 0.0f;
     float cohAcc = 0.0f;
     float lag2dAcc = 0.0f;
+    float acc2dAcc = 0.0f;
     // Scale- & 3D-noise-decoupled 2D rigid pose target using current smoothed (P, hw, s3dPrev) + raw (tx, ty, cRotRaw, sRotRaw)
     const float r2dA11 = (cRotRaw * p00_ - sRotRaw * p01_) * detSign * s3dPrev;
     const float r2dA12 = (cRotRaw * p01_ - sRotRaw * p11_) * s3dPrev;
@@ -484,7 +495,32 @@ void FaceMeshFilter::step(float teMs) {
         const float lx = (qRaw_[0] - q_[0]) + (r2dA11 - q_[2]) * sd.lx[b] + (r2dA12 - q_[3]) * sd.ly[b];
         const float ly = (qRaw_[1] - q_[1]) + (r2dA21 - q_[4]) * sd.lx[b] + (r2dA22 - q_[5]) * sd.ly[b];
         lag2dAcc += sd.basisW[j] * (lx * lx + ly * ly);
+
+        if (hasInstVqPrev_) {
+            const float dvx = (instVq[0] - instVqPrev_[0]) +
+                              (instVq[2] - instVqPrev_[2]) * sd.lx[b] +
+                              (instVq[3] - instVqPrev_[3]) * sd.ly[b];
+            const float dvy = (instVq[1] - instVqPrev_[1]) +
+                              (instVq[4] - instVqPrev_[4]) * sd.lx[b] +
+                              (instVq[5] - instVqPrev_[5]) * sd.ly[b];
+            acc2dAcc += sd.basisW[j] * (dvx * dvx + dvy * dvy);
+        }
     }
+    if (hasInstVqPrev_ && !illPosed) {
+        // 2nd-order velocity difference cancels steady linear velocity (dv=0) while measuring
+        // rigid-coherent detector jitter (sqrt(6)*sigma/te -> /sqrt(3) matches 1st-diff velocity std).
+        const float rigidRms = std::sqrt(acc2dAcc * (0.5f / 3.0f)) / s;
+        const float rPow = rigidRms * rigidRms;
+        if (accPower_ < 0.0f) {
+            accPower_ = rPow;
+            accMin_ = rPow;
+        }
+        accPower_ += (1.0f - std::exp(-teMs / kNfTauMs)) * (rPow - accPower_);
+        accMin_ = std::max(std::min(accMin_ * (1.0f + kNfRise * teSec), accPower_), 1e-8f);
+    }
+    instVqPrev_ = instVq;
+    hasInstVqPrev_ = true;
+
     const float spRaw = std::sqrt(rawRigidAcc * 0.5f) / s / teSec;
     vp_ = std::sqrt(cohAcc * 0.5f) / s;
 
@@ -506,14 +542,16 @@ void FaceMeshFilter::step(float teMs) {
         noiseMin_ = std::max(std::min(noiseMin_ * (1.0f + kNfRise * teSec), noisePower_), 1e-8f);
     }
     const float floorVal = (noisePower_ < 0.0f) ? 0.0f : std::sqrt(noiseMin_);
+    const float rigidFloor = (accPower_ < 0.0f) ? 0.0f : std::sqrt(accMin_);
     noiseFloor_ = floorVal;
     const float dead = kKPose * kCPose * floorVal;
+    const float deadBeta = std::max(dead, kKPose * kCPose * rigidFloor);
     const float basisLag = std::sqrt(lag2dAcc * 0.5f) / s;
     const float effVp = std::max(vp_, spRaw * detail::smoothstep(0.015f, 0.060f, basisLag));
     // Dimensionally consistent lag threshold: dead (1/s) * teSec (s) = faceWidth displacement
     const float lagCatchup = 45.0f * std::max(0.0f, basisLag - std::max(0.008f, 2.0f * dead * teSec));
     const float aPose = detail::oneEuroAlpha(
-        kPoseFcMin * comp + kPoseBeta * (std::max(0.0f, effVp - dead) + lagCatchup), teMs);
+        kPoseFcMin * comp + kPoseBeta * (std::max(0.0f, effVp - deadBeta) + lagCatchup), teMs);
 
     if (!illPosed) {
         // 1. Isotropic 3D scale (invariant to 2D roll + 3D yaw/pitch):
@@ -592,7 +630,7 @@ void FaceMeshFilter::step(float teMs) {
     }
     qRawPrev_ = qRaw_;
     poseSpeed_ = effVp;
-    poseDead_ = dead;
+    poseDead_ = deadBeta;
 
     if (!illPosed) {
         const float ad = detail::oneEuroAlpha(kResDcut, teMs);

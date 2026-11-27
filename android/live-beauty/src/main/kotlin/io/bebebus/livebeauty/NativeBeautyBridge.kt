@@ -99,6 +99,39 @@ object NativeBeautyBridge {
         width: Int,
         height: Int,
     ): Boolean
+    /** v3.9.4: 上报人体姿态检测未命中，使美体形变平滑淡出而不停留在原位。 */
+    @JvmStatic external fun nativeSubmitBodyMiss(handle: Long, sampleTsMs: Long)
+    /** v3.9.4: 上报宿主热管理/帧预算负载等级（0..3），与内核负载调度器统一取 max。 */
+    @JvmStatic external fun nativeSetHostLoadLevel(handle: Long, level: Int)
+    /** v3.9.4: 预览期分帧预编译 C++ GLES 着色器程序，消除首次开启美颜的编译卡顿。 */
+    @JvmStatic external fun nativePrewarm(handle: Long, startIdx: Int, count: Int)
+    /** v3.9.4: 零拷贝直出渲染到宿主 FBO（返回 true 表示已直接渲染进 dstFbo，无需额外整帧 blit）。 */
+    @JvmStatic external fun nativeProcessFrameToFbo(
+        handle: Long,
+        inputGlTex: Int,
+        width: Int,
+        height: Int,
+        frameTsMs: Long,
+        nowMs: Long,
+        personMaskGlTex: Int,
+        hairMaskGlTex: Int,
+        hairMaskStampMs: Long,
+        lightLuma: Float,
+        bitrateRatio: Float,
+        dstFbo: Int,
+    ): Boolean
+    /** v3.9.4: 零拷贝提交 DirectByteBuffer 6 分类 logits（直接按 letterbox 有效区 2x2 盒采样，免除 2.36MB Java 分配）。 */
+    @JvmStatic external fun nativeSubmitMulticlassLogitsDirect(
+        handle: Long,
+        logitsDirectBuf: java.nio.ByteBuffer,
+        srcWidth: Int,
+        srcHeight: Int,
+        padX: Int,
+        padY: Int,
+        validW: Int,
+        validH: Int,
+        sampleTsMs: Long,
+    ): Boolean
     @JvmStatic external fun nativeSelectFaceRoi(
         handle: Long,
         width: Int,

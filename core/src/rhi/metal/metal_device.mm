@@ -494,7 +494,7 @@ void MetalDevice::destroyBuffer(BufferId buf) {
     impl_->buffers.erase(buf);
 }
 
-void MetalDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor) {
+void MetalDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, LoadOp loadOp, const Vec4& clearColor) {
     if (!isReady()) return;
     auto it = impl_->rts.find(rt);
     if (it == impl_->rts.end()) return;
@@ -505,11 +505,20 @@ void MetalDevice::beginPass(RenderTargetId rt, int viewportW, int viewportH, boo
     id<MTLCommandBuffer> cb = impl_->ensureCmdBuf();
     MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = targetTex;
-    passDesc.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
-    passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-    if (clear) {
-        passDesc.colorAttachments[0].clearColor = MTLClearColorMake(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
+    switch (loadOp) {
+        case LoadOp::kClear:
+            passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
+            passDesc.colorAttachments[0].clearColor = MTLClearColorMake(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
+            break;
+        case LoadOp::kDontCare:
+            passDesc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            break;
+        case LoadOp::kLoad:
+        default:
+            passDesc.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            break;
     }
+    passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
     impl_->encoder = [cb renderCommandEncoderWithDescriptor:passDesc];
     MTLViewport vp{0.0, 0.0, static_cast<double>(viewportW), static_cast<double>(viewportH), 0.0, 1.0};
     [impl_->encoder setViewport:vp];

@@ -58,11 +58,15 @@ bool BodyGeometry::fromPose(const PoseLandmark* points, int count, float aspect,
     const double ay = dy / torso;
     if (-ay < 0.64) return false;
 
-    auto belowHip = [&](int idx) {
-        if (!visible(idx, 0.05f, kMinVis)) return false;
+    auto belowHip = [&](int idx, float minVis) {
+        if (!visible(idx, 0.05f, minVis)) return false;
         return (mx(idx) - mhX) * ax + (my(idx) - mhY) * ay > 0.3 * torso;
     };
-    const float legs = (belowHip(kLKnee) && belowHip(kRKnee)) ? 1.0f : 0.0f;
+    const bool kneesBelow = belowHip(kLKnee, 0.35f) && belowHip(kRKnee, 0.35f);
+    const float kneeVis = kneesBelow
+        ? std::min(points[kLKnee].visibility, points[kRKnee].visibility)
+        : 0.0f;
+    const float legs = (belowHip(kLKnee, kMinVis) && belowHip(kRKnee, kMinVis)) ? 1.0f : 0.0f;
     const float vis = std::min({points[kLShoulder].visibility, points[kRShoulder].visibility,
                                 points[kLHip].visibility, points[kRHip].visibility});
 
@@ -74,27 +78,45 @@ bool BodyGeometry::fromPose(const PoseLandmark* points, int count, float aspect,
     out.half = static_cast<float>(half);
     out.legs = legs;
     out.visibility = vis;
+    out.kneeVisibility = kneeVis;
     return true;
 }
 
 void BodyGeometrySmoother::reset() {
     hasState_ = false;
+    legsOn_ = false;
+    legsDropCount_ = 0;
+    legsWeight_ = 0.0f;
     ts_ = kTimeInvalid;
     presence_ = 0.0f;
     missing_ = 0.0f;
     last_ = kTimeInvalid;
 }
 
-const float* BodyGeometrySmoother::update(const float* targetState, int64_t sampleTimestampMs, int64_t nowMs) {
+const float* BodyGeometrySmoother::update(
+    const float* targetState,
+    int64_t sampleTimestampMs,
+    int64_t nowMs,
+    float torsoVis,
+    float kneeVis) {
     const float dt = (last_ == kTimeInvalid) ? 0.0f : static_cast<float>(std::clamp<int64_t>(nowMs - last_, 0, 100));
     last_ = nowMs;
-    if (targetState != nullptr) {
+    // v3.9.4 (shape-v2): Stateful hysteresis for torso acquisition (kVisibilityAcquire=0.6 vs kVisibilityKeep=0.4)
+    // and knee visibility (acquire >=0.6, drop after 3 consecutive samples <0.35) + 300ms smooth legs ramp.
+    const bool acceptTarget = (targetState != nullptr) &&
+        (hasState_ ? (torsoVis >= BodyGeometry::kVisibilityKeep) : (torsoVis >= BodyGeometry::kVisibilityAcquire));
+    if (acceptTarget) {
         missing_ = 0.0f;
+        const bool newSample = !hasState_ || (sampleTimestampMs != ts_);
         if (!hasState_) {
             std::memcpy(state_.data(), targetState, sizeof(float) * BodyGeometry::kStateSize);
+            legsOn_ = (kneeVis >= 0.0f) ? (kneeVis >= 0.6f) : (targetState[6] > 0.5f);
+            legsDropCount_ = 0;
+            legsWeight_ = legsOn_ ? 1.0f : 0.0f;
+            state_[6] = legsWeight_;
             hasState_ = true;
-        } else if (sampleTimestampMs != ts_) {
-            for (int i = 0; i < BodyGeometry::kStateSize; ++i) {
+        } else if (newSample) {
+            for (int i = 0; i < BodyGeometry::kStateSize - 1; ++i) {
                 state_[i] += (targetState[i] - state_[i]) * kAlpha;
             }
             const float len = std::hypot(state_[2], state_[3]);
@@ -102,7 +124,45 @@ const float* BodyGeometrySmoother::update(const float* targetState, int64_t samp
                 state_[2] /= len;
                 state_[3] /= len;
             }
+            if (kneeVis >= 0.0f) {
+                if (!legsOn_) {
+                    if (kneeVis >= 0.60f) {
+                        legsOn_ = true;
+                        legsDropCount_ = 0;
+                    }
+                } else {
+                    if (kneeVis < 0.35f) {
+                        if (++legsDropCount_ >= 3) {
+                            legsOn_ = false;
+                            legsDropCount_ = 0;
+                        }
+                    } else {
+                        legsDropCount_ = 0;
+                    }
+                }
+            } else {
+                if (!legsOn_) {
+                    if (targetState[6] > 0.5f) {
+                        legsOn_ = true;
+                        legsDropCount_ = 0;
+                    }
+                } else {
+                    if (targetState[6] <= 0.5f) {
+                        if (++legsDropCount_ >= 3) {
+                            legsOn_ = false;
+                            legsDropCount_ = 0;
+                        }
+                    } else {
+                        legsDropCount_ = 0;
+                    }
+                }
+            }
         }
+        const float legsStep = dt / kLegsRampMs;
+        legsWeight_ = legsOn_
+            ? std::min(legsWeight_ + legsStep, 1.0f)
+            : std::max(legsWeight_ - legsStep, 0.0f);
+        state_[6] = legsWeight_;
         ts_ = sampleTimestampMs;
         presence_ = std::min(presence_ + dt / kFadeInMs, 1.0f);
     } else if (hasState_) {
@@ -115,7 +175,8 @@ const float* BodyGeometrySmoother::update(const float* targetState, int64_t samp
     return hasState_ ? state_.data() : nullptr;
 }
 
-void NeckLift::applyFaceState(const float* face41, const float* body7, float neck, float aspect, float* out41) {
+void NeckLift::applyFaceState(
+    const float* face41, const float* body7, float neck, float aspect, float* out41, float bandOverride) {
     if (!face41 || !body7 || !out41) return;
     if (out41 != face41) {
         std::memcpy(out41, face41, sizeof(float) * FaceGeometryConstants::kStateSize);
@@ -125,7 +186,7 @@ void NeckLift::applyFaceState(const float* face41, const float* body7, float nec
     if (len < 1e-4f) return;
     const float axisX = body7[2] / len;
     const float axisY = body7[3] / len;
-    const float band = 0.3f * body7[4];
+    const float band = (bandOverride > 0.0f) ? bandOverride : (0.3f * body7[4]);
     const float width = body7[5];
     const float sideX = -axisY;
     const float sideY = axisX;
@@ -146,7 +207,7 @@ void NeckLift::applyLandmarks(
     const float* landmarks, int coordCount,
     float faceCenterX, float faceCenterY,
     const float* body7, float neck, float aspect,
-    float* outLandmarks) {
+    float* outLandmarks, float bandOverride) {
     if (!landmarks || !body7 || !outLandmarks || coordCount < FaceMeshFrame::kCoordCount) return;
     if (outLandmarks != landmarks) {
         std::memcpy(outLandmarks, landmarks, sizeof(float) * FaceMeshFrame::kCoordCount);
@@ -156,7 +217,7 @@ void NeckLift::applyLandmarks(
     if (len < 1e-4f) return;
     const float axisX = body7[2] / len;
     const float axisY = body7[3] / len;
-    const float band = 0.3f * body7[4];
+    const float band = (bandOverride > 0.0f) ? bandOverride : (0.3f * body7[4]);
     const float width = body7[5];
     const float sideX = -axisY;
     const float sideY = axisX;

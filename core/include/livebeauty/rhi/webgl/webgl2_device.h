@@ -116,7 +116,8 @@ public:
     BufferId createStaticIndexBuffer(const uint16_t* indices, size_t count) override;
     void destroyBuffer(BufferId buf) override;
 
-    void beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor) override;
+    using IRhiDevice::beginPass;
+    void beginPass(RenderTargetId rt, int viewportW, int viewportH, LoadOp loadOp, const Vec4& clearColor = {}) override;
     void drawFullScreenQuad(
         ShaderId shader, const RenderState& state,
         const TextureBindings& textures, const UniformBlock& uniforms) override;

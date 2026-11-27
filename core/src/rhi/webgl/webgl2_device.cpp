@@ -439,14 +439,14 @@ const WebGl2Device::ProgramCache& WebGl2Device::ensureProgram(ShaderId id) {
     return pc;
 }
 
-void WebGl2Device::beginPass(RenderTargetId rt, int viewportW, int viewportH, bool clear, const Vec4& clearColor) {
+void WebGl2Device::beginPass(RenderTargetId rt, int viewportW, int viewportH, LoadOp loadOp, const Vec4& clearColor) {
     if (!isReady()) return;
     auto it = rts_.find(rt);
     gl_.bindFramebuffer(kGlFramebuffer, (it != rts_.end()) ? it->second.fbo : 0);
     gl_.viewport(0, 0, viewportW, viewportH);
     gl_.disable(kGlDepthTest);
     gl_.disable(kGlScissorTest);
-    if (clear) {
+    if (loadOp == LoadOp::kClear) {
         gl_.clearColor(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
         gl_.clear(kGlColorBufferBit);
     }

@@ -69,7 +69,7 @@ public:
     BufferId createStaticIndexBuffer(const uint16_t*, size_t) override { return nextId_++; }
     void destroyBuffer(BufferId) override {}
 
-    void beginPass(RenderTargetId rt, int, int, bool, const Vec4&) override { activeRt = rt; }
+    void beginPass(RenderTargetId rt, int, int, LoadOp, const Vec4&) override { activeRt = rt; }
     void drawFullScreenQuad(ShaderId shader, const RenderState& st,
                             const TextureBindings& tb, const UniformBlock& ub) override {
         checkFeedback(tb);
@@ -175,8 +175,8 @@ void testFullBeautyPipelineOrderingAndNoFeedbackLoop() {
         if (c.shader == ShaderId::kGuidedCoeff) idxGuidedCoeff = i;
         if (c.shader == ShaderId::kCompositePro) {
             idxComposite = i;
-            // 11 vec4 + 4 samplers = exact 15 uniform vectors budget.
-            EXPECT_TRUE(c.uniforms.count == 11);
+            // 13 vec4 (including full 3x3 CAT02 WB) + 4 samplers = 17 uniform vectors.
+            EXPECT_TRUE(c.uniforms.count == 13);
             EXPECT_TRUE(c.textures.count == 4);
         }
         if (c.shader == ShaderId::kMakeupLayer && c.uniforms.v[2].z > 0.5f && idxEyeshadow < 0) idxEyeshadow = i;
@@ -569,7 +569,7 @@ void testV34HairDyeHalfFloatAndFaceParsingIntegration() {
     for (auto fmt : dev.createdRtFormats) {
         if (fmt == TextureFormat::kRgba16f) ++fp16Count;
     }
-    EXPECT_TRUE(fp16Count >= 7);  // rtBody_, rtWarp_, rtGuided_[0..2], rtMacro_[0..1]
+    EXPECT_TRUE(fp16Count == 5);  // v3.9.4 D1: rtGuided_[0..2], rtMacro_[0..1] FP16; full-res rtBody_/rtWarp_ RGBA8
 
     int idxComposite = -1, idxHairDye = -1, idxLip = -1;
     for (int i = 0; i < static_cast<int>(dev.calls.size()); ++i) {
@@ -736,7 +736,7 @@ void testV35EffectBundleTriggersAndWebGl2Backend() {
         webEngine.submitFaceLandmarks(1000, mpXy.data(), 478, 720, 1280, 1000);
         const TextureId out = webEngine.processFrame(videoTex, 720, 1280, 1000, 1000, r8Mask);
         EXPECT_TRUE(out != kInvalidTexture && webglDev.unwrapWebGlTexture(out) != 777u);
-        EXPECT_TRUE(sGl.rgba16fCount >= 7);
+        EXPECT_TRUE(sGl.rgba16fCount == 5);
         EXPECT_TRUE(sGl.r8Count >= 1);
         EXPECT_TRUE(sGl.linkedPrograms >= 8);
         EXPECT_TRUE(sGl.drawCalls >= 10);
@@ -1255,7 +1255,7 @@ void testV3613HairDyeStabilityDuringSlightHeadSwayAndLoadLevel1() {
                 indoorAmb = c.uniforms.v[10].w;
             }
         }
-        EXPECT_TRUE(indoorAmb >= 0.40f && indoorAmb <= 0.56f);
+        EXPECT_TRUE(std::fabs(indoorAmb) <= 1e-5f);  // v3.9.4 A1: auto ambient lift disabled to protect real background
 
         pIn.lightLuma = 0.80f;
         pipeDev.calls.clear();
@@ -1315,10 +1315,16 @@ void testV370ImplicitRetouchOpenMouthGateAndIndoorDenoise() {
     cfg.brightEyes = 0.0f;
     cfg.teethWhiten = 0.0f;
 
-    in.lightLuma = 0.24f;  // Normal indoor light -> triggers gentle indoor temporal denoise (v3.7.0)
-    // Frame 1 primes temporal denoise history; Frame 2 blends via kTemporalDenoise and reports kPassDenoise.
+    // v3.9.4 A5: normal indoor light (0.24) must NOT burn a full-res denoise pass; extreme darkness (0.08) engages it.
+    in.lightLuma = 0.24f;
     pipe.render(cfg, in);
     in.nowMs = 1033;
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassDenoise) == 0);
+
+    in.lightLuma = 0.08f;  // Extreme darkness -> engages temporal denoise (>= 0.15)
+    pipe.render(cfg, in);
+    in.nowMs = 1066;
     dev.calls.clear();
     pipe.render(cfg, in);
     EXPECT_TRUE((pipe.lastActivePassesMask() & kPassRetouch) != 0);
@@ -1448,9 +1454,15 @@ void testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute() {
     EXPECT_TRUE((pipe.lastActivePassesMask() & kPassAtmosphere) == 0);
     EXPECT_TRUE(!dev.feedbackLoopDetected);
 
-    // 2. Cinema LUT (night_vibe.png) automatically engages multi-scale bloom + filmic grain without feedback loop
+    // 2. Cinema LUT alone no longer forces invisible auto-bloom/grain (v3.9.4 D4); explicit bloom + filmGrain engages multi-scale bloom
     cfg.lutUrl = "asset://luts/night_vibe.png";
     cfg.lutIntensity = 0.80f;
+    dev.calls.clear();
+    pipe.render(cfg, in);
+    EXPECT_TRUE((pipe.lastActivePassesMask() & kPassAtmosphere) == 0);
+
+    cfg.bloom = 0.30f;
+    cfg.filmGrain = 0.18f;
     dev.calls.clear();
     const TextureId cinemaOut = pipe.render(cfg, in);
     EXPECT_TRUE(cinemaOut != inTex);
@@ -1478,15 +1490,17 @@ void testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute() {
         if (c.shader == ShaderId::kPostBloomExtract) sawLiteExtract = true;
         if (c.shader == ShaderId::kPostAtmosphere && c.uniforms.count >= 1) {
             sawLiteCat02 = (c.uniforms.v[0].x == 0.0f && c.uniforms.v[0].w > 0.5f);
-        } else if (c.shader == ShaderId::kCompositePro && c.uniforms.count == 11) {
-            // v3.9 fused zero-extra-pass CAT02 WB + filmic grain inside kCompositePro (uU4.xyz & uU5.x)
-            sawLiteCat02 = (c.uniforms.v[4].x > 0.0001f);
+        } else if (c.shader == ShaderId::kCompositePro && c.uniforms.count == 13) {
+            // v3.9.4 fused zero-extra-pass full 3x3 CAT02 WB + filmic grain inside kCompositePro (uU4/uU11/uU12)
+            sawLiteCat02 = (c.uniforms.v[11].w > 0.5f);
         }
     }
     EXPECT_TRUE(!sawLiteExtract);
     EXPECT_TRUE(sawLiteCat02);
     in.tierCaps.resolvedTier = math::PerformanceTier::kStandard;
     cfg.lutUrl.clear();
+    cfg.bloom = 0.0f;
+    cfg.filmGrain = 0.0f;
     cfg.colorTemp = 0.0f;
 
     // 4. Open-mouth geometric cutout uniforms wired to kMakeupLip (closed -> 0, open -> ~1)
@@ -1582,8 +1596,8 @@ void testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion() {
     for (const auto& c : dev.calls) {
         if (c.shader == ShaderId::kCompositePro) {
             ++compositeDraws;
-            if (c.uniforms.count == 11) {
-                fusedCat02Flag = (c.uniforms.v[4].x > 0.0001f) ? 1.0f : 0.0f;
+            if (c.uniforms.count == 13) {
+                fusedCat02Flag = (c.uniforms.v[11].w > 0.5f) ? 1.0f : 0.0f;
                 fusedGrainVal = c.uniforms.v[5].x - std::floor(c.uniforms.v[5].x);
             }
         }
@@ -1808,6 +1822,109 @@ void testV393OcclusionDeferredAfterCompositeBeforeMakeup() {
     engine.releaseGpuResources();
 }
 
+void testV394AuditFixesPipelineAndGpuPerf() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    engine.setHardwareProfile("Adreno (TM) 750", 8, 12288);
+    const TextureId camTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId extOutRt = dev.createRenderTarget(720, 1280, TextureFormat::kRgba8);
+
+    // 1. Default Natural look: zero denoise at indoor luma, zero auto ambient lift, zero auto bloom,
+    //    5 FP16 RTs (rtBody_/rtWarp_ RGBA8), zero redundant kPassThrough in rtWarp_, and zero-copy outputRt.
+    BeautyConfig cfg{};
+    cfg.enabled = true;
+    cfg.smoothing = 0.55f;
+    cfg.whiten = 0.30f;
+    cfg.rosy = 0.20f;
+    cfg.faceSlim = 0.25f;
+    cfg.eyeEnlarge = 0.15f;
+    engine.setConfig(cfg);
+
+    std::array<float, FaceMeshFrame::kCoordCount> mpXy{};
+    makeMediaPipeFace(720.0f / 1280.0f, mpXy);
+    for (int f = 0; f < 4; ++f) {
+        const int64_t ts = 1000 + f * 33;
+        engine.submitFaceLandmarks(ts, mpXy.data(), 478, 720, 1280, ts);
+        dev.calls.clear();
+        engine.processFrame(camTex, 720, 1280, ts, ts, kInvalidTexture, 0.30f, 1.0f,
+                            kInvalidTexture, kTimeInvalid, extOutRt);
+    }
+    EXPECT_TRUE(!dev.feedbackLoopDetected);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassDenoise) == 0);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassAtmosphere) == 0);
+    int compositeToExtRt = 0;
+    int passThroughInWarp = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kCompositePro) {
+            if (c.targetRt == extOutRt) ++compositeToExtRt;
+            EXPECT_TRUE(std::fabs(c.uniforms.v[10].w) < 1e-5f);  // ambientLift == 0
+        }
+        if (c.shader == ShaderId::kPassThrough) ++passThroughInWarp;
+    }
+    EXPECT_TRUE(compositeToExtRt == 1);
+    EXPECT_TRUE(passThroughInWarp == 0);
+
+    // 2. D5: Host load level switching 0 -> 2 -> 0 must NOT recreate any render targets!
+    const size_t rtCountBefore = dev.createdRtFormats.size();
+    engine.setHostLoadLevel(2);
+    EXPECT_TRUE(engine.loadLevel() >= 2);
+    engine.processFrame(camTex, 720, 1280, 1200, 1200);
+    engine.setHostLoadLevel(0);
+    engine.processFrame(camTex, 720, 1280, 1233, 1233);
+    EXPECT_TRUE(dev.createdRtFormats.size() == rtCountBefore);
+
+    // 3. C3 (shape-4): Stale body pose (>250ms) and submitBodyMiss fade out body warp cleanly
+    cfg.waistSlim = 0.50f;
+    engine.setConfig(cfg);
+    math::PoseLandmark pose33[33]{};
+    pose33[11] = {0.35f, 0.35f, 0.95f};
+    pose33[12] = {0.65f, 0.35f, 0.95f};
+    pose33[23] = {0.40f, 0.65f, 0.95f};
+    pose33[24] = {0.60f, 0.65f, 0.95f};
+    EXPECT_TRUE(engine.submitBodyPose(2000, pose33, 33, 720, 1280));
+    engine.processFrame(camTex, 720, 1280, 2000, 2000);
+    engine.processFrame(camTex, 720, 1280, 2033, 2033);
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassBody) != 0);
+    // Advance > 600ms without submitting any new body pose -> stale timeout kicks in and fades out kPassBody
+    for (int f = 1; f <= 20; ++f) {
+        engine.processFrame(camTex, 720, 1280, 2033 + f * 40, 2033 + f * 40);
+    }
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassBody) == 0);
+
+    // 4. C6 (seg-4 / seg-v3): Background blur stays active under loadLevel=2 (privacy!) and pass 0 uses step=1.0
+    cfg.waistSlim = 0.0f;
+    cfg.backgroundBlur = 0.70f;
+    engine.setConfig(cfg);
+    const TextureId personTex = dev.createTexture2D(128, 128, TextureFormat::kR8, nullptr);
+    engine.setHostLoadLevel(0);
+    dev.calls.clear();
+    engine.processFrame(camTex, 720, 1280, 3500, 3500, personTex);
+    int bgBlurCallsNormal = 0;
+    float firstStepNormal = -1.0f;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kBgBlur) {
+            if (bgBlurCallsNormal == 0) firstStepNormal = c.uniforms.v[0].x * 180.0f;
+            ++bgBlurCallsNormal;
+        }
+    }
+    EXPECT_TRUE(bgBlurCallsNormal == 6);  // 3 H+V passes at bgBlur=0.70 > 0.55
+    EXPECT_TRUE(std::fabs(firstStepNormal - 1.0f) < 0.02f);
+
+    engine.setHostLoadLevel(2);
+    for (int f = 1; f <= 20; ++f) {
+        dev.calls.clear();
+        engine.processFrame(camTex, 720, 1280, 3500 + f * 40, 3500 + f * 40, personTex);
+    }
+    EXPECT_TRUE((engine.stats().activePassesMask & kPassBg) != 0);  // Privacy preserved!
+    int bgBlurCallsLoad = 0;
+    for (const auto& c : dev.calls) {
+        if (c.shader == ShaderId::kBgBlur) ++bgBlurCallsLoad;
+    }
+    EXPECT_TRUE(bgBlurCallsLoad == 2);  // Simplified to 1 H+V pass under load
+
+    engine.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -1827,6 +1944,7 @@ int main() {
     testV380AtmospherePostPipelineOpenMouthLipAndOcclusionMute();
     testV390PassFusionAutoWhiteBalanceFastBloomAndDualFaceOcclusion();
     testV393OcclusionDeferredAfterCompositeBeforeMakeup();
+    testV394AuditFixesPipelineAndGpuPerf();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

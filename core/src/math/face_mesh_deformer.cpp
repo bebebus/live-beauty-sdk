@@ -287,9 +287,19 @@ bool FaceMeshDeformer::deform(
     const float rawWRight = std::max(softMaxSpan(rightCandidates.data(), static_cast<int>(rightCandidates.size()),
                                                  1.0f, midBoneX, midBoneY, ux, uy, spanBeta), 0.10f * fw);
 
+    // v3.9.4 (C4/shape-3): Compute per-side outer eye corner lateral offsets (landmarks 33 & 263),
+    // normalized against 31-pt Procrustes sRef and smoothed with envAlpha in temporal mode so
+    // single-landmark outer-canthus jitter never modulates mid-cheek innerGate frame-to-frame.
+    const float du33 = (srcMx_[33] - midBoneX) * ux + (srcMy_[33] - midBoneY) * uy;
+    const float du263 = (srcMx_[263] - midBoneX) * ux + (srcMy_[263] - midBoneY) * uy;
+    const float rawEyeDuLeft = (du33 < du263) ? std::fabs(du33) : std::fabs(du263);
+    const float rawEyeDuRight = (du33 < du263) ? std::fabs(du263) : std::fabs(du33);
+
     float signedYaw = rawSignedYaw;
     float wLeft = rawWLeft;
     float wRight = rawWRight;
+    float eyeDuLeft = rawEyeDuLeft;
+    float eyeDuRight = rawEyeDuRight;
     float rEyeW = rawREyeW;
     float lEyeW = rawLEyeW;
     float rEyeH = rawREyeH;
@@ -303,6 +313,8 @@ bool FaceMeshDeformer::deform(
         const float invRef = 1.0f / sRef;
         const float rawL = rawWLeft * invRef;
         const float rawR = rawWRight * invRef;
+        const float rawEyeDuL = rawEyeDuLeft * invRef;
+        const float rawEyeDuR = rawEyeDuRight * invRef;
         const float rawRew = rawREyeW * invRef;
         const float rawLew = rawLEyeW * invRef;
         const float rawReh = rawREyeH * invRef;
@@ -311,6 +323,8 @@ bool FaceMeshDeformer::deform(
             signedYawState_ = rawSignedYaw;
             wLeftRatioState_ = rawL;
             wRightRatioState_ = rawR;
+            eyeDuLeftRatioState_ = rawEyeDuL;
+            eyeDuRightRatioState_ = rawEyeDuR;
             rEyeWRatioState_ = rawRew;
             lEyeWRatioState_ = rawLew;
             rEyeHRatioState_ = rawReh;
@@ -324,6 +338,8 @@ bool FaceMeshDeformer::deform(
             signedYawState_ += envAlpha * (rawSignedYaw - signedYawState_);
             wLeftRatioState_ += envAlpha * (rawL - wLeftRatioState_);
             wRightRatioState_ += envAlpha * (rawR - wRightRatioState_);
+            eyeDuLeftRatioState_ += envAlpha * (rawEyeDuL - eyeDuLeftRatioState_);
+            eyeDuRightRatioState_ += envAlpha * (rawEyeDuR - eyeDuRightRatioState_);
             rEyeWRatioState_ += eyeEnvAlpha * (rawRew - rEyeWRatioState_);
             lEyeWRatioState_ += eyeEnvAlpha * (rawLew - lEyeWRatioState_);
             rEyeHRatioState_ += eyeEnvAlpha * (rawReh - rEyeHRatioState_);
@@ -332,6 +348,8 @@ bool FaceMeshDeformer::deform(
         signedYaw = signedYawState_;
         wLeft = std::max(wLeftRatioState_ * sRef, 0.10f * fw);
         wRight = std::max(wRightRatioState_ * sRef, 0.10f * fw);
+        eyeDuLeft = std::max(eyeDuLeftRatioState_ * sRef, 0.05f * fw);
+        eyeDuRight = std::max(eyeDuRightRatioState_ * sRef, 0.05f * fw);
         rEyeW = std::max(rEyeWRatioState_ * sRef, 0.01f);
         lEyeW = std::max(lEyeWRatioState_ * sRef, 0.01f);
         rEyeH = std::max(rEyeHRatioState_ * sRef, 0.004f);
@@ -340,8 +358,11 @@ bool FaceMeshDeformer::deform(
 
     const float smoothYawWeight = 1.0f - detail::smoothstep(0.45f, FaceMeshFrame::kMaxYawRatio, std::fabs(signedYaw));
     const float effYawW = temporal ? smoothYawWeight : yawWeight;
-    const float faceMod = presence * steadyFace;
-    const float eyeMod = presence * steadyEye;
+    // v3.9.4 (shape-9): Unified steep-yaw fade-out so near-side slim/eye smoothly tapers to 0 before
+    // FaceMeshFrame::kMaxYawRatio (0.72) tracking rejection instead of snapping back in 1-3 frames.
+    const float yawKeep = 1.0f - detail::smoothstep(0.55f, 0.70f, std::fabs(signedYaw));
+    const float faceMod = presence * steadyFace * yawKeep;
+    const float eyeMod = presence * steadyEye * yawKeep;
     const float symFaceMod = faceMod * effYawW;
     const float symEyeMod = eyeMod * effYawW;
 
@@ -350,9 +371,9 @@ bool FaceMeshDeformer::deform(
     const float sFaceNarrow = detail::clampf(params.faceNarrow, 0.0f, 1.0f) * faceMod;
     const float sFaceSmall = detail::clampf(params.faceSmall, 0.0f, 1.0f) * symFaceMod;
     const float sCheekbone = detail::clampf(params.cheekboneSlim, 0.0f, 1.0f) * faceMod;
-    // 纵向防拉长比例补偿：纯横向瘦脸/窄脸会拉高脸长宽比、显头长；在 2D 连续轮廓场内温和微收上下轮廓，
-    // 严格保持保面积微分同胚（零三角翻面/零侧脸重影）且五官中区零压扁。
-    const float antiLong = detail::clampf(sFaceSlim * 0.85f + sFaceNarrow * 0.55f, 0.0f, 1.0f) * effYawW;
+    // v3.9.4 (A6/shape-2): Reduced chin-only anti-elongation compensation (0.20*slim + 0.15*narrow)
+    // so slimming genuinely narrows jaw/height ratio without shrinking the whole head or lowering hairline.
+    const float antiLong = detail::clampf(sFaceSlim * 0.20f + sFaceNarrow * 0.15f, 0.0f, 1.0f) * effYawW;
     const float sChin = detail::clampf(params.chinShape, -1.0f, 1.0f) * symFaceMod;
     const float sForehead = detail::clampf(params.foreheadShape, -1.0f, 1.0f) * symFaceMod;
     const float sCranial = detail::clampf(params.cranialTop, 0.0f, 1.0f) * symFaceMod;
@@ -401,7 +422,9 @@ bool FaceMeshDeformer::deform(
         const float xi = std::fabs(du) / wLocal;
         if (xi >= 2.15f) return {0.0f, 0.0f};
 
-        const float innerGate = detail::smoothstep(0.32f, 0.56f, xi);
+        const float eyeDuSide = eyeDuLeft + (eyeDuRight - eyeDuLeft) * sideBlend;
+        const float xi0 = detail::clampf(eyeDuSide / wLocal + 0.05f, 0.60f, 0.85f);
+        const float innerGate = detail::smoothstep(xi0, xi0 + 0.25f, xi);
         const float outerGate = 1.0f - detail::smoothstep(1.35f, 2.10f, xi);
         const float vertGuard = 1.0f - detail::smoothstep(0.95f, 1.32f, -dv);
         const float eta = innerGate * outerGate;
@@ -431,11 +454,9 @@ bool FaceMeshDeformer::deform(
             }
         }
         if (antiLong > 1e-4f && outerGate > 1e-5f) {
-            // 2D 连续纵向防拉长场（不依赖 vVis，正反侧重叠点同向连续位移，零翻面零重影）：
-            // 下巴端柔和上收 + 眉上额部及发际线外环温和下敛，五官中区 dv ∈ [-0.25, +0.35] 零位移。
+            // Chin-only gentle anti-elongation lift (hairline/forehead left strictly to foreheadShape/faceSmall).
             const float lowerW = detail::smoothstep(-0.25f, -0.95f, dv) * vertGuard;
-            const float upperW = detail::smoothstep(0.35f, 1.05f, dv) * (1.0f - detail::smoothstep(1.25f, 1.85f, dv));
-            liftV += antiLong * outerGate * fh * (0.036f * lowerW - 0.038f * upperW);
+            liftV += antiLong * outerGate * fh * 0.036f * lowerW;
         }
         if (frac <= 1e-6f && std::fabs(liftV) <= 1e-6f) return {0.0f, 0.0f};
         const float sgn = 2.0f * sideBlend - 1.0f;
@@ -693,6 +714,7 @@ bool FaceMeshDeformer::deform(
 
     for (int iter = 0; iter < kRelaxIter; ++iter) {
         relaxFactor_.fill(1.0f);
+        bool anyLimited = false;
         for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
             const float w = triFront_[t];
             if (w <= 0.0f) continue;
@@ -701,7 +723,19 @@ bool FaceMeshDeformer::deform(
             const float f = 1.0f - w * (1.0f - h);
             if (f >= 1.0f) continue;
             limitVertices(t, f);
+            anyLimited = true;
         }
+        if (!anyLimited) {
+            bool allUnity = true;
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                if (relax_[i] < 1.0f - 1e-5f) {
+                    allUnity = false;
+                    break;
+                }
+            }
+            if (allUnity) break;
+        }
+        bool relaxChanged = anyLimited;
         for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) relax_[i] *= relaxFactor_[i];
         for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
             const int start = tbl.neighborOffsets[i];
@@ -714,13 +748,16 @@ bool FaceMeshDeformer::deform(
                     sumNb += rv;
                 }
                 const float avgNb = sumNb / static_cast<float>(end - start);
-                relaxScratch_[i] = std::min(relax_[i], 0.5f * (relax_[i] + std::min(avgNb, minNb + 0.25f)));
+                const float nextVal = std::min(relax_[i], 0.5f * (relax_[i] + std::min(avgNb, minNb + 0.25f)));
+                if (std::fabs(nextVal - relax_[i]) > 1e-5f) relaxChanged = true;
+                relaxScratch_[i] = nextVal;
             } else {
                 relaxScratch_[i] = relax_[i];
             }
         }
         relax_ = relaxScratch_;
         applyDisplacement();
+        if (!relaxChanged) break;
     }
 
     relaxFactor_.fill(1.0f);
@@ -745,6 +782,60 @@ bool FaceMeshDeformer::deform(
         temporalValid_ = true;
     }
     applyDisplacement();
+
+    // v3.9.4 (shape-8): Post-safety triangle flip verification loop + global lambda bisection fallback
+    // on solidly front-facing triangles (triFront_ > 0.35, matching post-smoothing fold guard) so
+    // grazing silhouette triangles never falsely trigger global bisection under detector noise.
+    for (int k = 0; k < 4; ++k) {
+        bool anyBad = false;
+        for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
+            if (triFront_[t] <= 0.35f) continue;
+            if (areaRatio(t) < 0.05f) {
+                const int a = indices[t * 3];
+                const int b = indices[t * 3 + 1];
+                const int c = indices[t * 3 + 2];
+                float m = 1.0f;
+                if (a < FaceMeshTopology::kFaceVertexCount) m = std::min(m, relax_[a]);
+                if (b < FaceMeshTopology::kFaceVertexCount) m = std::min(m, relax_[b]);
+                if (c < FaceMeshTopology::kFaceVertexCount) m = std::min(m, relax_[c]);
+                const float clamped = m * 0.7f;
+                if (a < FaceMeshTopology::kFaceVertexCount) relax_[a] = clamped;
+                if (b < FaceMeshTopology::kFaceVertexCount) relax_[b] = clamped;
+                if (c < FaceMeshTopology::kFaceVertexCount) relax_[c] = clamped;
+                anyBad = true;
+            }
+        }
+        if (!anyBad) break;
+        applyDisplacement();
+    }
+    {
+        bool stillBad = false;
+        for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
+            if (triFront_[t] > 0.35f && areaRatio(t) < 0.05f) {
+                stillBad = true;
+                break;
+            }
+        }
+        if (stillBad) {
+            const auto savedRelax = relax_;
+            float lo = 0.0f, hi = 1.0f;
+            for (int step = 0; step < 6; ++step) {
+                const float mid = 0.5f * (lo + hi);
+                for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) relax_[i] = savedRelax[i] * mid;
+                applyDisplacement();
+                bool ok = true;
+                for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
+                    if (triFront_[t] > 0.35f && areaRatio(t) < 0.05f) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) lo = mid; else hi = mid;
+            }
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) relax_[i] = savedRelax[i] * lo;
+            applyDisplacement();
+        }
+    }
 
     // Rigid-motion-invariant face-local displacement smoothing (zero lag under 2D translation/roll/scale!):
     // suppresses high-frequency cheek slimming/contour innerGate & grazing-triangle relax jitter while keeping

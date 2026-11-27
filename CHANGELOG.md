@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.4] - 2026-11-27
+
+### Fixed
+- **Default Image Quality (Group A)**:
+  - Narrowed `ambientSceneLift` to true dim scenes (`L <= 0.30`, max `0.18`) and scaled by `portraitPrior` so normal well-lit backgrounds stay completely un-lifted; raised ambient light EMA damping to `tau = 4000ms` to suppress camera AE oscillation.
+  - Added `portraitPrior` spatial guard on body/neck whitening, rosy, and smoothing so warm wooden/beige walls outside the portrait silhouette no longer bleed.
+  - Replaced 4-tap with 8-tap directional `lineScore` (diagonal ±45° included) inside `kCompositePro` while preserving `guidedA` gating so 1px eyebrows/beard stubble retain high contrast without blocking blemish/blackhead smoothing.
+  - Recalibrated `twoStageSmoothMix` (`stage1 = clamp(s/0.85)`), preserved 65% macro facial shading in `kSkinHighFreq`, clamped negative texture deltas (`>= -0.025`), and fixed negative `brightness` dimming, warm `kPorcelain`, luma-normalized `kRose`, and purple-only lip care.
+  - Zeroed `indoorTemporalDenoise` for `L >= 0.14` (`0.18` only at `L <= 0.08`, gated `>= 0.15`) so normal lighting skips the wasted full-res temporal denoise pass.
+  - Changed face-slim anti-elongation compensation to chin-only (`0.20*slim + 0.15*narrow`), removing hairline drop and whole-head shrinkage.
+- **Makeup, Reshape, Body & Segmentation Bugs (Group C)**:
+  - Hand `body_skin` inside face ellipse now masks makeup and triggers `lowerFaceOcc` (`FaceParsingMapper`).
+  - Decoupled Porter-Duff alpha in `kMakeupIris` with blink gate `(0.06, 0.13)` and corneal specular preservation.
+  - Added 250ms stale body timeout and config-transition reset in `LiveBeautyEngine` + `nativeSubmitBodyMiss`.
+  - Added per-side outer-canthus `innerGate` protection (temporally smoothed against `sRef`), unified `yawKeep`, post-safety triangle flip bisection, C1 integral long legs, chin-aware swan neck, and 300ms knee-visibility hysteresis.
+  - Fixed `kHairAlpha` independent `occAffine` and `hairMotionKeep`, monotonic `kBgBlur` steps (`1.0, 2.0, 3.5`), 4-tap `kBgPremask`, privacy-preserving blur simplification under load, and low-contrast release in `kMatteRefine`.
+- **GPU Bandwidth & Performance (Group D) + Tracking & CPU Load Governance (Groups B & E)**:
+  - Downgraded `rtBody_`/`rtWarp_` from `RGBA16F` to `RGBA8` (`~24MB/frame` savings), added `LoadOp::kDontCare` (`glInvalidateFramebuffer` / `glDiscardFramebufferEXT` / `MTLLoadActionDontCare` without `glClear`), added `outputRt` zero-copy FBO direct output (`nativeProcessFrameToFbo`), disabled automatic style Bloom (`resolveStyleAtmosphere -> 0,0`), upgraded `kCompositePro` to full 3×3 CAT02 WB, skipped redundant `kPassThrough` when mesh-warped, and locked FP16 eligibility to `hardwareTier` with format-only RT reuse and smooth fadeout.
+  - Added pre-assignment duplicate-face NMS + secondary slot promotion (`MultiFaceTracker`), reviewer-corrected 2nd-order acceleration rigid noise floor (`FaceMeshFilter`), minimum exit ramp & debounce floors (`FaceTimeline`), unified host/engine load governor (`setHostLoadLevel` + `GL_EXT_disjoint_timer_query`), direct letterboxed 6-class logits ingestion (`submitMulticlass6LogitsRegion`), `Mali-G1`/`PowerVR D-Series` tier recognition, and `prewarmShaders`.
+
 ## [3.9.3] - 2026-11-27
 
 ### Fixed

@@ -241,7 +241,7 @@ void FaceRelightSolver::computeVertexRelight(
 
     switch (style) {
         case RelightStyle::kStudioSoftbox:
-            keyDir = normalize3(0.14f, 0.28f, 0.95f);
+            keyDir = normalize3(0.35f, 0.28f, 0.89f);
             fillDir = normalize3(-0.25f, -0.32f, 0.91f);
             keyWeight = 0.68f;
             fillWeight = 0.28f;
@@ -267,11 +267,11 @@ void FaceRelightSolver::computeVertexRelight(
     }
 
     const float rl = detail::clampf(relightStrength, 0.0f, 1.0f);
-    // Blend from subtle anatomical bone-plane highlight (when relight==0, preserving legacy radiance semantics)
-    // to full physically-rotated 3D studio normal shading (when relight>0).
-    const float threeDMix = 0.55f + 0.45f * rl;
-
+    // Smooth zero-mean 3D shading delta blended continuously by rl (eliminates the rl: 0->0.01 step jump
+    // and prevents flat +38/255 center over-brightening while preserving full directional 3D modeling).
     const float mirrorSign = mirrored ? -1.0f : 1.0f;
+    std::array<float, FaceMeshTopology::kFaceVertexCount> rawShading{};
+    float sumShading = 0.0f;
     for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
         const Vec3 nLocal{
             canonicalNormals_[i * 3 + 0] * mirrorSign,
@@ -283,26 +283,27 @@ void FaceRelightSolver::computeVertexRelight(
             pose.rot[3] * nLocal.x + pose.rot[4] * nLocal.y + pose.rot[5] * nLocal.z,
             pose.rot[6] * nLocal.x + pose.rot[7] * nLocal.y + pose.rot[8] * nLocal.z) : nLocal;
 
-        // Half-Lambert wrapped diffuse (smooth skin subsurface scattering feel, never harsh black terminator)
         const float ndlKey = std::max(0.0f, dot3(nWorld, keyDir));
         const float wrapKey = (ndlKey * 0.65f + 0.35f);
         const float keyLobe = wrapKey * wrapKey;
 
-        // Upward bounce fill neutralizes harsh downward indoor overhead shadows under brows/eyes/nose
         const float ndlFill = std::max(0.0f, dot3(nWorld, fillDir));
         const float overheadShadowLift = detail::clampf(-nWorld.y * 0.5f + 0.5f, 0.0f, 1.0f) * 0.18f * rl;
 
-        // Rim / side cheek contour depth (natural 3D face slimming through light falloff near grazing angles)
         const float facing = detail::clampf(nWorld.z, 0.0f, 1.0f);
         const float shading3d = detail::clampf(
             (keyLobe * keyWeight + ndlFill * fillWeight + overheadShadowLift) * (0.45f + 0.55f * facing),
             0.0f, 1.0f);
-
+        rawShading[i] = shading3d;
+        sumShading += shading3d;
+    }
+    const float meanShading = sumShading / static_cast<float>(FaceMeshTopology::kFaceVertexCount);
+    for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
         const float accent = anatomicalAccent_[i];
-        const float combined = detail::clampf(
-            shading3d * threeDMix + accent * (1.0f - threeDMix * (1.0f - accentWeight)),
-            0.0f, 1.0f);
-        out468[i] = combined;
+        const float centered3d = detail::clampf(0.50f + (rawShading[i] - meanShading) * 1.45f, 0.0f, 1.0f);
+        const float target3d = detail::clampf(
+            centered3d * (1.0f - accentWeight * 0.45f) + accent * (accentWeight * 0.45f), 0.0f, 1.0f);
+        out468[i] = detail::clampf(accent + rl * (target3d - accent), 0.0f, 1.0f);
     }
 }
 

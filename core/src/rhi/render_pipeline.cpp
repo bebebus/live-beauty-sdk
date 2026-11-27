@@ -256,46 +256,54 @@ void RenderPipeline::ensureStaticBuffers() {
 
 void RenderPipeline::ensureResources(int width, int height, bool useHalfFloat) {
     ensureStaticBuffers();
-    if (width == width_ && height == height_ && useHalfFloat == halfFloatActive_) return;
+    const bool sizeChanged = (width != width_ || height != height_);
+    const bool fmtChanged = (useHalfFloat != halfFloatActive_);
+    if (!sizeChanged && !fmtChanged) return;
 
     auto recreateFmt = [&](RenderTargetId& rt, int w, int h, TextureFormat fmt) {
         if (rt != kInvalidRenderTarget) device_.destroyRenderTarget(rt);
         rt = device_.createRenderTarget(w, h, fmt);
     };
     const TextureFormat interFmt = useHalfFloat ? TextureFormat::kRgba16f : TextureFormat::kRgba8;
-
-    width_ = width;
-    height_ = height;
     halfFloatActive_ = useHalfFloat;
-    guidedW_ = std::max(1, (width + 2) / 3);
-    guidedH_ = std::max(1, (height + 2) / 3);
-    macroW_ = std::max(1, (guidedW_ + 2) / 3);
-    macroH_ = std::max(1, (guidedH_ + 2) / 3);
-    skinW_ = std::max(1, (width + 3) / 4);
-    skinH_ = std::max(1, (height + 3) / 4);
-    bgW_ = std::max(1, (width + 3) / 4);
-    bgH_ = std::max(1, (height + 3) / 4);
 
-    // Promote multi-pass accumulation & dual-band guided filter targets to RGBA16F while keeping
-    // final output targets (rtComposite_, rtMakeup_, rtBgOut_) strictly RGBA8 for host ABI compatibility.
-    recreateFmt(rtBody_, width_, height_, interFmt);
-    recreateFmt(rtWarp_, width_, height_, interFmt);
-    recreateFmt(rtComposite_, width_, height_, TextureFormat::kRgba8);
-    recreateFmt(rtMakeup_, width_, height_, TextureFormat::kRgba8);
-    recreateFmt(rtDenoise_[0], width_, height_, TextureFormat::kRgba8);
-    recreateFmt(rtDenoise_[1], width_, height_, TextureFormat::kRgba8);
-    for (int i = 0; i < 3; ++i) recreateFmt(rtGuided_[i], guidedW_, guidedH_, interFmt);
-    for (int i = 0; i < 2; ++i) recreateFmt(rtMacro_[i], macroW_, macroH_, interFmt);
-    recreateFmt(rtSkinMask_, skinW_, skinH_, TextureFormat::kRgba8);
-    recreateFmt(rtSkinMaskTmp_, skinW_, skinH_, TextureFormat::kRgba8);
-    for (int i = 0; i < 2; ++i) recreateFmt(rtBg_[i], bgW_, bgH_, TextureFormat::kRgba8);
-    recreateFmt(rtBgHair_, bgW_, bgH_, TextureFormat::kRgba8);
-    recreateFmt(rtBgOut_, width_, height_, TextureFormat::kRgba8);
-    for (int i = 0; i < 2; ++i) recreateFmt(rtMatte_[i], bgW_, bgH_, TextureFormat::kRgba8);
-    for (int i = 0; i < 2; ++i) recreateFmt(rtMatteRgb_[i], bgW_, bgH_, TextureFormat::kRgba8);
-    recreateFmt(rtHeadDepth_, skinW_, skinH_, TextureFormat::kRgba8);
-    denoiseHistoryValid_ = false;
-    matteHistoryValid_ = false;
+    if (sizeChanged) {
+        width_ = width;
+        height_ = height;
+        guidedW_ = std::max(1, (width + 2) / 3);
+        guidedH_ = std::max(1, (height + 2) / 3);
+        macroW_ = std::max(1, (guidedW_ + 2) / 3);
+        macroH_ = std::max(1, (guidedH_ + 2) / 3);
+        skinW_ = std::max(1, (width + 3) / 4);
+        skinH_ = std::max(1, (height + 3) / 4);
+        bgW_ = std::max(1, (width + 3) / 4);
+        bgH_ = std::max(1, (height + 3) / 4);
+
+        // Full-res warp/body targets stay RGBA8 (input is 8-bit SDR; avoids 2x full-res FP16 bandwidth).
+        // Only downsampled dual-band guided filter targets (1/3 + 1/9 res) use RGBA16F for variance precision.
+        recreateFmt(rtBody_, width_, height_, TextureFormat::kRgba8);
+        recreateFmt(rtWarp_, width_, height_, TextureFormat::kRgba8);
+        recreateFmt(rtComposite_, width_, height_, TextureFormat::kRgba8);
+        recreateFmt(rtMakeup_, width_, height_, TextureFormat::kRgba8);
+        recreateFmt(rtDenoise_[0], width_, height_, TextureFormat::kRgba8);
+        recreateFmt(rtDenoise_[1], width_, height_, TextureFormat::kRgba8);
+        for (int i = 0; i < 3; ++i) recreateFmt(rtGuided_[i], guidedW_, guidedH_, interFmt);
+        for (int i = 0; i < 2; ++i) recreateFmt(rtMacro_[i], macroW_, macroH_, interFmt);
+        recreateFmt(rtSkinMask_, skinW_, skinH_, TextureFormat::kRgba8);
+        recreateFmt(rtSkinMaskTmp_, skinW_, skinH_, TextureFormat::kRgba8);
+        for (int i = 0; i < 2; ++i) recreateFmt(rtBg_[i], bgW_, bgH_, TextureFormat::kRgba8);
+        recreateFmt(rtBgHair_, bgW_, bgH_, TextureFormat::kRgba8);
+        recreateFmt(rtBgOut_, width_, height_, TextureFormat::kRgba8);
+        for (int i = 0; i < 2; ++i) recreateFmt(rtMatte_[i], bgW_, bgH_, TextureFormat::kRgba8);
+        for (int i = 0; i < 2; ++i) recreateFmt(rtMatteRgb_[i], bgW_, bgH_, TextureFormat::kRgba8);
+        recreateFmt(rtHeadDepth_, skinW_, skinH_, TextureFormat::kRgba8);
+        denoiseHistoryValid_ = false;
+        matteHistoryValid_ = false;
+    } else {
+        // Format-only change: only recreate downsampled guided/macro targets; keep full-res targets & temporal history intact.
+        for (int i = 0; i < 3; ++i) recreateFmt(rtGuided_[i], guidedW_, guidedH_, interFmt);
+        for (int i = 0; i < 2; ++i) recreateFmt(rtMacro_[i], macroW_, macroH_, interFmt);
+    }
 }
 
 void RenderPipeline::pushFrameDelay(
@@ -567,7 +575,7 @@ void RenderPipeline::renderSkinMask(
     // Painter's order: neck apron first (no cull), then outer feather ring (no cull), then 898 face triangles (cull back).
     TextureBindings tb{};
     UniformBlock ub{};
-    device_.beginPass(rtSkinMask_, skinW_, skinH_, clearFirst, {0.0f, 0.0f, 0.0f, 1.0f});
+    device_.beginPass(rtSkinMask_, skinW_, skinH_, clearFirst ? LoadOp::kClear : LoadOp::kLoad, {0.0f, 0.0f, 0.0f, 1.0f});
 
     RenderState featherState{};
     featherState.cullBack = false;
@@ -627,7 +635,7 @@ void RenderPipeline::renderMakeup(
     const float invH = 1.0f / static_cast<float>(std::max(height, 1));
 
     // Copy base composite to targetRt first so layered alpha-blended makeup reads clean baseTex without feedback loop.
-    device_.beginPass(targetRt, width, height, false);
+    device_.beginPass(targetRt, width, height, copyBaseFirst ? LoadOp::kDontCare : LoadOp::kLoad);
     if (copyBaseFirst) {
         RenderState copyState{};
         TextureBindings tb{};
@@ -784,7 +792,7 @@ void RenderPipeline::renderMakeup(
 
 void RenderPipeline::renderHairAlpha(
     TextureId hairMaskTex, float hairShown, const float* hairAffine8,
-    TextureId occlusionMaskTex, float occlusionShown,
+    TextureId occlusionMaskTex, float occlusionShown, const float* occAffine8,
     const float* ovalState41, float aspect, bool clearRgbToZero,
     bool meshWarped, bool frontFaceCw) {
     const TextureId fallbackTex = (assets_.whiteAlphaFallbackTex != kInvalidTexture)
@@ -811,7 +819,14 @@ void RenderPipeline::renderHairAlpha(
         ub.push(0.5f, 0.5f, 0.25f, 0.30f);
         ub.push(1.0f, 0.0f, aspect, 0.0f);
     }
-    device_.beginPass(rtSkinMask_, skinW_, skinH_, clearRgbToZero, {0.0f, 0.0f, 0.0f, 1.0f});
+    if (occAffine8) {
+        ub.push(occAffine8[0], occAffine8[1], occAffine8[2], 1.0f);
+        ub.push(occAffine8[4], occAffine8[5], occAffine8[6], 0.0f);
+    } else {
+        ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 1.0f, 0.0f, 0.0f);
+    }
+    device_.beginPass(rtSkinMask_, skinW_, skinH_, clearRgbToZero ? LoadOp::kClear : LoadOp::kLoad, {0.0f, 0.0f, 0.0f, 1.0f});
     device_.drawFullScreenQuad(ShaderId::kHairAlpha, st, tb, ub);
     if (meshWarped && (hasHair || hasOcc)) {
         // Follow primary face mesh deformation in alpha channel (matching SemanticAlphaPass.kt).
@@ -833,16 +848,19 @@ void RenderPipeline::renderHairAlpha(
     device_.endPass();
 }
 
-TextureId RenderPipeline::renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, float matteTemporal) {
+TextureId RenderPipeline::renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, int srcW, int srcH,
+                                              float matteTemporal) {
     const int nextParity = 1 - matteParity_;
-    // Downsample current RGB to bgW_ x bgH_ for RGB-guided joint bilateral & temporal motion diff.
+    // 4-tap box downsample of current RGB to bgW_ x bgH_ for anti-aliased RGB-guided bilateral & temporal motion diff.
     {
         RenderState st{};
         TextureBindings tb{};
         UniformBlock ub{};
         tb.bind(0, currentRgbTex);
-        device_.beginPass(rtMatteRgb_[nextParity], bgW_, bgH_, false);
-        device_.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
+        ub.push(1.0f / static_cast<float>(std::max(srcW, 1)),
+                1.0f / static_cast<float>(std::max(srcH, 1)), 0.0f, 0.0f);
+        device_.beginPass(rtMatteRgb_[nextParity], bgW_, bgH_, LoadOp::kDontCare);
+        device_.drawFullScreenQuad(ShaderId::kDownsample, st, tb, ub);
         device_.endPass();
     }
     {
@@ -856,18 +874,17 @@ TextureId RenderPipeline::renderTemporalMatte(TextureId rawMaskTex, TextureId cu
         tb.bind(1, curRgbSmall);
         tb.bind(2, prevMask);
         tb.bind(3, prevRgb);
-        const float temporalWeight = matteTemporal > 1e-4f
-            ? detail::clampf(0.36f + matteTemporal * 0.48f, 0.0f, 0.84f)
-            : 0.0f;
+        // No 0.36 floor: when motion pushes matteTemporal -> 0, temporal blend drops cleanly to 0 while keeping spatial refine.
+        const float temporalWeight = detail::clampf(matteTemporal, 0.0f, 0.84f);
         ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_),
-                temporalWeight, matteHistoryValid_ ? 1.0f : 0.0f);
+                temporalWeight, (matteHistoryValid_ && temporalWeight > 1e-4f) ? 1.0f : 0.0f);
         ub.push(0.055f, 0.022f, 0.080f, 0.0f);
-        device_.beginPass(rtMatte_[nextParity], bgW_, bgH_, false);
+        device_.beginPass(rtMatte_[nextParity], bgW_, bgH_, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
         device_.endPass();
     }
     matteParity_ = nextParity;
-    matteHistoryValid_ = true;
+    matteHistoryValid_ = (matteTemporal > 1e-4f);
     return device_.textureOf(rtMatte_[matteParity_]);
 }
 
@@ -902,7 +919,7 @@ void RenderPipeline::renderAr3dAccessories(
     }
 
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    device_.beginPass(targetRt, width, height, false);
+    device_.beginPass(targetRt, width, height, copyBaseFirst ? LoadOp::kDontCare : LoadOp::kLoad);
     if (copyBaseFirst) {
         RenderState copySt{};
         TextureBindings tb{};
@@ -977,7 +994,7 @@ void RenderPipeline::renderStickers(
     const float* landmarks478x2, const float* meta15, float presence) {
     if (!landmarks478x2 || !meta15 || in.stickerCount <= 0) return;
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    device_.beginPass(targetRt, width, height, false);
+    device_.beginPass(targetRt, width, height, copyBaseFirst ? LoadOp::kDontCare : LoadOp::kLoad);
     if (copyBaseFirst) {
         RenderState copySt{};
         TextureBindings tb{};
@@ -1015,7 +1032,7 @@ void RenderPipeline::renderParticles(
         nQuads * math::ParticleBurstSolver::kVertsPerQuad * math::ParticleBurstSolver::kFloatsPerVertex);
     device_.updateVertexBuffer(vbParticles_, particleVerts, sizeof(float) * floatCount);
 
-    device_.beginPass(targetRt, width, height, false);
+    device_.beginPass(targetRt, width, height, copyBaseFirst ? LoadOp::kDontCare : LoadOp::kLoad);
     if (copyBaseFirst) {
         RenderState copySt{};
         TextureBindings tb{};
@@ -1064,12 +1081,12 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         return in.inputTexture;
     }
 
-    const bool useHalfFloat = config.preferHalfFloat && (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
+    const bool useHalfFloat = config.preferHalfFloat && (in.tierCaps.hardwareTier != math::PerformanceTier::kLite);
     ensureResources(in.width, in.height, useHalfFloat);
     const float aspect = static_cast<float>(in.width) / static_cast<float>(in.height);
     TextureId currentTex = in.inputTexture;
 
-    // 0. Adaptive Temporal Denoise (Stage 0 pre-warp: v3.7.0 smooth indoor stabilization; strict motion cutoff + 0.18 cap)
+    // 0. Adaptive Temporal Denoise (Stage 0 pre-warp: active only in extreme low-light or high bitrate pressure >= 0.15)
     const float lumaDenoise = (config.smoothing > 0.0f)
         ? math::BeautyQualityTuning::indoorTemporalDenoise(in.lightLuma)
         : 0.0f;
@@ -1077,7 +1094,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         std::max(lumaDenoise, math::BitrateEffectsTuning::denoise(in.bitratePressure)) *
             in.denoiseKeep * in.loadFadeSmooth,
         0.0f, 0.18f);
-    if (denoiseWeight > 0.01f && denoiseHistoryValid_) {
+    if (denoiseWeight >= 0.15f && denoiseHistoryValid_) {
         const int dstIdx = 1 - denoiseParity_;
         RenderState st{};
         TextureBindings tb{};
@@ -1085,31 +1102,31 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         tb.bind(0, currentTex);
         tb.bind(1, device_.textureOf(rtDenoise_[denoiseParity_]));
         ub.push(denoiseWeight, 0.010f, 0.032f, 1.0f / static_cast<float>(in.width));
-        device_.beginPass(rtDenoise_[dstIdx], in.width, in.height, false);
+        device_.beginPass(rtDenoise_[dstIdx], in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kTemporalDenoise, st, tb, ub);
         device_.endPass();
         denoiseParity_ = dstIdx;
         currentTex = device_.textureOf(rtDenoise_[dstIdx]);
         lastActivePassesMask_ |= kPassDenoise;
-    } else if (denoiseWeight > 0.01f) {
+    } else if (denoiseWeight >= 0.15f) {
         RenderState st{};
         TextureBindings tb{};
         UniformBlock ub{};
         tb.bind(0, currentTex);
-        device_.beginPass(rtDenoise_[denoiseParity_], in.width, in.height, false);
+        device_.beginPass(rtDenoise_[denoiseParity_], in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
         device_.endPass();
         denoiseHistoryValid_ = true;
     } else {
-        // Invalidate history whenever denoise pauses (e.g. head moving) so stale frames are never blended later.
+        // Invalidate history whenever denoise pauses so stale frames are never blended later.
         denoiseHistoryValid_ = false;
     }
 
     // 1. Optional Background Bokeh / Virtual Background / Studio Chroma Key Replacement
-    // Privacy invariant: virtual background replacement (kVirtualImage / kVirtualBlur / kChromaKey) must NEVER
-    // fade out or expose the user's real room when EffectsLoadGovernor steps up loadLevel >= 1 (loadFadeBody -> 0).
-    // Under load, only optional 4-pass background-image bokeh blur is bypassed while keeping full VBG opacity.
-    const float bgBlur = config.backgroundBlur * in.loadFadeBody;
+    // Privacy invariant: backgroundBlur and virtual background replacement must NEVER fade out
+    // or expose the user's real room when loadLevel >= 1 (loadFadeBody -> 0). Under load, only
+    // bokeh pass count / hair merge is simplified while keeping full privacy opacity.
+    const float bgBlur = detail::clampf(config.backgroundBlur, 0.0f, 1.0f);
     const float vbgStrength = detail::clampf(config.virtualBgStrength, 0.0f, 1.0f);
     const bool wantChromaKey = (config.backgroundMode == BackgroundMode::kChromaKey) &&
                                assets_.virtualBgTex != kInvalidTexture &&
@@ -1171,10 +1188,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     } else if ((wantVirtualImage || wantBgBlur) && in.personMaskTex != kInvalidTexture) {
         lastActivePassesMask_ |= kPassBg;
 
-        // 1a. Optional Hair-Person Mask Merge (soft bokeh only; skipped during crisp virtual bg replacement
-        //     so asynchronous 5-12Hz hair masks never cast lagging dark shadow blobs onto the virtual scene)
+        // 1a. Optional Hair-Person Mask Merge (soft bokeh only; skipped during virtual bg or thermal load)
         TextureId effectiveMaskTex = in.personMaskTex;
-        if (!wantVirtualImage && in.hairMaskTex != kInvalidTexture && in.hairBgShown > 1e-4f) {
+        if (!wantVirtualImage && in.loadFadeBody >= 0.5f &&
+            in.hairMaskTex != kInvalidTexture && in.hairBgShown > 1e-4f) {
             RenderState st{};
             TextureBindings tb{};
             UniformBlock ub{};
@@ -1184,16 +1201,17 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             ub.push(in.hairAffine[4], in.hairAffine[5], in.hairAffine[6], 0.0f);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, in.hasFaceState ? 1.0f : 0.0f);
-            device_.beginPass(rtBgHair_, bgW_, bgH_, false);
+            device_.beginPass(rtBgHair_, bgW_, bgH_, LoadOp::kDontCare);
             device_.drawFullScreenQuad(ShaderId::kBgHairMerge, st, tb, ub);
             device_.endPass();
             effectiveMaskTex = device_.textureOf(rtBgHair_);
         }
 
         // 1b. P2: RGB-Guided Joint Bilateral + Motion-Adaptive Temporal Portrait Matting Refinement
+        // Skip during camera shake / extreme motion (effMatteTemporal == 0); no 0.36 floor inside renderTemporalMatte.
         const float effMatteTemporal = config.matteTemporal * in.denoiseKeep;
         if (in.tierCaps.enableMatteRefine && effMatteTemporal > 1e-4f) {
-            effectiveMaskTex = renderTemporalMatte(effectiveMaskTex, currentTex, effMatteTemporal);
+            effectiveMaskTex = renderTemporalMatte(effectiveMaskTex, currentTex, in.width, in.height, effMatteTemporal);
             lastActivePassesMask_ |= kPassMatteRefine;
         } else {
             matteHistoryValid_ = false;
@@ -1206,21 +1224,22 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 TextureBindings tb{};
                 UniformBlock ub{};
                 tb.bind(0, assets_.virtualBgTex);
-                device_.beginPass(rtBg_[0], bgW_, bgH_, false);
+                device_.beginPass(rtBg_[0], bgW_, bgH_, LoadOp::kDontCare);
                 device_.drawFullScreenQuad(ShaderId::kPassThrough, st, tb, ub);
                 device_.endPass();
+                static constexpr float kVbgSteps[2] = {1.0f, 1.5f};
                 for (int pass = 0; pass < 2; ++pass) {
-                    const float stepScale = (pass == 0) ? 1.0f : 2.0f;
+                    const float stepScale = kVbgSteps[pass];
                     tb.clear(); ub.clear();
                     tb.bind(0, device_.textureOf(rtBg_[0]));
                     ub.push(stepScale / static_cast<float>(bgW_), 0.0f, 0.0f, 0.0f);
-                    device_.beginPass(rtBg_[1], bgW_, bgH_, false);
+                    device_.beginPass(rtBg_[1], bgW_, bgH_, LoadOp::kDontCare);
                     device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
                     device_.endPass();
                     tb.clear(); ub.clear();
                     tb.bind(0, device_.textureOf(rtBg_[1]));
                     ub.push(0.0f, stepScale / static_cast<float>(bgH_), 0.0f, 0.0f);
-                    device_.beginPass(rtBg_[0], bgW_, bgH_, false);
+                    device_.beginPass(rtBg_[0], bgW_, bgH_, LoadOp::kDontCare);
                     device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
                     device_.endPass();
                 }
@@ -1252,7 +1271,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             ub.push(ax, ay, aspect, bgSecPresence);
             ub.push(secOvalCx, secOvalCy, secOvalRx, secOvalRy);
             ub.push(secAx, secAy, 0.0f, 0.0f);
-            device_.beginPass(rtBgOut_, in.width, in.height, false);
+            device_.beginPass(rtBgOut_, in.width, in.height, LoadOp::kDontCare);
             device_.drawFullScreenQuad(ShaderId::kBgVirtualMix, st, tb, ub);
             device_.endPass();
             currentTex = device_.textureOf(rtBgOut_);
@@ -1263,24 +1282,36 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             tb.bind(0, currentTex);
             tb.bind(1, effectiveMaskTex);
             ub.push(bgBlur, 0.38f, 0.68f, 0.0f);
-            device_.beginPass(rtBg_[0], bgW_, bgH_, false);
+            ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height), 0.0f, 0.0f);
+            device_.beginPass(rtBg_[0], bgW_, bgH_, LoadOp::kDontCare);
             device_.drawFullScreenQuad(ShaderId::kBgPremask, st, tb, ub);
             device_.endPass();
 
-            const float radiusGain = 0.55f + 0.85f * bgBlur;
-            for (int pass = 0; pass < 2; ++pass) {
-                const float stepScale = ((pass == 0) ? 1.25f : 2.65f) * radiusGain;
+            // Monotonic anti-aliasing blur step ladder (pass 0 ALWAYS fixed at 1.0 texel to eliminate comb/dot-matrix bokeh).
+            float steps[3] = {1.0f, 1.0f, 1.5f};
+            int passCount = 1;
+            if (in.loadFadeBody >= 0.5f) {
+                steps[0] = 1.0f;
+                steps[1] = detail::clampf(1.0f + 0.75f * bgBlur, 1.0f, 1.75f);
+                passCount = 2;
+                if (bgBlur > 0.55f) {
+                    steps[2] = detail::clampf(1.5f + 0.50f * bgBlur, 1.5f, 2.0f);
+                    passCount = 3;
+                }
+            }
+            for (int pass = 0; pass < passCount; ++pass) {
+                const float stepScale = steps[pass];
                 tb.clear(); ub.clear();
                 tb.bind(0, device_.textureOf(rtBg_[0]));
                 ub.push(stepScale / static_cast<float>(bgW_), 0.0f, 0.0f, 0.0f);
-                device_.beginPass(rtBg_[1], bgW_, bgH_, false);
+                device_.beginPass(rtBg_[1], bgW_, bgH_, LoadOp::kDontCare);
                 device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
                 device_.endPass();
 
                 tb.clear(); ub.clear();
                 tb.bind(0, device_.textureOf(rtBg_[1]));
                 ub.push(0.0f, stepScale / static_cast<float>(bgH_), 0.0f, 0.0f);
-                device_.beginPass(rtBg_[0], bgW_, bgH_, false);
+                device_.beginPass(rtBg_[0], bgW_, bgH_, LoadOp::kDontCare);
                 device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
                 device_.endPass();
             }
@@ -1292,7 +1323,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             ub.push(bgBlur, 0.38f, 0.68f, in.hasFaceState ? 0.65f : 0.0f);
             ub.push(ovalCx, ovalCy, ovalRx, ovalRy);
             ub.push(ax, ay, aspect, bgFacePresence);
-            device_.beginPass(rtBgOut_, in.width, in.height, false);
+            device_.beginPass(rtBgOut_, in.width, in.height, LoadOp::kDontCare);
             device_.drawFullScreenQuad(ShaderId::kBgMix, st, tb, ub);
             device_.endPass();
             currentTex = device_.textureOf(rtBgOut_);
@@ -1301,9 +1332,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         matteHistoryValid_ = false;
     }
 
-    // 2. Optional 5-axis Body Warp + NeckLift alignment for face landmarks/state
+    // 2. Optional 5-axis Body Warp + Chin-Aware NeckLift alignment for face landmarks/state
     const float bodyMod = in.bodyPresence * in.loadFadeBody;
     float appliedNeck = 0.0f;
+    float neckBandOverride = 0.0f;
     if (in.hasBody && in.bodyState7 && bodyMod > 1e-4f && config.hasBodyReshape()) {
         const float legStrength = config.legLengthen * 0.28f * bodyMod * in.bodyState7[6];
         const float waist = config.waistSlim * 0.16f * bodyMod;
@@ -1311,6 +1343,23 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         const float shoulder = config.shoulderSlim * 0.12f * bodyMod;
         const float neck = config.neckLengthen * 0.22f * bodyMod;
         appliedNeck = neck;
+
+        if (neck > 1e-4f && in.hasFaceMesh && in.landmarks478x2) {
+            const float torso = in.bodyState7[4];
+            const float axLen = std::hypot(in.bodyState7[2], in.bodyState7[3]);
+            if (torso > 0.04f && axLen > 1e-4f) {
+                const float bax = in.bodyState7[2] / axLen;
+                const float bay = in.bodyState7[3] / axLen;
+                const float hipX = in.bodyState7[0];
+                const float hipY = in.bodyState7[1] / aspect;
+                const float chinX = in.landmarks478x2[152 * 2];
+                const float chinY = in.landmarks478x2[152 * 2 + 1] / aspect;
+                const float uChin = -((chinX - hipX) * bax + (chinY - hipY) * bay + torso);
+                if (uChin > 0.05f * torso) {
+                    neckBandOverride = detail::clampf(uChin - 0.03f * torso, 0.06f * torso, 0.30f * torso);
+                }
+            }
+        }
 
         const bool hasHandShield = (in.handShieldCoords.x >= 0.0f || in.handShieldCoords.z >= 0.0f);
         RenderState st{};
@@ -1321,10 +1370,9 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 in.bodyState7[2] * (1.0f + legStrength), in.bodyState7[3] * (1.0f + legStrength));
         ub.push(in.bodyState7[4], in.bodyState7[5], waist, bust);
         ub.push(shoulder, neck, aspect, hasHandShield ? 1.0f : 0.0f);
-        if (hasHandShield) {
-            ub.push(in.handShieldCoords);
-        }
-        device_.beginPass(rtBody_, in.width, in.height, false);
+        ub.push(in.handShieldCoords);
+        ub.push(neckBandOverride, 0.0f, 0.0f, 0.0f);
+        device_.beginPass(rtBody_, in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kBodyWarp, st, tb, ub);
         device_.endPass();
         currentTex = device_.textureOf(rtBody_);
@@ -1340,11 +1388,12 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 in.landmarks478x2, math::FaceMeshFrame::kCoordCount,
                 in.faceMeta15[math::FaceMeshFrame::kMetaCenterX],
                 in.faceMeta15[math::FaceMeshFrame::kMetaCenterY],
-                in.bodyState7, appliedNeck, aspect, liftedLandmarks_.data());
+                in.bodyState7, appliedNeck, aspect, liftedLandmarks_.data(), neckBandOverride);
             activeLandmarks = liftedLandmarks_.data();
         }
         if (in.hasFaceState && in.faceState41) {
-            math::NeckLift::applyFaceState(in.faceState41, in.bodyState7, appliedNeck, aspect, liftedState_.data());
+            math::NeckLift::applyFaceState(
+                in.faceState41, in.bodyState7, appliedNeck, aspect, liftedState_.data(), neckBandOverride);
             activeFaceState = liftedState_.data();
         }
     }
@@ -1393,9 +1442,10 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
 
     if (meshWarped || wantRetouch) {
         const TextureId sourceBeforeWarp = currentTex;
-        device_.beginPass(rtWarp_, in.width, in.height, false);
-        // Always draw unwarped fullscreen base first so back-face-culled triangles never expose stale previous-frame pixels.
-        {
+        device_.beginPass(rtWarp_, in.width, in.height, LoadOp::kDontCare);
+        // When meshWarped is active, kMeshWarp covers 100% of [-1,1]^2 with fold-free triangles;
+        // only draw fullscreen kPassThrough base when running retouch-only without mesh warp.
+        if (!meshWarped) {
             RenderState copySt{};
             TextureBindings tb{};
             UniformBlock ub{};
@@ -1521,8 +1571,8 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             // Ping-pong into rtBody_ when currentTex != rtBody_, else into rtWarp_ (strictly avoids feedback loop)
             const RenderTargetId secDstRt = (currentTex == device_.textureOf(rtBody_)) ? rtWarp_ : rtBody_;
             const TextureId srcBeforeSec = currentTex;
-            device_.beginPass(secDstRt, in.width, in.height, false);
-            {
+            device_.beginPass(secDstRt, in.width, in.height, LoadOp::kDontCare);
+            if (!secWarped) {
                 RenderState copySt{}; TextureBindings tb{}; UniformBlock ub{}; tb.bind(0, srcBeforeSec);
                 device_.drawFullScreenQuad(ShaderId::kPassThrough, copySt, tb, ub);
             }
@@ -1645,7 +1695,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         // patches into face/hairline/glasses/collar skin during kCompositePro.
         renderHairAlpha(
             in.hairMaskTex, in.hairShown, in.hairAffine.data(),
-            kInvalidTexture, 0.0f,
+            kInvalidTexture, 0.0f, nullptr,
             activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
         hasSemanticTex = true;
         hairWeightTex = device_.textureOf(rtSkinMask_);
@@ -1654,7 +1704,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
 
     // 4b. P3: Multi-scale isolated blemish / acne / redness healer (strictly inside face skin mask, pre-guided)
     const float maxFacePresence = std::max(effFacePresence, effSecPresence);
-    const float effBlemish = detail::clampf(config.blemishRemove * in.loadFadeSmooth, 0.0f, 1.0f);
+    const float effBlemish = detail::clampf(config.blemishRemove * in.loadFadeBody, 0.0f, 1.0f);
     if (in.tierCaps.enableBlemishHeal && effBlemish > 1e-4f && polySkinMaskReady && maxFacePresence > 1e-4f) {
         const RenderTargetId dstRt = (currentTex == device_.textureOf(rtWarp_)) ? rtBody_ : rtWarp_;
         RenderState st{};
@@ -1664,7 +1714,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         tb.bind(1, device_.textureOf(rtSkinMask_));
         ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height),
                 effBlemish, maxFacePresence);
-        device_.beginPass(dstRt, in.width, in.height, false);
+        device_.beginPass(dstRt, in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kBlemishHeal, st, tb, ub);
         device_.endPass();
         currentTex = device_.textureOf(dstRt);
@@ -1687,7 +1737,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
                 in.aiResidualRect.width, in.aiResidualRect.height);
         ub.push(detail::clampf(in.aiResidualStrength, 0.0f, 1.0f),
                 polySkinMaskReady ? 1.0f : 0.0f, 0.0f, 0.0f);
-        device_.beginPass(dstRt, in.width, in.height, false);
+        device_.beginPass(dstRt, in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kAiResidualBlend, st, tb, ub);
         device_.endPass();
         currentTex = device_.textureOf(dstRt);
@@ -1698,14 +1748,68 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
     const float effSmooth = detail::clampf(config.smoothing * in.loadFadeSmooth, 0.0f, 1.0f);
     if (effSmooth > 1e-4f) {
         const float eps = math::BeautyQualityTuning::guidedEps(effSmooth);
-        const float evenness = (in.tierCaps.resolvedTier != math::PerformanceTier::kLite)
-            ? math::BeautyQualityTuning::macroEvenness(effSmooth)
+        const float evenness = (in.tierCaps.hardwareTier != math::PerformanceTier::kLite)
+            ? (math::BeautyQualityTuning::macroEvenness(effSmooth) * in.loadFadeFace)
             : 0.0f;
         renderGuidedFilter(currentTex, in.width, in.height, eps, evenness, in.guidedSpread, hairWeightTex);
         lastActivePassesMask_ |= kPassGuided;
     }
 
-    // 6. Main Composite Pro + 64^3 3D LUT (15 active uniforms)
+    // Pre-compute post-composite stage activity so the true final full-res pass can render directly
+    // into in.outputRt (eliminates 1 full-res 1080p host blit when outputRt is provided).
+    static const std::string kEmptyLutUrl;
+    const bool preLutBound = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty());
+    const float preLutStr = preLutBound ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
+    float preAutoBloom = 0.0f, preAutoGrain = 0.0f;
+    math::BeautyQualityTuning::resolveStyleAtmosphere(
+        preLutBound ? config.lutUrl : kEmptyLutUrl, preLutStr,
+        static_cast<int>(config.filter), config.filterIntensity,
+        preAutoBloom, preAutoGrain);
+    const bool preAllowBloom = (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
+    const float preEffBloom = preAllowBloom
+        ? detail::clampf(std::max(config.bloom, preAutoBloom) * in.loadFadeBody, 0.0f, 1.0f)
+        : 0.0f;
+    const float preEffGrain = detail::clampf(std::max(config.filmGrain, preAutoGrain) * in.loadFadeSmooth, 0.0f, 0.50f);
+    float autoTemp = 0.0f, autoTint = 0.0f;
+    math::BeautyQualityTuning::estimateAutoWhiteBalance(in.ambientRgb, config.autoWhiteBalance, autoTemp, autoTint);
+    const float preEffTemp = detail::clampf(config.colorTemp + autoTemp, -1.0f, 1.0f);
+    const float preEffTint = detail::clampf(config.colorTint + autoTint, -1.0f, 1.0f);
+    const bool preHasCat02 = (std::fabs(preEffTemp) > 1e-4f || std::fabs(preEffTint) > 1e-4f);
+
+    const float effHairDye = detail::clampf(config.hairDye * in.loadFadeSmooth, 0.0f, 1.0f);
+    const float effHairShine = detail::clampf(config.hairShine * in.loadFadeSmooth, 0.0f, 1.0f);
+    const bool willRunHairDye = (effHairDye > 1e-4f || effHairShine > 1e-4f) &&
+                                in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f;
+    const bool willRenderPrimaryMakeup =
+        in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f && config.hasMakeup();
+    const bool willRenderSecondaryMakeup =
+        secActive && postSecLandmarks && config.hasMakeup();
+    const bool willRunPrimarySticker =
+        hasAnySticker && in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f;
+    const bool willRunSecondarySticker =
+        hasAnySticker && secActive && postSecLandmarks;
+    math::HeadPose3D cachedAr3dPose{};
+    const bool willRunAr3d =
+        in.tierCaps.enableAr3d && hasAnyAr3d && in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 &&
+        effFacePresence > 1e-4f &&
+        (cachedAr3dPose = math::FaceRelightSolver::estimateHeadPose(
+             postWarpLandmarks, aspect,
+             in.faceMeta15[math::FaceMeshFrame::kMetaAxisX],
+             in.faceMeta15[math::FaceMeshFrame::kMetaAxisY],
+             in.faceMeta15[math::FaceMeshFrame::kMetaYawWeight]),
+         cachedAr3dPose.valid);
+    const bool willRunParticles = hasParticles && config.enabled && !config.compareOriginal;
+    const bool willRunStage7 = willRenderPrimaryMakeup || willRenderSecondaryMakeup ||
+                               willRunPrimarySticker || willRunSecondarySticker ||
+                               willRunAr3d || willRunParticles;
+    const bool hasPostCompositeLayers = willRunHairDye || willRunStage7;
+
+    const bool fuseAtmInComposite = config.enabled && !config.compareOriginal &&
+        preEffBloom <= 1e-4f && (preEffGrain > 1e-4f || preHasCat02) && !hasPostCompositeLayers;
+    const bool willRunStage8 = config.enabled && !config.compareOriginal && !fuseAtmInComposite &&
+                               (preEffBloom > 1e-4f || preEffGrain >= 0.17f || preHasCat02);
+
+    // 6. Main Composite Pro + 64^3 3D LUT (13 vec4 + 4 samplers)
     {
         RenderState st{};
         TextureBindings tb{};
@@ -1714,8 +1818,7 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             ? assets_.whiteAlphaFallbackTex
             : ownedFallbackTex_;
         const TextureId lutTex = (assets_.lutTex != kInvalidTexture) ? assets_.lutTex : fallbackTex;
-        const float lutStrength = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty())
-            ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
+        const float lutStrength = preLutStr;
 
         tb.bind(0, currentTex);
         tb.bind(1, effSmooth > 1e-4f ? device_.textureOf(rtGuided_[0]) : currentTex);
@@ -1737,59 +1840,16 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         const float* fallbackEllipseState = (!meshWarped && appliedNeck <= 0.0f && in.dilatedFaceState41)
             ? in.dilatedFaceState41 : activeFaceState;
 
-        // Uniform layout matching FRAGMENT_PRO (11 vec4 + 4 samplers = 15 active uniforms):
-        // [0] uFrame, [1] uParams, [2] uDetails, [3] uTone(whiten,rosy,oilControl,relight),
-        // [4..5] uEyes[2], [6] uOval, [7] uMouth, [8..9] uEyeMask[2], [10] uGrade(lut,core,microDetailKeep,ambientLift)
-        const bool wantAmbientLift = config.enabled && !config.compareOriginal &&
-            (config.smoothing > 1e-4f || config.whiten > 1e-4f || config.rosy > 1e-4f ||
-             config.radiance > 1e-4f || config.relight > 1e-4f || config.brightness > 1e-4f ||
-             !config.lutUrl.empty());
-        const float ambientLift = wantAmbientLift
-            ? math::BeautyQualityTuning::ambientSceneLift(in.lightLuma)
-            : 0.0f;
-        // v3.9: Pre-resolve atmosphere + Auto CAT02 WB. When Bloom is inactive and no post-composite
-        // layers (hairDye / makeup / stickers / AR3D / particles) follow, pack CAT02 WB + filmic grain
-        // into unused uU4.xyz & uU5.x inside kCompositePro (keeping exact 15 active uniforms & 0 extra passes!).
-        float preAutoBloom = 0.0f, preAutoGrain = 0.0f;
-        const bool preLutBound = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty());
-        const float preLutStr = preLutBound ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
-        math::BeautyQualityTuning::resolveStyleAtmosphere(
-            preLutBound ? config.lutUrl : std::string(), preLutStr,
-            static_cast<int>(config.filter), config.filterIntensity,
-            preAutoBloom, preAutoGrain);
-        const bool preAllowBloom = (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
-        const float preEffBloom = preAllowBloom
-            ? detail::clampf(std::max(config.bloom, preAutoBloom) * in.loadFadeBody, 0.0f, 1.0f)
-            : 0.0f;
-        const float preEffGrain = detail::clampf(std::max(config.filmGrain, preAutoGrain) * in.loadFadeSmooth, 0.0f, 0.50f);
-        float autoTemp = 0.0f, autoTint = 0.0f;
-        math::BeautyQualityTuning::estimateAutoWhiteBalance(in.ambientRgb, config.autoWhiteBalance, autoTemp, autoTint);
-        const float preEffTemp = detail::clampf(config.colorTemp + autoTemp, -1.0f, 1.0f);
-        const float preEffTint = detail::clampf(config.colorTint + autoTint, -1.0f, 1.0f);
-        const bool preHasCat02 = (std::fabs(preEffTemp) > 1e-4f || std::fabs(preEffTint) > 1e-4f);
+        // Default auto ambient scene lift disabled (prevents greying/brightening real room background on AE cameras).
+        const float ambientLift = 0.0f;
 
-        const float willHairDye = detail::clampf(config.hairDye * in.loadFadeSmooth, 0.0f, 1.0f);
-        const float willHairShine = detail::clampf(config.hairShine * in.loadFadeSmooth, 0.0f, 1.0f);
-        const bool hasPostCompositeLayers =
-            ((willHairDye > 1e-4f || willHairShine > 1e-4f) &&
-             in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) ||
-            (in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f && config.hasMakeup()) ||
-            (secActive && postSecLandmarks && config.hasMakeup()) ||
-            (hasAnySticker && ((in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) ||
-                               (secActive && postSecLandmarks))) ||
-            (in.tierCaps.enableAr3d && hasAnyAr3d && in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) ||
-            hasParticles;
-
-        float fusedWbR = 0.0f, fusedWbG = 0.0f, fusedWbB = 0.0f, fusedPackedGrain = 0.0f;
-        const bool fuseAtmInComposite = config.enabled && !config.compareOriginal &&
-            preEffBloom <= 1e-4f && (preEffGrain > 1e-4f || preHasCat02) && !hasPostCompositeLayers;
+        float cat02[9] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float fusedCat02Full = 0.0f;
+        float fusedPackedGrain = 0.0f;
         if (fuseAtmInComposite) {
             if (preHasCat02) {
-                float cat02[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
                 math::BeautyQualityTuning::cat02WhiteBalanceMatrix(preEffTemp, preEffTint, cat02);
-                fusedWbR = detail::clampf(cat02[0] + cat02[1] + cat02[2], 0.50f, 1.60f);
-                fusedWbG = detail::clampf(cat02[3] + cat02[4] + cat02[5], 0.50f, 1.60f);
-                fusedWbB = detail::clampf(cat02[6] + cat02[7] + cat02[8], 0.50f, 1.60f);
+                fusedCat02Full = 1.0f;
             }
             const float grainPhase = std::fmod(static_cast<float>(std::max<int64_t>(0, in.nowMs) % 60000LL) * 0.018f, 1.0f);
             fusedPackedGrain = (preEffGrain > 1e-4f)
@@ -1803,31 +1863,33 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         ub.push(config.radiance, effSharpness, config.saturation, activeFilterIntensity);
         ub.push(config.whiten, config.rosy, effOilControl, effRelight);
         if (fallbackEllipseState) {
-            ub.push(fusedWbR, fusedWbG, fusedWbB, fallbackEllipseState[26]);
+            ub.push(cat02[0], cat02[1], cat02[2], fallbackEllipseState[26]);
             ub.push(fusedPackedGrain, 0.0f, 0.0f, fallbackEllipseState[27]);
             ub.push(fallbackEllipseState[22], fallbackEllipseState[23], fallbackEllipseState[24], fallbackEllipseState[25]);
             ub.push(fallbackEllipseState[28], fallbackEllipseState[29], fallbackEllipseState[30], fallbackEllipseState[31]);
             ub.push(fallbackEllipseState[32], fallbackEllipseState[33], fallbackEllipseState[34], fallbackEllipseState[35]);
             ub.push(fallbackEllipseState[36], fallbackEllipseState[37], fallbackEllipseState[38], fallbackEllipseState[39]);
         } else {
-            ub.push(fusedWbR, fusedWbG, fusedWbB, 0.0f);
+            ub.push(cat02[0], cat02[1], cat02[2], 0.0f);
             ub.push(fusedPackedGrain, 0.0f, 0.0f, 0.0f);
             for (int i = 0; i < 4; ++i) ub.push(0.0f, 0.0f, 0.0f, 0.0f);
         }
         ub.push(lutStrength, coreThresh, microDetailKeep, ambientLift);
+        ub.push(cat02[3], cat02[4], cat02[5], fusedCat02Full);
+        ub.push(cat02[6], cat02[7], cat02[8], 0.0f);
 
-        device_.beginPass(rtComposite_, in.width, in.height, false);
+        const bool compositeIsFinal = !hasPostCompositeLayers && !willRunStage8 &&
+                                      (in.outputRt != kInvalidRenderTarget);
+        const RenderTargetId compositeDstRt = compositeIsFinal ? in.outputRt : rtComposite_;
+        device_.beginPass(compositeDstRt, in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
         device_.endPass();
-        currentTex = device_.textureOf(rtComposite_);
+        currentTex = device_.textureOf(compositeDstRt);
         lastActivePassesMask_ |= kPassComposite;
     }
 
-    // 6b. v3.4: Real-Time Strand-Preserving Hair Dyeing & Crown Angel-Ring Shine (into RGBA8 rtBgOut_)
-    const float effHairDye = detail::clampf(config.hairDye * in.loadFadeSmooth, 0.0f, 1.0f);
-    const float effHairShine = detail::clampf(config.hairShine * in.loadFadeSmooth, 0.0f, 1.0f);
-    if ((effHairDye > 1e-4f || effHairShine > 1e-4f) &&
-        in.hairMaskTex != kInvalidTexture && in.hairShown > 1e-4f) {
+    // 6b. v3.4: Real-Time Strand-Preserving Hair Dyeing & Crown Angel-Ring Shine
+    if (willRunHairDye) {
         const TextureId fallbackTex = (assets_.whiteAlphaFallbackTex != kInvalidTexture)
             ? assets_.whiteAlphaFallbackTex
             : ownedFallbackTex_;
@@ -1872,21 +1934,18 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
         // uU5: (pixelTexelX, pixelTexelY, maskMatteRadiusU, maskMatteRadiusV) for RGB-guided boundary matting
         ub.push(1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height),
                 1.6f / 128.0f, 1.6f / 128.0f);
-        device_.beginPass(rtBgOut_, in.width, in.height, false);
+        const bool hairDyeIsFinal = !willRunStage7 && !willRunStage8 &&
+                                    (in.outputRt != kInvalidRenderTarget);
+        const RenderTargetId hairDyeDstRt = hairDyeIsFinal ? in.outputRt : rtBgOut_;
+        device_.beginPass(hairDyeDstRt, in.width, in.height, LoadOp::kDontCare);
         device_.drawFullScreenQuad(ShaderId::kHairDye, st, tb, ub);
         device_.endPass();
-        currentTex = device_.textureOf(rtBgOut_);
+        currentTex = device_.textureOf(hairDyeDstRt);
         lastActivePassesMask_ |= kPassHairDye;
     }
 
     // 6c. v3.9.3: Composite makeup occlusion mask into rtSkinMask_.a strictly AFTER kCompositePro & kHairDye,
-    //     right before Stage 7 UV Makeup, so 6-class semantic occluders (bangs/hands/glasses/masks/clothes)
-    //     still block lipstick/blush/contour/eyeshadow with zero bleed while NEVER punching dark un-whitened
-    //     shadow patches into kCompositePro skin whitening or smoothing.
-    const bool willRenderPrimaryMakeup =
-        in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f && config.hasMakeup();
-    const bool willRenderSecondaryMakeup =
-        secActive && postSecLandmarks && config.hasMakeup();
+    //     right before Stage 7 UV Makeup, using independent occAffine for occlusionMaskTex.
     if (hasOccAlphaInput && (willRenderPrimaryMakeup || willRenderSecondaryMakeup)) {
         if (meshWarped && secWarped && !primaryMeshVboRestored) {
             device_.updateVertexBuffer(
@@ -1899,187 +1958,166 @@ TextureId RenderPipeline::render(const BeautyConfig& config, const FrameInputs& 
             hasHairAlphaInput ? in.hairShown : 0.0f,
             in.hairAffine.data(),
             in.occlusionMaskTex, in.occlusionShown,
+            in.hasOccAffine ? in.occAffine.data() : nullptr,
             activeFaceState, aspect, !polySkinMaskReady, meshWarped, frontFaceCw);
         hasSemanticTex = true;
         lastActivePassesMask_ |= kPassHairAlpha;
     }
 
-    // 7. 6-Layer Real-Time UV Makeup (with P1 ambient WB + micro-pore & P2 bangs/occlusion mask)
+    // 7. 6-Layer Real-Time UV Makeup + Stickers + 3D AR + Particles
+    const RenderTargetId stage7DstRt = (!willRunStage8 && in.outputRt != kInvalidRenderTarget)
+        ? in.outputRt : rtMakeup_;
     bool makeupRendered = false;
     const TextureId compositeBaseTex = currentTex;
     const TextureId semanticForMakeup = hasSemanticTex ? device_.textureOf(rtSkinMask_) : kInvalidTexture;
     if (willRenderPrimaryMakeup) {
         renderMakeup(
-            rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
+            stage7DstRt, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postWarpLandmarks, in.faceMeta15,
             in.hasIris, frontFaceCw, effFacePresence, in.steadyFace, in.steadyEye, in.eyeMakeupKeep,
             in.lowerMakeupKeep, /*copyBaseFirst=*/true);
-        currentTex = device_.textureOf(rtMakeup_);
+        currentTex = device_.textureOf(stage7DstRt);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
     }
     if (willRenderSecondaryMakeup) {
         renderMakeup(
-            rtMakeup_, compositeBaseTex, semanticForMakeup, in.width, in.height,
+            stage7DstRt, compositeBaseTex, semanticForMakeup, in.width, in.height,
             config, in.ambientRgb, in.tierCaps.enableAmbientMakeup,
             postSecLandmarks, sec.meta15,
             sec.hasIris, secFrontCw, effSecPresence, sec.steadyFace, sec.steadyEye, sec.eyeMakeupKeep,
             sec.lowerMakeupKeep, /*copyBaseFirst=*/!makeupRendered);
-        currentTex = device_.textureOf(rtMakeup_);
+        currentTex = device_.textureOf(stage7DstRt);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassMakeup;
     }
 
-    // 7b. Face-Anchored 2D AR Stickers (primary + optional secondary face sharing rtMakeup_)
-    if (hasAnySticker && in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 && effFacePresence > 1e-4f) {
-        renderStickers(rtMakeup_, currentTex, !makeupRendered, in.width, in.height, in,
+    // 7b. Face-Anchored 2D AR Stickers (primary + optional secondary face sharing stage7DstRt)
+    if (willRunPrimarySticker) {
+        renderStickers(stage7DstRt, currentTex, !makeupRendered, in.width, in.height, in,
                        postWarpLandmarks, in.faceMeta15, effFacePresence);
-        currentTex = device_.textureOf(rtMakeup_);
+        currentTex = device_.textureOf(stage7DstRt);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassSticker;
     }
     if (hasAnySticker && secActive && postSecLandmarks) {
-        renderStickers(rtMakeup_, currentTex, !makeupRendered, in.width, in.height, in,
+        renderStickers(stage7DstRt, currentTex, !makeupRendered, in.width, in.height, in,
                        postSecLandmarks, sec.meta15, effSecPresence);
-        currentTex = device_.textureOf(rtMakeup_);
+        currentTex = device_.textureOf(stage7DstRt);
+        makeupRendered = true;
         lastActivePassesMask_ |= kPassSticker;
     }
 
     // 7c. P4: Lightweight 3D Head-Occluded AR Accessories + Spring Pendulum Physics
-    if (in.tierCaps.enableAr3d && hasAnyAr3d && in.hasFaceMesh && postWarpLandmarks && in.faceMeta15 &&
-        effFacePresence > 1e-4f) {
-        const auto pose3d = math::FaceRelightSolver::estimateHeadPose(
-            postWarpLandmarks, aspect,
-            in.faceMeta15[math::FaceMeshFrame::kMetaAxisX],
-            in.faceMeta15[math::FaceMeshFrame::kMetaAxisY],
-            in.faceMeta15[math::FaceMeshFrame::kMetaYawWeight]);
-        if (pose3d.valid) {
-            renderAr3dAccessories(
-                rtMakeup_, currentTex, !makeupRendered, in.width, in.height, in,
-                postWarpLandmarks, pose3d, frontFaceCw, effFacePresence);
-            currentTex = device_.textureOf(rtMakeup_);
-            makeupRendered = true;
-            lastActivePassesMask_ |= kPassAr3d;
-        }
+    if (willRunAr3d) {
+        renderAr3dAccessories(
+            stage7DstRt, currentTex, !makeupRendered, in.width, in.height, in,
+            postWarpLandmarks, cachedAr3dPose, frontFaceCw, effFacePresence);
+        currentTex = device_.textureOf(stage7DstRt);
+        makeupRendered = true;
+        lastActivePassesMask_ |= kPassAr3d;
     }
 
     // 7d. v3.6: Batched 2D Analytical SDF Interactive Gesture Particle Bursts
-    if (hasParticles && config.enabled && !config.compareOriginal) {
-        renderParticles(rtMakeup_, currentTex, !makeupRendered, in.width, in.height,
+    if (willRunParticles) {
+        renderParticles(stage7DstRt, currentTex, !makeupRendered, in.width, in.height,
                         in.particleVertices, in.particleQuadCount);
-        currentTex = device_.textureOf(rtMakeup_);
+        currentTex = device_.textureOf(stage7DstRt);
         makeupRendered = true;
         lastActivePassesMask_ |= kPassParticles;
     }
 
     // 8. v3.8/v3.9: Cinematic Atmosphere Post-Processing (Soft-Knee Multi-Scale Bloom + Non-Darkening Filmic Grain + CIE CAT02 WB)
-    //    Reuses existing 1/4-res rtBg_[0..1] and 1/9-res rtMacro_[0..1] (zero extra FBO allocations, zero cost when inactive or fused in Stage 6).
-    if (config.enabled && !config.compareOriginal && (lastActivePassesMask_ & kPassAtmosphere) == 0u) {
-        float autoBloom = 0.0f, autoGrain = 0.0f;
-        const bool lutBound = (assets_.lutTex != kInvalidTexture && !config.lutUrl.empty());
-        const float activeLutStrength = lutBound ? detail::clampf(config.lutIntensity, 0.0f, 1.0f) : 0.0f;
-        math::BeautyQualityTuning::resolveStyleAtmosphere(
-            lutBound ? config.lutUrl : std::string(), activeLutStrength,
-            static_cast<int>(config.filter), config.filterIntensity,
-            autoBloom, autoGrain);
-        const bool allowBloom = (in.tierCaps.resolvedTier != math::PerformanceTier::kLite);
-        const float effBloom = allowBloom
-            ? detail::clampf(std::max(config.bloom, autoBloom) * in.loadFadeBody, 0.0f, 1.0f)
-            : 0.0f;
-        const float effGrain = detail::clampf(std::max(config.filmGrain, autoGrain) * in.loadFadeSmooth, 0.0f, 0.50f);
-        float autoTemp = 0.0f, autoTint = 0.0f;
-        math::BeautyQualityTuning::estimateAutoWhiteBalance(in.ambientRgb, config.autoWhiteBalance, autoTemp, autoTint);
-        const float effTemp = detail::clampf(config.colorTemp + autoTemp, -1.0f, 1.0f);
-        const float effTint = detail::clampf(config.colorTint + autoTint, -1.0f, 1.0f);
-        const bool hasCat02 = (std::fabs(effTemp) > 1e-4f || std::fabs(effTint) > 1e-4f);
+    if (willRunStage8) {
+        const float effBloom = preEffBloom;
+        const float effGrain = preEffGrain;
+        const float effTemp = preEffTemp;
+        const float effTint = preEffTint;
+        const bool hasCat02 = preHasCat02;
 
-        if (effBloom > 1e-4f || effGrain > 1e-4f || hasCat02) {
-            TextureId tightBloomTex = currentTex;
-            TextureId wideBloomTex = currentTex;
-            if (effBloom > 1e-4f) {
-                RenderState st{};
-                TextureBindings tb{};
-                UniformBlock ub{};
-                // 8a. Soft-knee bright extract at 1/4 res (rtBg_[0])
-                tb.bind(0, currentTex);
-                ub.push(0.62f, 0.28f, 1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height));
-                device_.beginPass(rtBg_[0], bgW_, bgH_, false);
-                device_.drawFullScreenQuad(ShaderId::kPostBloomExtract, st, tb, ub);
-                device_.endPass();
-
-                // 8b. Tight glow separable H+V blur at 1/4 res (rtBg_[0] -> rtBg_[1] -> rtBg_[0])
-                tb.clear(); ub.clear();
-                tb.bind(0, device_.textureOf(rtBg_[0]));
-                ub.push(1.45f / static_cast<float>(bgW_), 0.0f, 0.0f, 0.0f);
-                device_.beginPass(rtBg_[1], bgW_, bgH_, false);
-                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
-                device_.endPass();
-
-                tb.clear(); ub.clear();
-                tb.bind(0, device_.textureOf(rtBg_[1]));
-                ub.push(0.0f, 1.45f / static_cast<float>(bgH_), 0.0f, 0.0f);
-                device_.beginPass(rtBg_[0], bgW_, bgH_, false);
-                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
-                device_.endPass();
-
-                tightBloomTex = device_.textureOf(rtBg_[0]);
-                // v3.9 GPU pass reduction: run 1/9-res wide halo pyramid only on strong bloom at Ultra tier
-                // without thermal throttling; otherwise reuse 1/4-res Gaussian bloom to save 3 extra passes.
-                const bool useWidePyramid = (effBloom > 0.22f) &&
-                    (in.tierCaps.resolvedTier == math::PerformanceTier::kUltra) &&
-                    (in.loadFadeBody >= 0.99f);
-                if (useWidePyramid) {
-                    tb.clear(); ub.clear();
-                    tb.bind(0, device_.textureOf(rtBg_[0]));
-                    ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_), 0.0f, 0.0f);
-                    device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
-                    device_.drawFullScreenQuad(ShaderId::kDownsample, st, tb, ub);
-                    device_.endPass();
-
-                    tb.clear(); ub.clear();
-                    tb.bind(0, device_.textureOf(rtMacro_[0]));
-                    ub.push(1.85f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
-                    device_.beginPass(rtMacro_[1], macroW_, macroH_, false);
-                    device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
-                    device_.endPass();
-
-                    tb.clear(); ub.clear();
-                    tb.bind(0, device_.textureOf(rtMacro_[1]));
-                    ub.push(0.0f, 1.85f / static_cast<float>(macroH_), 0.0f, 0.0f);
-                    device_.beginPass(rtMacro_[0], macroW_, macroH_, false);
-                    device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
-                    device_.endPass();
-
-                    wideBloomTex = device_.textureOf(rtMacro_[0]);
-                } else {
-                    wideBloomTex = tightBloomTex;
-                }
-            }
-
-            float cat02[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-            if (hasCat02) {
-                math::BeautyQualityTuning::cat02WhiteBalanceMatrix(effTemp, effTint, cat02);
-            }
-            // Ping-pong into a full-res RGBA8 target guaranteed != currentTex (strictly zero feedback loop)
-            const RenderTargetId postDstRt = (currentTex == device_.textureOf(rtBgOut_)) ? rtComposite_ : rtBgOut_;
-            const float grainPhase = std::fmod(static_cast<float>(std::max<int64_t>(0, in.nowMs) % 60000LL) * 0.018f, 1.0f);
+        TextureId tightBloomTex = currentTex;
+        TextureId wideBloomTex = currentTex;
+        if (effBloom > 1e-4f) {
             RenderState st{};
             TextureBindings tb{};
             UniformBlock ub{};
+            // 8a. Soft-knee bright extract at 1/4 res (rtBg_[0]); threshold 0.80/knee 0.10 avoids lifting face highlights
             tb.bind(0, currentTex);
-            tb.bind(1, tightBloomTex);
-            tb.bind(2, wideBloomTex);
-            ub.push(effBloom, effGrain, grainPhase, hasCat02 ? 1.0f : 0.0f);
-            ub.push(cat02[0], cat02[1], cat02[2], static_cast<float>(in.width) * 0.5f);
-            ub.push(cat02[3], cat02[4], cat02[5], static_cast<float>(in.height) * 0.5f);
-            ub.push(cat02[6], cat02[7], cat02[8], 0.0f);
-            device_.beginPass(postDstRt, in.width, in.height, false);
-            device_.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, tb, ub);
+            ub.push(0.80f, 0.10f, 1.0f / static_cast<float>(in.width), 1.0f / static_cast<float>(in.height));
+            device_.beginPass(rtBg_[0], bgW_, bgH_, LoadOp::kDontCare);
+            device_.drawFullScreenQuad(ShaderId::kPostBloomExtract, st, tb, ub);
             device_.endPass();
-            currentTex = device_.textureOf(postDstRt);
-            lastActivePassesMask_ |= kPassAtmosphere;
+
+            // 8b. Tight glow separable H+V blur at 1/4 res (step=1.0 prevents comb aliasing)
+            tb.clear(); ub.clear();
+            tb.bind(0, device_.textureOf(rtBg_[0]));
+            ub.push(1.0f / static_cast<float>(bgW_), 0.0f, 0.0f, 0.0f);
+            device_.beginPass(rtBg_[1], bgW_, bgH_, LoadOp::kDontCare);
+            device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+            device_.endPass();
+
+            tb.clear(); ub.clear();
+            tb.bind(0, device_.textureOf(rtBg_[1]));
+            ub.push(0.0f, 1.0f / static_cast<float>(bgH_), 0.0f, 0.0f);
+            device_.beginPass(rtBg_[0], bgW_, bgH_, LoadOp::kDontCare);
+            device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+            device_.endPass();
+
+            tightBloomTex = device_.textureOf(rtBg_[0]);
+            const bool useWidePyramid = (effBloom > 0.22f) &&
+                (in.tierCaps.resolvedTier == math::PerformanceTier::kUltra) &&
+                (in.loadFadeBody >= 0.99f);
+            if (useWidePyramid) {
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtBg_[0]));
+                ub.push(1.0f / static_cast<float>(bgW_), 1.0f / static_cast<float>(bgH_), 0.0f, 0.0f);
+                device_.beginPass(rtMacro_[0], macroW_, macroH_, LoadOp::kDontCare);
+                device_.drawFullScreenQuad(ShaderId::kDownsample, st, tb, ub);
+                device_.endPass();
+
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtMacro_[0]));
+                ub.push(1.0f / static_cast<float>(macroW_), 0.0f, 0.0f, 0.0f);
+                device_.beginPass(rtMacro_[1], macroW_, macroH_, LoadOp::kDontCare);
+                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                device_.endPass();
+
+                tb.clear(); ub.clear();
+                tb.bind(0, device_.textureOf(rtMacro_[1]));
+                ub.push(0.0f, 1.0f / static_cast<float>(macroH_), 0.0f, 0.0f);
+                device_.beginPass(rtMacro_[0], macroW_, macroH_, LoadOp::kDontCare);
+                device_.drawFullScreenQuad(ShaderId::kBgBlur, st, tb, ub);
+                device_.endPass();
+
+                wideBloomTex = device_.textureOf(rtMacro_[0]);
+            } else {
+                wideBloomTex = tightBloomTex;
+            }
         }
+
+        float cat02[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+        if (hasCat02) {
+            math::BeautyQualityTuning::cat02WhiteBalanceMatrix(effTemp, effTint, cat02);
+        }
+        const RenderTargetId fallbackPostRt = (currentTex == device_.textureOf(rtBgOut_)) ? rtComposite_ : rtBgOut_;
+        const RenderTargetId postDstRt = (in.outputRt != kInvalidRenderTarget) ? in.outputRt : fallbackPostRt;
+        const float grainPhase = std::fmod(static_cast<float>(std::max<int64_t>(0, in.nowMs) % 60000LL) * 0.018f, 1.0f);
+        RenderState st{};
+        TextureBindings tb{};
+        UniformBlock ub{};
+        tb.bind(0, currentTex);
+        tb.bind(1, tightBloomTex);
+        tb.bind(2, wideBloomTex);
+        ub.push(effBloom, effGrain, grainPhase, hasCat02 ? 1.0f : 0.0f);
+        ub.push(cat02[0], cat02[1], cat02[2], static_cast<float>(in.width) * 0.5f);
+        ub.push(cat02[3], cat02[4], cat02[5], static_cast<float>(in.height) * 0.5f);
+        ub.push(cat02[6], cat02[7], cat02[8], 0.0f);
+        device_.beginPass(postDstRt, in.width, in.height, LoadOp::kDontCare);
+        device_.drawFullScreenQuad(ShaderId::kPostAtmosphere, st, tb, ub);
+        device_.endPass();
+        currentTex = device_.textureOf(postDstRt);
+        lastActivePassesMask_ |= kPassAtmosphere;
     }
 
     return currentTex;

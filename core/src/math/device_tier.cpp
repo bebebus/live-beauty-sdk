@@ -60,6 +60,12 @@ PerformanceTier DeviceTierPolicy::classify(const std::string& gpuRenderer, int c
 
     // 3. ARM Immortalis / Mali
     if (gpu.find("immortalis") != std::string::npos) return PerformanceTier::kUltra;
+    if (gpu.find("mali-g1-ultra") != std::string::npos || gpu.find("mali-g1-premium") != std::string::npos) {
+        return PerformanceTier::kUltra;
+    }
+    if (gpu.find("mali-g1") != std::string::npos) {
+        return PerformanceTier::kStandard;
+    }
     if (gpu.find("mali-g") != std::string::npos) {
         const int model = extractFirstNumberAfter(gpu, "mali-g");
         if (model >= 710 || model == 78 || model == 77) return PerformanceTier::kUltra;
@@ -76,7 +82,10 @@ PerformanceTier DeviceTierPolicy::classify(const std::string& gpuRenderer, int c
         return (model >= 920) ? PerformanceTier::kUltra : PerformanceTier::kStandard;
     }
 
-    // 5. PowerVR / SwiftShader / software emulators
+    // 5. PowerVR (flagship D-Series/DXT vs legacy) / SwiftShader / software emulators
+    if (gpu.find("powervr d-series") != std::string::npos || gpu.find("dxt") != std::string::npos) {
+        return PerformanceTier::kUltra;
+    }
     if (gpu.find("powervr") != std::string::npos || gpu.find("swiftshader") != std::string::npos ||
         gpu.find("llvmpipe") != std::string::npos) {
         return PerformanceTier::kLite;
@@ -93,6 +102,7 @@ TierCapabilities DeviceTierPolicy::capabilitiesFor(PerformanceTier tier) {
     TierCapabilities cap{};
     const PerformanceTier concrete = (tier == PerformanceTier::kAuto) ? PerformanceTier::kStandard : tier;
     cap.resolvedTier = concrete;
+    cap.hardwareTier = concrete;
     switch (concrete) {
         case PerformanceTier::kLite:
             cap.enableRelight3d = false;
@@ -137,15 +147,17 @@ TierCapabilities DeviceTierPolicy::resolve(
     PerformanceTier requested,
     PerformanceTier hardwareDetected,
     int governorLoadLevel) {
-    PerformanceTier base = (requested == PerformanceTier::kAuto)
+    const PerformanceTier hwBase = (requested == PerformanceTier::kAuto)
         ? (hardwareDetected == PerformanceTier::kAuto ? PerformanceTier::kStandard : hardwareDetected)
         : requested;
+    PerformanceTier base = hwBase;
     if (governorLoadLevel >= 2 && base == PerformanceTier::kUltra) {
         base = PerformanceTier::kStandard;
     } else if (governorLoadLevel >= 2 && base == PerformanceTier::kStandard) {
         base = PerformanceTier::kLite;
     }
     TierCapabilities cap = capabilitiesFor(base);
+    cap.hardwareTier = hwBase;
     if (governorLoadLevel >= 1) {
         cap.enableBlemishHeal = false;
         cap.enableMatteRefine = false;
