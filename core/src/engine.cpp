@@ -675,10 +675,11 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
         lastHeight_ = frameHeight;
     }
 
-    const int cappedCount = std::min(faceCount, std::clamp(config_.maxFaces, 1, math::MultiFaceTracker::kMaxFaces));
+    const int effectiveMaxFaces = std::clamp(config_.maxFaces, 1, math::MultiFaceTracker::kMaxFaces);
+    const int cappedCount = std::min(faceCount, effectiveMaxFaces);
     float cx = 0.0f, cy = 0.0f, fw = 0.0f;
     const int valid = faces_.submitFaces(
-        sampleTsMs, faces, cappedCount, frameWidth, frameHeight, receivedMs, &cx, &cy, &fw);
+        sampleTsMs, faces, cappedCount, frameWidth, frameHeight, receivedMs, &cx, &cy, &fw, effectiveMaxFaces);
     if (valid > 0 && fw > 0.0f && faces && faceCount > 0) {
         // Select the raw input closest to primary slot(0)'s top-down center (cx, 1 - cy)
         const float targetTopDownCy = 1.0f - cy;

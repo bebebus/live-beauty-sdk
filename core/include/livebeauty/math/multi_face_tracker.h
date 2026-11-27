@@ -28,7 +28,8 @@ public:
     int submitFaces(int64_t sampleTsMs, const RawFaceInput* faces, int faceCount,
                     int frameWidth, int frameHeight, int64_t receivedMs,
                     float* outPrimaryCenterX = nullptr, float* outPrimaryCenterY = nullptr,
-                    float* outPrimaryFaceWidth = nullptr);
+                    float* outPrimaryFaceWidth = nullptr,
+                    int maxFaces = kMaxFaces);
 
     void submitAllMiss(int64_t sampleTsMs);
     void update(int64_t nowMs);

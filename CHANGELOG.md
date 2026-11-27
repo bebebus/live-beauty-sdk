@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.6] - 2026-11-27
+
+### Fixed
+- **L2 Overload Skin Beauty Preservation & Brief Face-Loss Stability (`RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Decoupled polygon skin mask (`kPassSkinMask`) and portrait spatial prior (`bodyPriorPresence_`, `secBodyPriorPresence_`) from `loadFadeFace` onto `loadFadeSmooth` so L2 overload pauses face reshape/retouch/relight/makeup while keeping face & neck smoothing and whitening active (only L3 fades them out) (`tone-m2`, `skin-d1`).
+  - Added a `1200ms` hold window (`lastFaceSeenMs_`, `secLastFaceSeenMs_`) on portrait spatial prior before `tau = 350ms` decay so brief head turns or looking down never cause beauty breathing, while genuinely empty rooms (>1.2s) still decay cleanly to `0.0`; coupled post-long-absence polygon `faceM` reacquire with `bodyPriorPresence_` (`tau = 120ms`) to eliminate single-frame jumps and jaw-neck seams (`tone-m1`).
+  - Packed an explicit secondary portrait prior flag in `uU5.z` (`uEye1.z` in Metal) whenever `polySkinMaskReady || framePresence <= 0.001f`, preventing single-face poly mode from misreading eye ellipses (`+30 ALU/px` saved) and enabling smooth dual-loss secondary prior decay (`skin-m3`, `tone-m3`, `skin-m5`, `tone-m5`).
+- **Background Halo Control, Prototype B Line Detector, `kSpot` & `lowLightT` (`gles_shaders.cpp`, `metal_shaders.h`, `RenderPipeline`)**:
+  - Tightened `evalPortraitPrior` `headHalo` (`1.12..1.52`, crown `0.78..1.10`) and chin-gated `neckChest` lateral reach (`sideReach = mix(1.35, 2.55, smoothstep(0.55, 1.35, down))`) to eliminate beige wall / wood / hair halo bleed around the head while preserving shoulder/chest coverage (`skin-m2`, `tone-m4`).
+  - Upgraded `kCompositePro` `lineScore` to Prototype B (combining opposite-pair mean contrast anisotropy with `min/mean` bilateral symmetry, 0 extra texture taps) to reject noisy step edges and circular spot rims while preserving 1px hair/brows/lashes (`skin-m1`).
+  - Masked `kSpot` with `(1.0 - lineScore)` and raised its lower threshold to `0.050..0.090` (`skin-m4`), and passed pure `lightLuma`-derived `lowLightT` via `uU12.w` (`uWbRow2.w`) decoupled from bitrate pressure (`skin-m7`).
+- **Face Shape, Tracking, Matting, Parsing & Iris Calibration (`FaceMeshDeformer`, `FaceMeshFilter`, `MultiFaceTracker`, `FaceParsingMapper`, `RenderPipeline`)**:
+  - Gated fast `yawTau = 28ms` strictly on increasing steep yaw (`yawJump > 0.03 && |raw| > |state| && |raw| > 0.45`) so stationary 37–44° side profiles stay at `envTau = 150ms` (`shape-m1`).
+  - Replaced `mix(gOld, gEye, eyeBand)` with continuous threshold interpolation over `-0.72..0.12` and chin-tip lower `xi0` relaxation (`-0.62..-0.95`) to cut nasal-alar shear back within baseline and eliminate chin-tip kink while maintaining `< 1%` eye/iris compression (`shape-m2`, `shape-m3`).
+  - Made `chinClearanceState_` stateful alongside `neckBandRatio_` (`tau = 150ms`, `< 1000ms` face-miss hold; note: neck lengthening continues to attenuate smoothly down to 25% when the chin approaches the shoulder line) (`shape-m4`).
+  - Capped `minVerifyTriArea2` at `fw <= 0.45` so close-up big faces retain flip protection on visible `>= 4 px²` triangles (`shape-d1`).
+  - Decoupled `FaceMeshFilter::poseDead_` (`0.30 * rigidFloor`) from One-Euro `deadBeta` (`0.65 * rigidFloor`) (`tracking-d1`).
+  - Added `maxFaces` awareness to `MultiFaceTracker::submitFaces` (single-face mode never strands a lone moving face in unrendered slot 1) and miss-duration gate relaxation `(+3.0 * dtMissSec * fw)` in dual-face mode (`tone-d1`, `tracking-m3`).
+  - Smoothly attenuated `kMatteRefine` temporal weight across `loadFadeBody` `[0.25, 0.75]` and skipped `kDownsample + kMatteRefine` when `loadFadeBody <= 0.25` (`gpuperf-m3`, `cpuperf-m5`).
+  - Fixed `< 256` nearest-neighbor sampling offset (`floor(f)` vs `floor(f - 0.5f)` for 2×2 box) in `FaceParsingMapper` (`segmentation-m3`).
+  - Replaced constant iris multipliers with a piecewise curve (`<= 0.5 -> 0.65/0.55 slope`, `1.0 -> 1.0`) so presets keep calibrated subtlety while slider max reaches full strength (`makeup-m1`).
+  - Fixed `testV395ReverificationFixesMath` (`yawRad = 0.26f`, all 468 vertices, `0` visible flips, jaw kink, iris width) and `test_metal_pixel_gate.mm` Part B oval/forehead transition assertions (`shape-m3`, `tone-m6`).
+
 ## [3.9.5] - 2026-11-27
 
 ### Fixed

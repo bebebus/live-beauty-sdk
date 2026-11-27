@@ -631,7 +631,9 @@ void FaceMeshFilter::step(float teMs) {
     }
     qRawPrev_ = qRaw_;
     poseSpeed_ = effVp;
-    poseDead_ = deadBeta;
+    // v3.9.6 (tracking-d1): Decouple extrapolation poseDead_ (0.30x rigidFloor) from One-Euro deadBeta (0.65x)
+    // so stationary jitter stays low while 2Hz handheld sway extrapolation does not stall.
+    poseDead_ = std::max(dead, 0.30f * rigidFloor);
 
     if (!illPosed) {
         const float ad = detail::oneEuroAlpha(kResDcut, teMs);

@@ -740,10 +740,11 @@ static inline float evalPortraitPrior(float2 uv, float aspect, float4 oval, floa
     float bodyRx = max(oval.z, oval.w * 0.77f);
     float ba = dot(dp, fuBody) / max(bodyRx, 0.0001f);
     float bb = dot(dp, float2(-fuBody.y, fuBody.x)) / max(oval.w, 0.0001f);
-    float headHalo = (1.0f - smoothstep(1.35f, 2.20f, length(float2(pa, pb)))) * (1.0f - smoothstep(0.95f, 1.35f, pb));
+    float headHalo = (1.0f - smoothstep(1.12f, 1.52f, length(float2(pa, pb)))) * (1.0f - smoothstep(0.78f, 1.10f, pb));
     float down = -bb;
-    float neckChest = smoothstep(-0.15f, 0.85f, down) * (1.0f - smoothstep(3.80f, 5.20f, down)) *
-                      (1.0f - smoothstep(1.85f, 3.15f, abs(ba)));
+    float sideReach = mix(1.35f, 2.55f, smoothstep(0.55f, 1.35f, down));
+    float neckChest = smoothstep(0.28f, 0.92f, down) * (1.0f - smoothstep(3.60f, 5.00f, down)) *
+                      (1.0f - smoothstep(sideReach - 0.45f, sideReach + 0.55f, abs(ba)));
     return clamp(max(headHalo, neckChest) * clamp(presence, 0.0f, 1.0f), 0.0f, 1.0f);
 }
 
@@ -816,12 +817,11 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     // (nonHair ~ 0) are never re-whitened as skin (v3.9.5 skin-n3).
     float hairSkinGuard = faceM * smoothstep(0.22f, 0.36f, yFine) * warmPoly;
     float effNonHair = max(nonHair, hairSkinGuard * smoothstep(0.05f, 0.35f, nonHair));
-    // v3.9.5 (skin-n1/tone-n1/tone-c1/skin-n4): Portrait spatial prior defaults to 0.0 when no face is
-    // tracked (never snapping to 1.0 on face loss), supports smooth presence decay via (1 - uEye1.y),
-    // widened non-cliff transitions + yaw/roll-invariant chest coverage, and dual-face secondary prior.
+    // v3.9.6 (skin-m3/skin-m5/tone-m3/tone-m5): Secondary portrait prior gated by explicit flag uEye1.z > 0.5
+    // so single-face poly mode never misreads eye ellipses (+30 ALU/px saved) and dual-loss decays smoothly.
     float bodyPriorScale = clamp(1.0f - uEye1.y, 0.0f, 1.0f);
     float portraitPrior = evalPortraitPrior(uv, uFrame.z, uOval, float2(uEye0.w, uEye1.w), bodyPriorScale);
-    if (uFrame.w >= 3.5f && uEyeMask0.z > 0.001f && uEyeMask0.w > 0.001f && uEyeMask1.z > 0.001f) {
+    if (uEye1.z > 0.5f) {
         portraitPrior = max(portraitPrior, evalPortraitPrior(uv, uFrame.z, uEyeMask0, uEyeMask1.xy, uEyeMask1.z));
     }
     float skin = clamp(faceM * polyGate + (1.0f - faceM) * bodyGate * portraitPrior * (1.0f - 0.70f * exclM), 0.0f, 1.0f) * effNonHair;
@@ -843,18 +843,21 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         if (abs(dk) > loLine && skin > 0.01f) {
             float2 tx = uFrame.xy;
             float sgn = dk >= 0.0f ? 1.0f : -1.0f;
-            float p0 = min(sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(tx.x, 0.0f))).rgb) - yOrig),
-                           sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv - float2(tx.x, 0.0f))).rgb) - yOrig));
-            float p1 = min(sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(0.0f, tx.y))).rgb) - yOrig),
-                           sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv - float2(0.0f, tx.y))).rgb) - yOrig));
-            float p2 = min(sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + tx)).rgb) - yOrig),
-                           sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv - tx)).rgb) - yOrig));
-            float p3 = min(sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(tx.x, -tx.y))).rgb) - yOrig),
-                           sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(-tx.x, tx.y))).rgb) - yOrig));
-            float4 lp = max(float4(p0, p1, p2, p3), float4(0.0f));
-            float pmax = max(max(lp.x, lp.y), max(lp.z, lp.w));
-            float pmin = min(min(lp.x, lp.y), min(lp.z, lp.w));
-            lineScore = smoothstep(0.45f, 0.75f, (pmax - pmin) / max(pmax, 0.004f));
+            float d0a = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(tx.x, 0.0f))).rgb) - yOrig);
+            float d0b = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv - float2(tx.x, 0.0f))).rgb) - yOrig);
+            float d1a = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(0.0f, tx.y))).rgb) - yOrig);
+            float d1b = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv - float2(0.0f, tx.y))).rgb) - yOrig);
+            float d2a = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + tx)).rgb) - yOrig);
+            float d2b = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv - tx)).rgb) - yOrig);
+            float d3a = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(tx.x, -tx.y))).rgb) - yOrig);
+            float d3b = sgn * (luma709(tex0.sample(kLinearClamp, toMtlUv(uv + float2(-tx.x, tx.y))).rgb) - yOrig);
+            float4 lm = 0.5f * float4(d0a + d0b, d1a + d1b, d2a + d2b, d3a + d3b);
+            float pmaxMean = max(max(lm.x, lm.y), max(lm.z, lm.w));
+            float pminMean = min(min(lm.x, lm.y), min(lm.z, lm.w));
+            float4 ln = max(float4(min(d0a, d0b), min(d1a, d1b), min(d2a, d2b), min(d3a, d3b)), float4(0.0f));
+            float pmaxMin = max(max(ln.x, ln.y), max(ln.z, ln.w));
+            lineScore = smoothstep(0.45f, 0.75f, (pmaxMean - pminMean) / max(pmaxMean, 0.004f)) *
+                        smoothstep(0.35f, 0.65f, pmaxMin / max(pmaxMean, 0.004f));
         }
         float darkKeep = smoothstep(loLine, loLine + 0.045f, dk) * max(smoothstep(0.28f, 0.58f, guidedA), lineScore);
         float brightKeep = smoothstep(loLine + 0.01f, loLine + 0.055f, -dk) * lineScore;
@@ -872,16 +875,16 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         float3 dEdge = preLifted - guided;
         float rEdge = sqrt(0.24f * dEdge.r * dEdge.r + 0.58f * dEdge.g * dEdge.g + 0.18f * dEdge.b * dEdge.b) * 1.73205f / 0.36f;
         float rEdge2 = rEdge * rEdge;
-        // v3.9.5 (skin-n2): Low-light adaptive smoothing curve + spot-adaptive kSpot recovers full blemish
-        // & low-light noise suppression while preserving bright-light pore headroom at default 0.55.
-        float lowLightT = smoothstep(0.005f, 0.013f, core);
+        // v3.9.6 (skin-m4/skin-m7): Pure lightLuma lowLightT in uWbRow2.w (decoupled from bitrate pressure)
+        // and lineScore-masked kSpot (0.050..0.090) preserve fine light hairs & pores while removing blackheads.
+        float lowLightT = clamp(uWbRow2.w, 0.0f, 1.0f);
         float stage1 = clamp(uParams.y / mix(0.85f, 0.60f, lowLightT), 0.0f, 1.0f);
         float smoothCover = stage1 * (0.80f + 0.20f * stage1);
         float detailKeep = 1.0f - 0.55f * smoothstep(0.60f, 1.0f, uParams.y);
         float invEdge = 1.0f / (1.0f + rEdge2 * rEdge2);
         float kBase = smoothCover * 0.96f * skinGateSmooth * featureKeep * fineDark * invEdge;
-        float kSpot = smoothstep(0.035f, 0.070f, spotDelta) * (1.0f - smoothstep(0.145f, 0.240f, spotDelta)) *
-                      notDarkHair * featureKeep * fineDark * skinGateSmooth * smoothRamp * 0.90f * invEdge;
+        float kSpot = smoothstep(0.050f, 0.090f, spotDelta) * (1.0f - smoothstep(0.145f, 0.240f, spotDelta)) *
+                      (1.0f - lineScore) * notDarkHair * featureKeep * fineDark * skinGateSmooth * smoothRamp * 0.90f * invEdge;
         float k = max(kBase, kSpot);
         float preMicro = luma709(preLifted - fineLow);
         float tex = clamp(band, -0.018f, 0.035f) * smoothstep(core, 2.5f * core, abs(band));

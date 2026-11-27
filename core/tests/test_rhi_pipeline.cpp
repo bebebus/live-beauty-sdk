@@ -1959,8 +1959,9 @@ void testV395ReverificationFixesPipeline() {
         return mpXy;
     };
 
-    // 1. skin-n1/tone-n1: 40 consecutive submitFaceMiss frames decay bodyPriorMute smoothly (delta <= 0.11/frame)
-    //    and NEVER snap portraitPrior back to 1.0 when timeline clears at >500ms!
+    // 1. skin-n1/tone-n1/tone-m1: Brief face miss (<1200ms) holds prior steady (zero beauty breathing);
+    //    extended absence (>1200ms, 90 frames ~3s) decays bodyPriorMute smoothly (delta <= 0.11/frame)
+    //    to >= 0.95 and NEVER snaps portraitPrior back to 1.0 when timeline clears!
     {
         auto cfg = BeautyConfig::naturalStudio();
         engine.setConfig(cfg);
@@ -1973,7 +1974,8 @@ void testV395ReverificationFixesPipeline() {
         float prevMute = -1.0f;
         float maxDelta = 0.0f;
         float lastMute = 0.0f;
-        for (int f = 0; f < 40; ++f) {
+        float muteAt600ms = 1.0f;
+        for (int f = 0; f < 90; ++f) {
             const int64_t ts = 1400 + f * 33;
             dev.calls.clear();
             engine.submitFaceMiss(ts);
@@ -1986,6 +1988,7 @@ void testV395ReverificationFixesPipeline() {
                     }
                     prevMute = mute;
                     lastMute = mute;
+                    if (f == 18) muteAt600ms = mute;  // ~600ms brief miss
                     // Whenever oval clears (uU6.z == 0), bodyPriorMute MUST be 1.0 (prior=0, never 1.0!)
                     if (c.uniforms.v[6].z <= 0.001f) {
                         EXPECT_TRUE(mute >= 0.99f);
@@ -1993,8 +1996,9 @@ void testV395ReverificationFixesPipeline() {
                 }
             }
         }
+        EXPECT_TRUE(muteAt600ms <= 0.05f);
         EXPECT_TRUE(maxDelta <= 0.11f);
-        EXPECT_TRUE(lastMute >= 0.90f);
+        EXPECT_TRUE(lastMute >= 0.95f);
     }
 
     // 2. skin-n4/tone-n2: Dual-face secondary portrait prior packed into uU8/uU9 when polySkinMaskReady
@@ -2116,6 +2120,302 @@ void testV395ReverificationFixesPipeline() {
     engine.releaseGpuResources();
 }
 
+void testV396AuditFixesPipeline() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId camTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId personTex = dev.createTexture2D(256, 256, TextureFormat::kR8, nullptr);
+    const TextureId irisTex = dev.createTexture2D(512, 512, TextureFormat::kRgba8, nullptr);
+    PipelineAssets assets{};
+    assets.irisAtlas = irisTex;
+    engine.setAssets(assets);
+    engine.setHardwareProfile("Adreno (TM) 740", 8, 12288);
+
+    auto makeFaceMp = [](float cx, float fw) {
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = fw / math::FaceMeshFilter::canonicalFaceWidth();
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            mpXy[i * 2] = cx + xyz[i * 3] * scale;
+            mpXy[i * 2 + 1] = 1.0f - (((0.50f / aspect) + xyz[i * 3 + 1] * scale) * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mpXy[i * 2] = cx + ((i >= 473) ? 0.06f : -0.06f);
+            mpXy[i * 2 + 1] = 0.44f;
+        }
+        return mpXy;
+    };
+
+    // 1. tone-m2 / skin-d1 (P1): L2 overload pauses face warp/makeup while keeping skin smoothing & whitening intact!
+    {
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.faceSlim = 0.5f;
+        engine.setConfig(cfg);
+        engine.setHostLoadLevel(2);
+        const auto mp = makeFaceMp(0.50f, 0.30f);
+        float lastMute = 1.0f;
+        float lastOvalZ = 0.0f;
+        float lastFramePres = 0.0f;
+        uint32_t lastMask = 0;
+        for (int f = 0; f < 65; ++f) {
+            const int64_t ts = 1000 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            lastMask = engine.stats().activePassesMask;
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 7) {
+                    lastFramePres = c.uniforms.v[0].w;
+                    lastMute = c.uniforms.v[5].y;
+                    lastOvalZ = c.uniforms.v[6].z;
+                }
+            }
+        }
+        EXPECT_TRUE((lastMask & kPassFaceWarp) == 0);  // L2 pauses face reshape
+        EXPECT_TRUE((lastMask & kPassSkinMask) != 0);  // L2 keeps polygon skin mask active
+        EXPECT_TRUE(lastMute <= 0.05f);                // L2 keeps body/neck prior active
+        EXPECT_TRUE(lastOvalZ > 0.05f);
+        EXPECT_TRUE(lastFramePres >= 4.90f);           // L2 keeps face smoothing & whitening active
+
+        // L3 fades smoothing & body prior cleanly down to ~0
+        engine.setHostLoadLevel(3);
+        for (int f = 0; f < 80; ++f) {
+            const int64_t ts = 3200 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 7) {
+                    lastMute = c.uniforms.v[5].y;
+                }
+            }
+        }
+        EXPECT_TRUE(lastMute >= 0.90f);
+        engine.setHostLoadLevel(0);
+    }
+
+    // 2. tone-m1 (P1): Long >2s absence decays smoothly to 0; reacquire ramps faceM & bodyPrior TOGETHER (no jaw seam/snap)
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.30f);
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 6000 + f * 33;
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        // Leave frame for ~2.7s (82 frames)
+        for (int f = 0; f < 82; ++f) {
+            const int64_t ts = 6350 + f * 33;
+            engine.submitFaceMiss(ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        // Reacquire: faceM (uU0.w - 4.0) and bodyPrior (1 - uU5.y) must ramp smoothly together!
+        float prevFacePres = 0.0f;
+        float maxFaceStep = 0.0f;
+        float maxJawMismatch = 0.0f;
+        float finalFacePres = 0.0f;
+        for (int f = 0; f < 25; ++f) {
+            const int64_t ts = 9100 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 6) {
+                    const float fp = (c.uniforms.v[0].w >= 3.5f) ? (c.uniforms.v[0].w - 4.0f) : c.uniforms.v[0].w;
+                    const float bp = 1.0f - c.uniforms.v[5].y;
+                    maxFaceStep = std::max(maxFaceStep, std::fabs(fp - prevFacePres));
+                    maxJawMismatch = std::max(maxJawMismatch, std::fabs(fp - bp));
+                    prevFacePres = fp;
+                    finalFacePres = fp;
+                }
+            }
+        }
+        EXPECT_TRUE(maxFaceStep <= 0.30f);     // Smooth ~tau=120ms ramp, NEVER snaps 0 -> 1 in 1 frame
+        EXPECT_TRUE(maxJawMismatch <= 0.06f);  // Face and neck ramp together (zero jaw seam)
+        EXPECT_TRUE(finalFacePres >= 0.90f);
+    }
+
+    // 3. skin-m3/skin-m5/tone-m3/tone-m5: Explicit uU5.z secondary flag (0 on single-face; 1 on dual-face & dual-loss decay)
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.maxFaces = 1;
+        engine.setConfig(cfg);
+        const auto mpL = makeFaceMp(0.28f, 0.26f);
+        const auto mpR = makeFaceMp(0.72f, 0.26f);
+        dev.calls.clear();
+        engine.submitFaceLandmarks(11000, mpL.data(), 478, 720, 1280, 11000);
+        engine.processFrame(camTex, 720, 1280, 11000, 11000);
+        bool singleFlagZero = false;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 6) {
+                singleFlagZero = (c.uniforms.v[5].z < 0.5f);
+            }
+        }
+        EXPECT_TRUE(singleFlagZero);
+
+        // Dual-face then simultaneous miss: uU5.z stays 1.0f during hold & smooth decay (zero 1-frame snap!)
+        engine.resetTracking();
+        cfg.maxFaces = 2;
+        engine.setConfig(cfg);
+        math::MultiFaceTracker::RawFaceInput pair[2] = {{mpL.data(), 478}, {mpR.data(), 478}};
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 12000 + f * 33;
+            engine.submitMultiFaceLandmarks(ts, pair, 2, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        float prevSecP = 1.0f;
+        float maxSecDelta = 0.0f;
+        bool sawDualLossSecFlag = false;
+        for (int f = 0; f < 85; ++f) {
+            const int64_t ts = 12350 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceMiss(ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 10) {
+                    const float flag = c.uniforms.v[5].z;
+                    const float sp = (flag > 0.5f) ? c.uniforms.v[9].z : 0.0f;
+                    if (c.uniforms.v[0].w <= 0.001f && flag > 0.5f) sawDualLossSecFlag = true;
+                    maxSecDelta = std::max(maxSecDelta, std::fabs(sp - prevSecP));
+                    prevSecP = sp;
+                }
+            }
+        }
+        EXPECT_TRUE(sawDualLossSecFlag);
+        EXPECT_TRUE(maxSecDelta <= 0.12f);
+    }
+
+    // 4. skin-m7: uU12.w carries pure lightLuma lowLightT (decoupled from bitrate pressure)
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.30f);
+        dev.calls.clear();
+        engine.submitFaceLandmarks(16000, mp.data(), 478, 720, 1280, 16000);
+        // Bright scene (0.50) + terrible network (bitrateRatio = 0.2 -> bitratePressure = 1.0)
+        engine.processFrame(camTex, 720, 1280, 16000, 16000, kInvalidTexture, 0.50f, 0.20f);
+        float brightLowLightT = -1.0f;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 13) {
+                brightLowLightT = c.uniforms.v[12].w;
+            }
+        }
+        EXPECT_TRUE(brightLowLightT >= 0.0f && brightLowLightT <= 0.01f);
+
+        dev.calls.clear();
+        engine.submitFaceLandmarks(16033, mp.data(), 478, 720, 1280, 16033);
+        engine.processFrame(camTex, 720, 1280, 16033, 16033, kInvalidTexture, 0.10f, 1.0f);
+        float darkLowLightT = -1.0f;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 13) {
+                darkLowLightT = c.uniforms.v[12].w;
+            }
+        }
+        EXPECT_TRUE(darkLowLightT >= 0.99f);
+    }
+
+    // 5. gpuperf-m3 / cpuperf-m5: kMatteRefine smoothly skips once loadFadeBody <= 0.25 at L1+
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.backgroundBlur = 0.6f;
+        engine.setConfig(cfg);
+        engine.setHostLoadLevel(0);
+        engine.processFrame(camTex, 720, 1280, 17000, 17000, personTex);
+        EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) != 0);
+        engine.setHostLoadLevel(1);
+        for (int f = 1; f <= 60; ++f) {
+            const int64_t ts = 17000 + f * 33;
+            engine.processFrame(camTex, 720, 1280, ts, ts, personTex);
+        }
+        EXPECT_TRUE((engine.stats().activePassesMask & kPassMatteRefine) == 0);
+        engine.setHostLoadLevel(0);
+    }
+
+    // 6. makeup-m1: Piecewise iris curve reaches >= 0.95 at slider 1.0 while keeping presets calibrated
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.contactLens = 1.0f;
+        cfg.catchlight = 1.0f;
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.30f);
+        float maxLens = 0.0f, maxCl = 0.0f;
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 20000 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kMakeupIris && c.uniforms.count >= 3) {
+                    maxLens = std::max(maxLens, c.uniforms.v[2].x);
+                    maxCl = std::max(maxCl, c.uniforms.v[2].y);
+                }
+            }
+        }
+        EXPECT_TRUE(maxLens >= 0.95f);
+        EXPECT_TRUE(maxCl >= 0.95f);
+    }
+
+    // 7. shape-m4: Chin-nod neck attenuation holds smoothly across transient face loss (< 1000ms)
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.neckLengthen = 1.0f;
+        engine.setConfig(cfg);
+        // Pose with shoulders at y=0.52 (top-down), hips at y=0.80 -> torso ~ 0.50 in aspect-normalized Y
+        std::array<math::PoseLandmark, 33> pose{};
+        for (auto& pt : pose) { pt.x = 0.50f; pt.y = 0.60f; pt.visibility = 0.95f; }
+        pose[11] = {0.38f, 0.52f, 0.98f};
+        pose[12] = {0.62f, 0.52f, 0.98f};
+        pose[23] = {0.42f, 0.80f, 0.98f};
+        pose[24] = {0.58f, 0.80f, 0.98f};
+        // Face nodded low so chin landmark 152 sits close to shoulder line (top-down y ~ 0.51)
+        auto mpNod = makeFaceMp(0.50f, 0.30f);
+        const float dyShift = 0.51f - mpNod[152 * 2 + 1];
+        for (int i = 0; i < 478; ++i) mpNod[i * 2 + 1] += dyShift;
+
+        float neckWithFace = -1.0f;
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 22000 + f * 33;
+            dev.calls.clear();
+            engine.submitBodyPose(ts, pose.data(), 33, 720, 1280);
+            engine.submitFaceLandmarks(ts, mpNod.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kBodyWarp && c.uniforms.count >= 3) {
+                    neckWithFace = c.uniforms.v[2].y;
+                }
+            }
+        }
+        // Now submit face miss for 6 frames (~200ms): neck strength must NOT jump up to 4x!
+        float maxNeckDelta = 0.0f;
+        float prevNeck = neckWithFace;
+        for (int f = 0; f < 6; ++f) {
+            const int64_t ts = 22350 + f * 33;
+            dev.calls.clear();
+            engine.submitBodyPose(ts, pose.data(), 33, 720, 1280);
+            engine.submitFaceMiss(ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kBodyWarp && c.uniforms.count >= 3) {
+                    maxNeckDelta = std::max(maxNeckDelta, std::fabs(c.uniforms.v[2].y - prevNeck));
+                    prevNeck = c.uniforms.v[2].y;
+                }
+            }
+        }
+        EXPECT_TRUE(neckWithFace > 0.0f && neckWithFace < 0.14f);  // Attenuated by nod
+        EXPECT_TRUE(maxNeckDelta < 0.02f);                          // Zero jump on brief face miss!
+    }
+
+    engine.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -2137,6 +2437,7 @@ int main() {
     testV393OcclusionDeferredAfterCompositeBeforeMakeup();
     testV394AuditFixesPipelineAndGpuPerf();
     testV395ReverificationFixesPipeline();
+    testV396AuditFixesPipeline();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

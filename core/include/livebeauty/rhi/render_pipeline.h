@@ -259,18 +259,24 @@ private:
     uint32_t lastActivePassesMask_ = 0;
     bool lastWroteOutputRt_ = false;
 
-    // v3.9.5 (skin-n1/tone-n1/skin-n4): Smoothly decaying portrait spatial prior state (primary + secondary)
-    // so face disappearance > 500ms decays smoothly to 0 instead of snapping portraitPrior back to 1.0.
+    // v3.9.5/v3.9.6 (skin-n1/tone-n1/skin-n4/tone-m1/tone-m2): Smoothly decaying portrait spatial prior state
+    // (primary + secondary) with 1200ms brief-miss hold so brief head turns never breathe beauty while long
+    // absences (> 1200ms) decay smoothly to 0 instead of snapping portraitPrior back to 1.0.
     std::array<float, 4> lastValidOval_{0.0f, 0.0f, 0.0f, 0.0f};
     std::array<float, 2> lastValidAxis_{1.0f, 0.0f};
     float bodyPriorPresence_ = 0.0f;
+    int64_t lastFaceSeenMs_ = kTimeInvalid;
     std::array<float, 4> secLastValidOval_{0.0f, 0.0f, 0.0f, 0.0f};
     std::array<float, 2> secLastValidAxis_{1.0f, 0.0f};
     float secBodyPriorPresence_ = 0.0f;
+    int64_t secLastFaceSeenMs_ = kTimeInvalid;
     int64_t priorLastNowMs_ = kTimeInvalid;
+    bool priorInitialized_ = false;
 
-    // v3.9.5 (shape-n3): Temporally smoothed chin-aware neckBand ratio (tau = 150ms, holds during transient miss).
+    // v3.9.5/v3.9.6 (shape-n3/shape-m4): Temporally smoothed chin-aware neckBand ratio & chinClearance
+    // (tau = 150ms, holds during transient miss < 1000ms).
     float neckBandRatio_ = 0.30f;
+    float chinClearanceState_ = 1.0f;
     bool neckBandValid_ = false;
     int64_t neckBandLastValidMs_ = kTimeInvalid;
     int64_t neckBandLastNowMs_ = kTimeInvalid;

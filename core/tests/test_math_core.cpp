@@ -2232,7 +2232,27 @@ void testV395ReverificationFixesMath() {
         const float warpJaw = std::hypot(wl[378 * 2] - wl[149 * 2], (wl[378 * 2 + 1] - wl[149 * 2 + 1]) / kAspect);
         EXPECT_TRUE(warpJaw < origJaw * 0.95f);  // >5% chin/jaw narrowing restored
 
-        // Eye horizontal protection under faceNarrow=0.5 + cheekboneSlim=0.5
+        // Jaw contour smoothness (no square-chin kink: positive bend increase < 4 deg across 172-136-150-149-176-148-152)
+        const int jawChain[] = {172, 136, 150, 149, 176, 148, 152};
+        float maxJawKinkDeg = 0.0f;
+        float maxJawAbsDeltaDeg = 0.0f;
+        for (int k = 1; k < 6; ++k) {
+            const int a = jawChain[k - 1], b = jawChain[k], c = jawChain[k + 1];
+            auto bendDeg = [&](const float* pts) {
+                const float ax = pts[b * 2] - pts[a * 2], ay = (pts[b * 2 + 1] - pts[a * 2 + 1]) / kAspect;
+                const float bx = pts[c * 2] - pts[b * 2], by = (pts[c * 2 + 1] - pts[b * 2 + 1]) / kAspect;
+                const float dot = ax * bx + ay * by;
+                const float cross = ax * by - ay * bx;
+                return std::atan2(std::fabs(cross), std::max(dot, 1e-6f)) * 57.2957795f;
+            };
+            const float delta = bendDeg(wl) - bendDeg(lm.data());
+            maxJawKinkDeg = std::max(maxJawKinkDeg, delta);
+            maxJawAbsDeltaDeg = std::max(maxJawAbsDeltaDeg, std::fabs(delta));
+        }
+        EXPECT_TRUE(maxJawKinkDeg < 4.0f);
+        EXPECT_TRUE(maxJawAbsDeltaDeg < 8.0f);
+
+        // Eye & iris horizontal protection under faceNarrow=0.5 + cheekboneSlim=0.5
         FaceMeshDeformer defEye;
         FaceMeshDeformer::Params pEye{};
         pEye.faceNarrow = 0.5f;
@@ -2242,16 +2262,21 @@ void testV395ReverificationFixesMath() {
         const float* we = defEye.warpedLandmarks();
         const float origEyeW = std::hypot(lm[133 * 2] - lm[33 * 2], (lm[133 * 2 + 1] - lm[33 * 2 + 1]) / kAspect);
         const float warpEyeW = std::hypot(we[133 * 2] - we[33 * 2], (we[133 * 2 + 1] - we[33 * 2 + 1]) / kAspect);
+        const float origIrisW = std::hypot(lm[469 * 2] - lm[471 * 2], (lm[469 * 2 + 1] - lm[471 * 2 + 1]) / kAspect);
+        const float warpIrisW = std::hypot(we[469 * 2] - we[471 * 2], (we[469 * 2 + 1] - we[471 * 2 + 1]) / kAspect);
         EXPECT_TRUE(std::fabs(warpEyeW - origEyeW) / origEyeW < 0.01f);
+        EXPECT_TRUE(std::fabs(warpIrisW - origIrisW) / std::max(origIrisW, 1e-4f) < 0.01f);
 
-        // Yaw 15 deg + 0.3px detector noise over 120 frames: maxJump < 0.6px and 0 visible front-facing flips
+        // v3.9.6 (shape-m3): Genuine 15 deg yaw (yawRad = 0.26f, arg 5 — NOT shiftX!) + 0.3px detector noise
+        // over 120 frames: ALL 468 vertices maxJump < 0.6px and 0 visible front-facing triangle flips (>=4px^2).
         FaceMeshDeformer defYaw;
         FaceMeshDeformer::Params pYaw{};
         pYaw.faceSlim = 0.8f;
         pYaw.vFace = 0.6f;
         pYaw.cheekboneSlim = 0.5f;
-        std::array<float, FaceMeshFrame::kCoordCount> prevWl{};
+        std::array<float, FaceMeshFrame::kCoordCount> prevDisp{};
         float maxJumpPx = 0.0f;
+        int visibleFrontFlips = 0;
         uint32_t rng = 0x3950A1u;
         auto nextGauss = [&]() -> float {
             float s = 0.0f;
@@ -2261,9 +2286,10 @@ void testV395ReverificationFixesMath() {
             }
             return s * 1.732f;
         };
+        const auto& fullIdx = FaceMeshTopology::kFullIndices;
         for (int f = 0; f < 120; ++f) {
             std::array<float, FaceMeshFrame::kCoordCount> noisy{};
-            makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.36f, 0.0f, 0.26f, 0.0f, noisy);  // ~15 deg yaw
+            makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.36f, 0.26f, 0.0f, 0.0f, noisy);  // Genuine ~15 deg yaw!
             for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
                 noisy[i * 2] += (nextGauss() * 0.3f) / 720.0f;
                 noisy[i * 2 + 1] += (nextGauss() * 0.3f) / 1280.0f;
@@ -2274,25 +2300,35 @@ void testV395ReverificationFixesMath() {
                                       m[7], m[8], m[9], 1.0f, 1.0f, 1.0f, pYaw, 1000 + f * 33));
             const float* curWl = defYaw.warpedLandmarks();
             if (f >= 15) {
-                for (int i : {149, 172, 176, 378, 397, 400}) {
-                    const float dx = (curWl[i * 2] - prevWl[i * 2]) * 720.0f;
-                    const float dy = (curWl[i * 2 + 1] - prevWl[i * 2 + 1]) * 1280.0f;
-                    const float ndx = (noisy[i * 2] - prevWl[i * 2]) * 720.0f;
-                    (void)ndx;
+                for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
                     const float dispCurX = (curWl[i * 2] - noisy[i * 2]) * 720.0f;
                     const float dispCurY = (curWl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
-                    const float dispPrevX = prevWl[i * 2];
-                    const float dispPrevY = prevWl[i * 2 + 1];
-                    maxJumpPx = std::max(maxJumpPx, std::hypot(dispCurX - dispPrevX, dispCurY - dispPrevY));
-                    (void)dx; (void)dy;
+                    maxJumpPx = std::max(maxJumpPx, std::hypot(dispCurX - prevDisp[i * 2], dispCurY - prevDisp[i * 2 + 1]));
+                }
+                const float mirrorSign = defYaw.frontFaceCw() ? -1.0f : 1.0f;
+                for (int t = 0; t < FaceMeshTopology::kCanonicalTriangleCount; ++t) {
+                    const int a = fullIdx[t * 3], b = fullIdx[t * 3 + 1], c = fullIdx[t * 3 + 2];
+                    const float sx1 = (noisy[b * 2] - noisy[a * 2]) * 720.0f;
+                    const float sy1 = (noisy[b * 2 + 1] - noisy[a * 2 + 1]) * 1280.0f;
+                    const float sx2 = (noisy[c * 2] - noisy[a * 2]) * 720.0f;
+                    const float sy2 = (noisy[c * 2 + 1] - noisy[a * 2 + 1]) * 1280.0f;
+                    const float origAreaPx = 0.5f * (sx1 * sy2 - sy1 * sx2) * mirrorSign;
+                    if (origAreaPx < 4.0f) continue;
+                    const float wx1 = (curWl[b * 2] - curWl[a * 2]) * 720.0f;
+                    const float wy1 = (curWl[b * 2 + 1] - curWl[a * 2 + 1]) * 1280.0f;
+                    const float wx2 = (curWl[c * 2] - curWl[a * 2]) * 720.0f;
+                    const float wy2 = (curWl[c * 2 + 1] - curWl[a * 2 + 1]) * 1280.0f;
+                    const float warpAreaPx = 0.5f * (wx1 * wy2 - wy1 * wx2) * mirrorSign;
+                    if (warpAreaPx <= 0.0f) ++visibleFrontFlips;
                 }
             }
             for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
-                prevWl[i * 2] = (curWl[i * 2] - noisy[i * 2]) * 720.0f;
-                prevWl[i * 2 + 1] = (curWl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
+                prevDisp[i * 2] = (curWl[i * 2] - noisy[i * 2]) * 720.0f;
+                prevDisp[i * 2 + 1] = (curWl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
             }
         }
         EXPECT_TRUE(maxJumpPx < 0.6f);
+        EXPECT_TRUE(visibleFrontFlips == 0);
     }
 
     // 2. makeup-1 + segmentation-n4 + seg-8: uncertain hand (p2=0.60, p3=0.30) occludes makeup cleanly,
@@ -2377,6 +2413,211 @@ void testV395ReverificationFixesMath() {
     }
 }
 
+void testV396AuditFixesMath() {
+    constexpr float kAspect = 720.0f / 1280.0f;
+
+    // 1. shape-m1: Stationary 40 deg side profile + 0.3px noise keeps >1px jump frames minimal (speed-gated yawTau)
+    {
+        FaceMeshDeformer def;
+        FaceMeshDeformer::Params p{};
+        p.faceSlim = 0.8f;
+        p.vFace = 0.6f;
+        p.cheekboneSlim = 0.5f;
+        std::array<float, FaceMeshFrame::kCoordCount> prevDisp{};
+        int bigJumpFrames = 0;
+        uint32_t rng = 0x3960B2u;
+        auto nextGauss = [&]() -> float {
+            float s = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                rng = rng * 1664525u + 1013904223u;
+                s += (static_cast<float>((rng >> 8) & 0xFFFFu) / 65535.0f) - 0.5f;
+            }
+            return s * 1.732f;
+        };
+        for (int f = 0; f < 120; ++f) {
+            std::array<float, FaceMeshFrame::kCoordCount> noisy{};
+            makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.36f, 0.70f, 0.0f, 0.0f, noisy);  // ~40 deg stationary side profile
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                noisy[i * 2] += (nextGauss() * 0.3f) / 720.0f;
+                noisy[i * 2 + 1] += (nextGauss() * 0.3f) / 1280.0f;
+            }
+            float m[FaceMeshFrame::kMetaSize]{};
+            EXPECT_TRUE(FaceMeshFrame::fillMeta(noisy.data(), FaceMeshFrame::kCoordCount, kAspect, m));
+            EXPECT_TRUE(def.deform(noisy.data(), kAspect, m[2], m[3], m[4], m[5],
+                                   m[7], m[8], m[9], 1.0f, 1.0f, 1.0f, p, 2000 + f * 33));
+            const float* wl = def.warpedLandmarks();
+            if (f >= 15) {
+                float frameMax = 0.0f;
+                for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                    const float dx = (wl[i * 2] - noisy[i * 2]) * 720.0f;
+                    const float dy = (wl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
+                    frameMax = std::max(frameMax, std::hypot(dx - prevDisp[i * 2], dy - prevDisp[i * 2 + 1]));
+                }
+                if (frameMax > 1.0f) ++bigJumpFrames;
+            }
+            for (int i = 0; i < FaceMeshTopology::kFaceVertexCount; ++i) {
+                prevDisp[i * 2] = (wl[i * 2] - noisy[i * 2]) * 720.0f;
+                prevDisp[i * 2 + 1] = (wl[i * 2 + 1] - noisy[i * 2 + 1]) * 1280.0f;
+            }
+        }
+        EXPECT_TRUE(bigJumpFrames <= 5);
+    }
+
+    // 1b. shape-m2: Nasal-alar cheek band (dv in [-0.35, 0]) vertical-line shear stays <= v3.9.1 + 2 deg
+    //     under full slim=1.0 and narrow=1.0 at yaw 0 and 20 deg!
+    {
+        auto maxAlarShear = [&](float yawRad, float slim, float narrow) {
+            std::array<float, FaceMeshFrame::kCoordCount> lm{};
+            makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.42f, yawRad, 0.0f, 0.0f, lm);
+            float m[FaceMeshFrame::kMetaSize]{};
+            EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, m));
+            FaceMeshDeformer def;
+            FaceMeshDeformer::Params p{};
+            p.faceSlim = slim;
+            p.faceNarrow = narrow;
+            EXPECT_TRUE(def.deform(lm.data(), kAspect, m[2], m[3], m[4], m[5],
+                                   m[7], m[8], m[9], 1.0f, 1.0f, 1.0f, p));
+            const float* wl = def.warpedLandmarks();
+            const float lineMidY = 0.5f * (lm[10 * 2 + 1] + lm[152 * 2 + 1]) / kAspect;
+            const float halfH = 0.5f * m[5];
+            const auto& idx = FaceMeshTopology::kFullIndices;
+            float best = 0.0f;
+            for (int t = 0; t < FaceMeshTopology::kCanonicalTriangleCount; ++t) {
+                const int a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
+                const float cy = (lm[a * 2 + 1] + lm[b * 2 + 1] + lm[c * 2 + 1]) / (3.0f * kAspect);
+                const float dv = (cy - lineMidY) / halfH;
+                if (dv < -0.35f || dv > 0.0f) continue;
+                const float x1 = lm[b * 2] - lm[a * 2], y1 = (lm[b * 2 + 1] - lm[a * 2 + 1]) / kAspect;
+                const float x2 = lm[c * 2] - lm[a * 2], y2 = (lm[c * 2 + 1] - lm[a * 2 + 1]) / kAspect;
+                const float det = x1 * y2 - y1 * x2;
+                if (std::fabs(det) < 1e-7f) continue;
+                const float u1 = (wl[b * 2] - lm[b * 2]) - (wl[a * 2] - lm[a * 2]);
+                const float u2 = (wl[c * 2] - lm[c * 2]) - (wl[a * 2] - lm[a * 2]);
+                const float v1 = (wl[b * 2 + 1] - lm[b * 2 + 1]) / kAspect - (wl[a * 2 + 1] - lm[a * 2 + 1]) / kAspect;
+                const float v2 = (wl[c * 2 + 1] - lm[c * 2 + 1]) / kAspect - (wl[a * 2 + 1] - lm[a * 2 + 1]) / kAspect;
+                const float dudy = (-x2 * u1 + x1 * u2) / det;
+                const float dvdy = (-x2 * v1 + x1 * v2) / det;
+                const float ang = std::atan2(std::fabs(dudy), std::max(1.0f + dvdy, 1e-4f)) * 57.2957795f;
+                best = std::max(best, ang);
+            }
+            return best;
+        };
+        EXPECT_TRUE(maxAlarShear(0.0f, 1.0f, 0.0f) <= 9.7f);     // v3.9.1 7.7 + 2 deg (v3.9.5 was 13.1)
+        EXPECT_TRUE(maxAlarShear(0.0f, 0.0f, 1.0f) <= 9.3f);     // v3.9.1 7.3 + 2 deg (v3.9.5 was 12.2)
+        EXPECT_TRUE(maxAlarShear(0.349f, 1.0f, 0.0f) <= 12.6f);  // yaw 20 deg (v3.9.5 was 17.1)
+        EXPECT_TRUE(maxAlarShear(0.349f, 0.0f, 1.0f) <= 10.5f);  // yaw 20 deg (v3.9.5 was 15.9)
+    }
+
+    // 2. shape-d1: Close-up big face (fw=0.78) preserves flip protection on all visible >=4px^2 front triangles
+    {
+        std::array<float, FaceMeshFrame::kCoordCount> lm{};
+        makeCanonicalFace(kAspect, 0.50f, 0.50f, 0.78f, 0.20f, 0.0f, 0.0f, lm);
+        float m[FaceMeshFrame::kMetaSize]{};
+        EXPECT_TRUE(FaceMeshFrame::fillMeta(lm.data(), FaceMeshFrame::kCoordCount, kAspect, m));
+        FaceMeshDeformer def;
+        FaceMeshDeformer::Params p{};
+        p.faceSlim = 1.0f; p.vFace = 1.0f; p.faceNarrow = 1.0f; p.cheekboneSlim = 1.0f;
+        p.eyeEnlarge = 1.0f; p.noseSlim = 1.0f; p.mouthSize = -1.0f;
+        EXPECT_TRUE(def.deform(lm.data(), kAspect, m[2], m[3], m[4], m[5],
+                               m[7], m[8], m[9], 1.0f, 1.0f, 1.0f, p));
+        const float* wl = def.warpedLandmarks();
+        const float mirrorSign = def.frontFaceCw() ? -1.0f : 1.0f;
+        const auto& idx = FaceMeshTopology::kFullIndices;
+        int flips = 0;
+        for (int t = 0; t < FaceMeshTopology::kCanonicalTriangleCount; ++t) {
+            const int a = idx[t * 3], b = idx[t * 3 + 1], c = idx[t * 3 + 2];
+            const float sx1 = (lm[b * 2] - lm[a * 2]) * 720.0f, sy1 = (lm[b * 2 + 1] - lm[a * 2 + 1]) * 1280.0f;
+            const float sx2 = (lm[c * 2] - lm[a * 2]) * 720.0f, sy2 = (lm[c * 2 + 1] - lm[a * 2 + 1]) * 1280.0f;
+            if (0.5f * (sx1 * sy2 - sy1 * sx2) * mirrorSign < 4.0f) continue;
+            const float wx1 = (wl[b * 2] - wl[a * 2]) * 720.0f, wy1 = (wl[b * 2 + 1] - wl[a * 2 + 1]) * 1280.0f;
+            const float wx2 = (wl[c * 2] - wl[a * 2]) * 720.0f, wy2 = (wl[c * 2 + 1] - wl[a * 2 + 1]) * 1280.0f;
+            if (0.5f * (wx1 * wy2 - wy1 * wx2) * mirrorSign <= 0.0f) ++flips;
+        }
+        EXPECT_TRUE(flips == 0);
+    }
+
+    // 3. tone-d1 / tracking-m3: Single-face mode (maxFaces=1) never strands lone moving face in unrendered slot 1;
+    //    dual-face mode relaxes distance gate with miss duration (+3.0*dtMissSec*fw).
+    {
+        MultiFaceTracker tracker;
+        std::array<float, FaceMeshFrame::kCoordCount> lmA{}, lmB{}, mpA{}, mpB{};
+        makeCanonicalFace(kAspect, 0.25f, 0.50f, 0.24f, 0.0f, 0.0f, 0.0f, lmA);
+        makeCanonicalFace(kAspect, 0.55f, 0.50f, 0.24f, 0.0f, 0.0f, 0.0f, lmB);  // dist = 0.30 = 1.25*fw
+        for (int i = 0; i < 478; ++i) {
+            mpA[i * 2] = lmA[i * 2]; mpA[i * 2 + 1] = 1.0f - lmA[i * 2 + 1];
+            mpB[i * 2] = lmB[i * 2]; mpB[i * 2 + 1] = 1.0f - lmB[i * 2 + 1];
+        }
+        MultiFaceTracker::RawFaceInput onlyA[1] = {{mpA.data(), 478}};
+        MultiFaceTracker::RawFaceInput onlyB[1] = {{mpB.data(), 478}};
+        EXPECT_TRUE(tracker.submitFaces(1000, onlyA, 1, 720, 1280, 1000, nullptr, nullptr, nullptr, /*maxFaces=*/1) == 1);
+        tracker.update(1000);
+        // Immediate large jump in maxFaces=1 MUST stay in slot 0 (never route to unrendered slot 1!)
+        EXPECT_TRUE(tracker.submitFaces(1033, onlyB, 1, 720, 1280, 1033, nullptr, nullptr, nullptr, /*maxFaces=*/1) == 1);
+        EXPECT_TRUE(tracker.slot(0).latest() == 1033);
+        EXPECT_TRUE(tracker.slot(1).latest() == kTimeInvalid);
+
+        // Dual-face mode: after 250ms miss, maxD = (0.80 + 3.0*0.25)*fw = 1.55*fw -> 1.25*fw reacquires slot 0 cleanly!
+        tracker.reset();
+        EXPECT_TRUE(tracker.submitFaces(2000, onlyA, 1, 720, 1280, 2000, nullptr, nullptr, nullptr, /*maxFaces=*/2) == 1);
+        tracker.update(2000);
+        tracker.submitAllMiss(2120);
+        tracker.update(2120);
+        EXPECT_TRUE(tracker.submitFaces(2250, onlyB, 1, 720, 1280, 2250, nullptr, nullptr, nullptr, /*maxFaces=*/2) == 1);
+        EXPECT_TRUE(tracker.slot(0).latest() == 2250);
+    }
+
+    // 4. segmentation-m3: Nearest-neighbor non-2x2 (< 256) face parsing resampling has zero -0.5 texel shift!
+    {
+        auto checkCenterBias = [](int srcW, int srcH, bool planar) {
+            FaceParsingMapper mapper;
+            std::array<uint8_t, FaceParsingMapper::kOutPixels> occ{}, hair{}, person{};
+            const int xLo = srcW / 4, xHi = (srcW * 3) / 4;
+            const int yLo = srcH / 4, yHi = (srcH * 3) / 4;
+            if (!planar) {
+                std::vector<float> logits(static_cast<size_t>(srcW) * srcH * 6, -4.0f);
+                for (int y = 0; y < srcH; ++y) {
+                    for (int x = 0; x < srcW; ++x) {
+                        float* p = &logits[(static_cast<size_t>(y) * srcW + x) * 6];
+                        p[(x >= xLo && x < xHi && y >= yLo && y < yHi) ? 1 : 0] = 4.0f;
+                    }
+                }
+                EXPECT_TRUE(mapper.mapMulticlass6LogitsNhwcRegion(
+                    logits.data(), srcW, srcH, 0, 0, srcW, srcH, occ.data(), hair.data(), person.data()));
+            } else {
+                std::vector<float> pl[6];
+                for (int c = 0; c < 6; ++c) pl[c].assign(static_cast<size_t>(srcW) * srcH, 0.0f);
+                for (int y = 0; y < srcH; ++y) {
+                    for (int x = 0; x < srcW; ++x) {
+                        pl[(x >= xLo && x < xHi && y >= yLo && y < yHi) ? 1 : 0][static_cast<size_t>(y) * srcW + x] = 1.0f;
+                    }
+                }
+                const float* ptrs[6] = {pl[0].data(), pl[1].data(), pl[2].data(), pl[3].data(), pl[4].data(), pl[5].data()};
+                EXPECT_TRUE(mapper.mapMulticlass6PlanarProbabilities(ptrs, srcW, srcH, occ.data(), hair.data(), person.data()));
+            }
+            double sx = 0.0, sy = 0.0, sw = 0.0;
+            constexpr int kOut = FaceParsingMapper::kOutSize;
+            for (int y = 0; y < kOut; ++y) {
+                for (int x = 0; x < kOut; ++x) {
+                    const double w = static_cast<double>(hair[y * kOut + x]);
+                    sx += w * (x + 0.5);
+                    sy += w * (y + 0.5);
+                    sw += w;
+                }
+            }
+            EXPECT_TRUE(sw > 0.0);
+            const double cx = sx / sw;
+            const double cy = sy / sw;
+            const double expected = 0.5 * kOut;
+            EXPECT_TRUE(std::fabs(cx - expected) < 0.25);
+            EXPECT_TRUE(std::fabs(cy - expected) < 0.25);
+        };
+        checkCenterBias(64, 64, false);
+        checkCenterBias(64, 64, true);
+        checkCenterBias(144, 192, false);
+        checkCenterBias(144, 192, true);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -2409,6 +2650,7 @@ int main() {
     testV390AutoWhiteBalanceAndMulticlass6PlanarProbabilities();
     testV394AuditFixesMathAndTracking();
     testV395ReverificationFixesMath();
+    testV396AuditFixesMath();
 
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty C++17 math core tests passed!\n";

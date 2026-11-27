@@ -84,12 +84,14 @@ float MultiFaceTracker::distSq(float x0, float y0, float x1, float y1, float asp
 int MultiFaceTracker::submitFaces(
     int64_t sampleTsMs, const RawFaceInput* faces, int faceCount,
     int frameWidth, int frameHeight, int64_t /*receivedMs*/,
-    float* outPrimaryCenterX, float* outPrimaryCenterY, float* outPrimaryFaceWidth) {
+    float* outPrimaryCenterX, float* outPrimaryCenterY, float* outPrimaryFaceWidth,
+    int maxFaces) {
     if (frameWidth <= 0 || frameHeight <= 0) return 0;
+    const int effectiveMaxFaces = std::clamp(maxFaces, 1, kMaxFaces);
     const float aspect = static_cast<float>(frameWidth) / static_cast<float>(frameHeight);
     if (std::fabs(aspect - aspect_) > 1e-5f) setAspect(aspect);
 
-    const int nRaw = (faces && faceCount > 0) ? std::min(faceCount, kMaxFaces) : 0;
+    const int nRaw = (faces && faceCount > 0) ? std::min(faceCount, effectiveMaxFaces) : 0;
     std::array<ParsedFace, kMaxFaces> parsed{};
     int validCount = 0;
     for (int i = 0; i < nRaw; ++i) {
@@ -123,36 +125,45 @@ int MultiFaceTracker::submitFaces(
     // Slot assignment: assign[slotIdx] = parsedIdx (-1 means miss for that slot)
     int assign[kMaxFaces] = {-1, -1};
     if (validCount == 1) {
-        const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
-        const bool s1 = hasLastCenter_[1] && timelines_[1].latest() != kTimeInvalid;
-        // v3.9.5 (tracking-4): Enforce 0.8*fw association distance gate when matching a single
-        // detection to an existing slot so a newly entering face far away doesn't hijack slot 0's
-        // temporal filter state while slot 0 is briefly missed.
-        const auto withinGate = [&](int slotIdx, const ParsedFace& p) -> bool {
-            const float refFw = std::max(std::max(lastFw_[slotIdx], p.fw), 0.08f);
-            const float maxD = 0.80f * refFw;
-            return distSq(p.cx, p.cy, lastCx_[slotIdx], lastCy_[slotIdx], aspect) <= maxD * maxD;
-        };
-        if (s0 && s1) {
-            const float d0 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[0], lastCy_[0], aspect);
-            const float d1 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[1], lastCy_[1], aspect);
-            const int best = (d0 <= d1) ? 0 : 1;
-            assign[best] = 0;
-        } else if (s1 && !s0) {
-            if (withinGate(1, parsed[0])) {
-                // Primary slot 0 is empty and only slot 1's face remains: promote slot 1 -> slot 0.
-                promoteSecondaryIfPrimaryEmpty();
-                assign[0] = 0;
+        if (effectiveMaxFaces < 2) {
+            // v3.9.6 (tone-d1/tracking-m3): In single-face mode (maxFaces=1), slot 1 is never rendered,
+            // so a lone face must always reacquire slot 0 immediately instead of being stranded for 500ms.
+            assign[0] = 0;
+        } else {
+            const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
+            const bool s1 = hasLastCenter_[1] && timelines_[1].latest() != kTimeInvalid;
+            // v3.9.6 (tracking-4/tracking-m3): Distance gate starts at 0.80*fw and relaxes linearly with
+            // elapsed miss duration (+3.0*dtMissSec*fw) so legitimate fast movement reacquires cleanly.
+            const auto withinGate = [&](int slotIdx, const ParsedFace& p) -> bool {
+                const float refFw = std::max(std::max(lastFw_[slotIdx], p.fw), 0.08f);
+                const int64_t lastTs = timelines_[slotIdx].latest();
+                const float dtMissSec = (lastTs != kTimeInvalid && sampleTsMs > lastTs)
+                    ? std::min(static_cast<float>(sampleTsMs - lastTs) * 0.001f, 0.50f)
+                    : 0.0f;
+                const float maxD = (0.80f + 3.0f * dtMissSec) * refFw;
+                return distSq(p.cx, p.cy, lastCx_[slotIdx], lastCy_[slotIdx], aspect) <= maxD * maxD;
+            };
+            if (s0 && s1) {
+                const float d0 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[0], lastCy_[0], aspect);
+                const float d1 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[1], lastCy_[1], aspect);
+                const int best = (d0 <= d1) ? 0 : 1;
+                assign[best] = 0;
+            } else if (s1 && !s0) {
+                if (withinGate(1, parsed[0])) {
+                    // Primary slot 0 is empty and only slot 1's face remains: promote slot 1 -> slot 0.
+                    promoteSecondaryIfPrimaryEmpty();
+                    assign[0] = 0;
+                } else {
+                    // Far-away face while slot 1 is still active: keep slot 1 intact, spawn new face in slot 0.
+                    assign[0] = 0;
+                }
+            } else if (s0 && !s1 && !withinGate(0, parsed[0])) {
+                // Far-away single face while slot 0 is still active (temporarily occluded): route to slot 1
+                // so slot 0's temporal anchor & filter state are not hijacked!
+                assign[1] = 0;
             } else {
-                // Far-away face while slot 1 is still active: keep slot 1 intact, spawn new face in slot 0.
                 assign[0] = 0;
             }
-        } else if (s0 && !s1 && !withinGate(0, parsed[0])) {
-            // Far-away single face while slot 0 is still active (temporarily occluded): route to slot 1
-            // so slot 0's temporal anchor & filter state are not hijacked!
-            assign[1] = 0;
-        } else {
-            assign[0] = 0;
         }
     } else {
         // validCount == 2: exact minimum-cost 2x2 assignment to prevent ID swaps on crossing

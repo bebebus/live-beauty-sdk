@@ -249,8 +249,8 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwcRegion(
 
     for (int y = 0; y < kOutSize; ++y) {
         const float fy = static_cast<float>(ry0) + (static_cast<float>(y) + 0.5f) * static_cast<float>(rh) * invOut;
-        // v3.9.5 (segmentation-n4): 2x2 box center offset is -0.5 (not -0.25) so pixel centers align with 0-bias.
-        const int sy0 = std::clamp(static_cast<int>(std::floor(fy - 0.5f)), ry0, ry0 + rh - 1);
+        // v3.9.6 (segmentation-n4/m3): 2x2 box center offset is -0.5; nearest sampling uses floor(f) for 0 bias.
+        const int sy0 = std::clamp(static_cast<int>(useBox2x2 ? std::floor(fy - 0.5f) : std::floor(fy)), ry0, ry0 + rh - 1);
         const int sy1 = useBox2x2 ? std::clamp(sy0 + 1, ry0, ry0 + rh - 1) : sy0;
         const size_t row0 = static_cast<size_t>(sy0) * static_cast<size_t>(srcW);
         const size_t row1 = static_cast<size_t>(sy1) * static_cast<size_t>(srcW);
@@ -258,7 +258,7 @@ bool FaceParsingMapper::mapMulticlass6LogitsNhwcRegion(
         const int dstRow = y * kOutSize;
         for (int x = 0; x < kOutSize; ++x) {
             const float fx = static_cast<float>(rx0) + (static_cast<float>(x) + 0.5f) * static_cast<float>(rw) * invOut;
-            const int sx0 = std::clamp(static_cast<int>(std::floor(fx - 0.5f)), rx0, rx0 + rw - 1);
+            const int sx0 = std::clamp(static_cast<int>(useBox2x2 ? std::floor(fx - 0.5f) : std::floor(fx)), rx0, rx0 + rw - 1);
             const int sx1 = useBox2x2 ? std::clamp(sx0 + 1, rx0, rx0 + rw - 1) : sx0;
 
             float lgAvg[6];
@@ -357,7 +357,7 @@ bool FaceParsingMapper::mapMulticlass6PlanarProbabilities(
 
     for (int y = 0; y < kOutSize; ++y) {
         const float fy = (static_cast<float>(y) + 0.5f) * static_cast<float>(srcH) * invOut;
-        const int sy0 = std::clamp(static_cast<int>(std::floor(fy - 0.5f)), 0, srcH - 1);
+        const int sy0 = std::clamp(static_cast<int>(useBox2x2 ? std::floor(fy - 0.5f) : std::floor(fy)), 0, srcH - 1);
         const int sy1 = useBox2x2 ? std::clamp(sy0 + 1, 0, srcH - 1) : sy0;
         const size_t row0 = static_cast<size_t>(sy0) * static_cast<size_t>(srcW);
         const size_t row1 = static_cast<size_t>(sy1) * static_cast<size_t>(srcW);
@@ -365,7 +365,7 @@ bool FaceParsingMapper::mapMulticlass6PlanarProbabilities(
         const int dstRow = y * kOutSize;
         for (int x = 0; x < kOutSize; ++x) {
             const float fx = (static_cast<float>(x) + 0.5f) * static_cast<float>(srcW) * invOut;
-            const int sx0 = std::clamp(static_cast<int>(std::floor(fx - 0.5f)), 0, srcW - 1);
+            const int sx0 = std::clamp(static_cast<int>(useBox2x2 ? std::floor(fx - 0.5f) : std::floor(fx)), 0, srcW - 1);
             const int sx1 = useBox2x2 ? std::clamp(sx0 + 1, 0, srcW - 1) : sx0;
             float p[6];
             float sumP = 0.0f;

@@ -333,7 +333,12 @@ bool FaceMeshDeformer::deform(
         } else {
             yawJump = std::fabs(rawSignedYaw - signedYawState_);
             const float envTau = 150.0f - (150.0f - 26.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
-            const float yawTau = (std::fabs(rawSignedYaw) > 0.45f) ? std::min(envTau, 28.0f) : envTau;
+            // v3.9.6 (shape-m1): Gate fast yawTau (28ms) on genuine increasing steep turn (yawJump > 0.03),
+            // so stationary 37-44deg side profile stays at envTau=150ms without detector noise jitter.
+            const bool fastSteepYaw = (yawJump > 0.03f &&
+                                       std::fabs(rawSignedYaw) > std::fabs(signedYawState_) &&
+                                       std::fabs(rawSignedYaw) > 0.45f);
+            const float yawTau = fastSteepYaw ? std::min(envTau, 28.0f) : envTau;
             const float eyeEnvTau = 45.0f - (45.0f - 20.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
             envAlpha = 1.0f - std::exp(-dtMs / envTau);
             const float yawAlpha = 1.0f - std::exp(-dtMs / yawTau);
@@ -426,16 +431,21 @@ bool FaceMeshDeformer::deform(
         if (xi >= 2.15f) return {0.0f, 0.0f};
 
         const float eyeDuSide = eyeDuLeft + (eyeDuRight - eyeDuLeft) * sideBlend;
-        // v3.9.5 (shape-n1): Eye-band lateral exclusion uses untapered wSide so chin/jaw slimming
-        // keeps its original smooth innerGate (0.32..0.56) while eye/cheekbone band protects eyes
-        // strictly outside eyeDuSide without clamping xi0=0.85 across the lower face.
+        // v3.9.6 (shape-n1/shape-m2): Eye-band lateral exclusion interpolates innerGate threshold smoothly
+        // over a wide transition (-0.72..0.12) so nasal-alar vertical shear stays within v3.9.1 + 2 deg,
+        // while relaxing xi0 below the mouth (-0.62..-0.95) eliminates the chin-tip kink at v=148/377
+        // and preserves <1% eye/iris horizontal deformation inside the eye band.
         const float denomEye = std::max(wSide, 0.065f * fw);
         const float xiE = std::fabs(du) / denomEye;
         const float xi0E = detail::clampf(eyeDuSide / denomEye + 0.05f, 0.60f, 0.85f);
-        const float gEye = detail::smoothstep(xi0E, xi0E + 0.25f, xiE);
-        const float gOld = detail::smoothstep(0.32f, 0.56f, xi);
-        const float eyeBand = detail::smoothstep(-0.30f, -0.05f, dv) * (1.0f - detail::smoothstep(0.70f, 0.95f, dv));
-        const float innerGate = gOld + eyeBand * (gEye - gOld);
+        const float eyeBand = detail::smoothstep(-0.72f, 0.12f, dv) * (1.0f - detail::smoothstep(0.70f, 0.95f, dv));
+        const float chinSmooth = detail::smoothstep(-0.62f, -0.95f, dv);
+        const float xi0Base = 0.32f - 0.20f * chinSmooth;
+        const float spanBase = 0.24f + 0.08f * chinSmooth;
+        const float xi0Eff = xi0Base + eyeBand * (xi0E - xi0Base);
+        const float spanEff = spanBase + eyeBand * (0.25f - spanBase);
+        const float xiEff = xi + eyeBand * (xiE - xi);
+        const float innerGate = detail::smoothstep(xi0Eff, xi0Eff + spanEff, xiEff);
         const float outerGate = 1.0f - detail::smoothstep(1.35f, 2.10f, xi);
         const float vertGuard = 1.0f - detail::smoothstep(0.95f, 1.32f, -dv);
         const float eta = innerGate * outerGate;
@@ -794,10 +804,11 @@ bool FaceMeshDeformer::deform(
     }
     applyDisplacement();
 
-    // v3.9.5 (shape-n2): Restrict post-safety flip verification & global lambda bisection to
-    // visible front-facing triangles (triFront_ > 0.35 AND source area >= ~4px^2 = 4.4e-5 * fw^2)
-    // so tiny subpixel corner triangles never trigger global bisection jitter; smooth lambda recovery.
-    const float minVerifyTriArea2 = 8.8e-5f * fw * fw;
+    // v3.9.6 (shape-n2/shape-d1): Restrict post-safety flip verification & global lambda bisection to
+    // visible front-facing triangles (triFront_ > 0.35 AND source area >= ~4px^2), capping fw at 0.45
+    // so close-up big faces never lose flip protection on visible 4-15px^2 front triangles.
+    const float fwCap = std::min(fw, 0.45f);
+    const float minVerifyTriArea2 = 8.8e-5f * fwCap * fwCap;
     for (int k = 0; k < 4; ++k) {
         bool anyBad = false;
         for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
