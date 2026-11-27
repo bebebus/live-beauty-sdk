@@ -1,7 +1,14 @@
 #import "FLTVisionTracker.h"
 
 #import <CoreGraphics/CoreGraphics.h>
+#import <TargetConditionals.h>
 #import <Vision/Vision.h>
+#if TARGET_OS_IOS && __has_include(<MediaPipeTasksVision/MediaPipeTasksVision.h>)
+#import <MediaPipeTasksVision/MediaPipeTasksVision.h>
+#define FLT_HAS_MPP_SEGMENTER 1
+#else
+#define FLT_HAS_MPP_SEGMENTER 0
+#endif
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -15,6 +22,13 @@
     VNSequenceRequestHandler *_seqHandler API_AVAILABLE(ios(15.0), macos(12.0));
     VNGeneratePersonSegmentationRequest *_segReq API_AVAILABLE(ios(15.0), macos(12.0));
     VNDetectHumanBodyPoseRequest *_poseReq API_AVAILABLE(ios(14.0), macos(11.0));
+#if FLT_HAS_MPP_SEGMENTER
+    MPPImageSegmenter *_multiclassSegmenter;
+    BOOL _multiclassFailed;
+    int64_t _lastMulticlassInferTsMs;
+    int64_t _multiclassIdleSinceMs;
+    std::atomic<bool> _hasMulticlassSegmenter;
+#endif
 
     CVPixelBufferRef _latestMask;
     int64_t _latestMaskTsMs;
@@ -26,6 +40,7 @@
     std::atomic<int64_t> _lastSegMs;
     std::atomic<int64_t> _lastPoseMs;
     std::atomic<int64_t> _lastAuxMs;
+    std::atomic<int64_t> _lastMulticlassMs;
     std::vector<uint8_t> _auxRgba;
 }
 
@@ -41,6 +56,13 @@
         _lastSegMs.store(INT64_MIN, std::memory_order_relaxed);
         _lastPoseMs.store(INT64_MIN, std::memory_order_relaxed);
         _lastAuxMs.store(INT64_MIN, std::memory_order_relaxed);
+        _lastMulticlassMs.store(INT64_MIN, std::memory_order_relaxed);
+#if FLT_HAS_MPP_SEGMENTER
+        _multiclassFailed = NO;
+        _lastMulticlassInferTsMs = 0;
+        _multiclassIdleSinceMs = INT64_MIN;
+        _hasMulticlassSegmenter.store(false, std::memory_order_relaxed);
+#endif
         std::memset(_latestPoseXyv, 0, sizeof(_latestPoseXyv));
 
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
@@ -70,6 +92,7 @@
     _lastSegMs.store(INT64_MIN, std::memory_order_relaxed);
     _lastPoseMs.store(INT64_MIN, std::memory_order_relaxed);
     _lastAuxMs.store(INT64_MIN, std::memory_order_relaxed);
+    _lastMulticlassMs.store(INT64_MIN, std::memory_order_relaxed);
 }
 
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer
@@ -78,16 +101,59 @@
              wantBodyPose:(BOOL)wantPose
               wantFaceAux:(BOOL)wantAux
           onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock {
-    if (!pixelBuffer || (!wantSeg && !wantPose && !wantAux)) return;
+    [self submitPixelBuffer:pixelBuffer
+            sampleTimestamp:sampleTsMs
+           wantSegmentation:wantSeg
+               wantBodyPose:wantPose
+                wantFaceAux:wantAux
+             wantMulticlass:NO
+            onAuxRgbaSample:auxBlock
+         onMulticlassPlanes:nil];
+}
+
+- (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer
+          sampleTimestamp:(int64_t)sampleTsMs
+         wantSegmentation:(BOOL)wantSeg
+             wantBodyPose:(BOOL)wantPose
+              wantFaceAux:(BOOL)wantAux
+           wantMulticlass:(BOOL)wantMulticlass
+          onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock
+       onMulticlassPlanes:(nullable void (^)(const float * const _Nonnull * _Nonnull planes, int width, int height, int64_t sampleTsMs))multiclassBlock {
+    if (!pixelBuffer || (!wantSeg && !wantPose && !wantAux && !wantMulticlass)) return;
 
     const int64_t prevSeg = _lastSegMs.load(std::memory_order_relaxed);
     const int64_t prevPose = _lastPoseMs.load(std::memory_order_relaxed);
     const int64_t prevAux = _lastAuxMs.load(std::memory_order_relaxed);
-    const BOOL doSeg = wantSeg && (prevSeg == INT64_MIN || sampleTsMs - prevSeg >= 45);
+    const int64_t prevMc = _lastMulticlassMs.load(std::memory_order_relaxed);
+    const BOOL doSeg = wantSeg && (prevSeg == INT64_MIN || sampleTsMs - prevSeg >= 33);
     const BOOL doPose = wantPose && (prevPose == INT64_MIN || sampleTsMs - prevPose >= 66);
     const BOOL doAux = wantAux && auxBlock != nil &&
                        (prevAux == INT64_MIN || (doSeg && prevSeg == INT64_MIN) || sampleTsMs - prevAux >= 95);
-    if (!doSeg && !doPose && !doAux) return;
+    const BOOL doMc = wantMulticlass && multiclassBlock != nil &&
+                      (prevMc == INT64_MIN || sampleTsMs - prevMc >= 95);
+    if (!doSeg && !doPose && !doAux && !doMc) {
+#if FLT_HAS_MPP_SEGMENTER
+        // Idle 5s reclamation: only wake queue if segmenter is currently resident in RAM
+        if (!wantMulticlass && _hasMulticlassSegmenter.load(std::memory_order_relaxed)) {
+            bool expectedIdle = false;
+            if (_inFlight.compare_exchange_strong(expectedIdle, true)) {
+                dispatch_async(_queue, ^{
+                    if (self->_multiclassSegmenter) {
+                        if (self->_multiclassIdleSinceMs == INT64_MIN) {
+                            self->_multiclassIdleSinceMs = sampleTsMs;
+                        } else if (sampleTsMs - self->_multiclassIdleSinceMs >= 5000) {
+                            self->_multiclassSegmenter = nil;
+                            self->_multiclassIdleSinceMs = INT64_MIN;
+                            self->_hasMulticlassSegmenter.store(false, std::memory_order_relaxed);
+                        }
+                    }
+                    self->_inFlight.store(false);
+                });
+            }
+        }
+#endif
+        return;
+    }
 
     bool expected = false;
     if (!_inFlight.compare_exchange_strong(expected, true)) return;
@@ -95,10 +161,12 @@
     if (doSeg) _lastSegMs.store(sampleTsMs, std::memory_order_relaxed);
     if (doPose) _lastPoseMs.store(sampleTsMs, std::memory_order_relaxed);
     if (doAux) _lastAuxMs.store(sampleTsMs, std::memory_order_relaxed);
+    if (doMc) _lastMulticlassMs.store(sampleTsMs, std::memory_order_relaxed);
 
     CVPixelBufferRetain(pixelBuffer);
     const int reqQuality = self.qualityLevel;
     void (^copiedAux)(const uint8_t *, int, int) = [auxBlock copy];
+    void (^copiedMc)(const float * const *, int, int, int64_t) = [multiclassBlock copy];
 
     dispatch_async(_queue, ^{
         @autoreleasepool {
@@ -107,8 +175,10 @@
                                  doSeg:doSeg
                                 doPose:doPose
                                  doAux:doAux
+                          doMulticlass:doMc
                           qualityLevel:reqQuality
-                       onAuxRgbaSample:copiedAux];
+                       onAuxRgbaSample:copiedAux
+                    onMulticlassPlanes:copiedMc];
         }
         CVPixelBufferRelease(pixelBuffer);
         self->_inFlight.store(false);
@@ -120,8 +190,10 @@
                        doSeg:(BOOL)doSeg
                       doPose:(BOOL)doPose
                        doAux:(BOOL)doAux
+                doMulticlass:(BOOL)doMulticlass
                 qualityLevel:(int)qualityLevel
-             onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock {
+             onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock
+          onMulticlassPlanes:(nullable void (^)(const float * const _Nonnull * _Nonnull planes, int width, int height, int64_t sampleTsMs))multiclassBlock {
     if (@available(iOS 15.0, macOS 12.0, *)) {
         if (doSeg || doPose) {
             if (!_seqHandler) {
@@ -133,9 +205,10 @@
                     _segReq = [[VNGeneratePersonSegmentationRequest alloc] init];
                     _segReq.outputPixelFormat = kCVPixelFormatType_OneComponent8;
                 }
-                _segReq.qualityLevel = (qualityLevel <= 0)
-                    ? VNGeneratePersonSegmentationRequestQualityLevelFast
-                    : VNGeneratePersonSegmentationRequestQualityLevelBalanced;
+                // Keep Balanced quality on Apple Neural Engine (<4ms) regardless of loadLevel:
+                // QualityLevelFast drops arms, dark hair & shoulders, causing virtual background to occlude the person.
+                (void)qualityLevel;
+                _segReq.qualityLevel = VNGeneratePersonSegmentationRequestQualityLevelBalanced;
                 [requests addObject:_segReq];
             }
             if (doPose) {
@@ -185,6 +258,64 @@
             auxBlock(_auxRgba.data(), kAuxW, kAuxH);
         }
     }
+
+#if FLT_HAS_MPP_SEGMENTER
+    if (doMulticlass && multiclassBlock && !_multiclassFailed) {
+        _multiclassIdleSinceMs = INT64_MIN;
+        if (!_multiclassSegmenter) {
+            NSBundle *owner = [NSBundle bundleForClass:self.class];
+            NSString *modelPath = [owner pathForResource:@"selfie_multiclass_256x256" ofType:@"tflite"] ?:
+                [NSBundle.mainBundle pathForResource:@"selfie_multiclass_256x256" ofType:@"tflite"];
+            if (modelPath) {
+                MPPImageSegmenterOptions *opts = [MPPImageSegmenterOptions new];
+                opts.baseOptions.modelAssetPath = modelPath;
+                opts.runningMode = MPPRunningModeVideo;
+                opts.shouldOutputConfidenceMasks = YES;
+                opts.shouldOutputCategoryMask = NO;
+                NSError *initErr = nil;
+                _multiclassSegmenter = [[MPPImageSegmenter alloc] initWithOptions:opts error:&initErr];
+                if (!_multiclassSegmenter || initErr) {
+                    _multiclassSegmenter = nil;
+                    _multiclassFailed = YES;
+                } else {
+                    _hasMulticlassSegmenter.store(true, std::memory_order_relaxed);
+                }
+            } else {
+                _multiclassFailed = YES;
+            }
+        }
+        if (_multiclassSegmenter && CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_32BGRA) {
+            NSError *imgErr = nil;
+            MPPImage *mppImg = [[MPPImage alloc] initWithPixelBuffer:pb error:&imgErr];
+            if (mppImg && !imgErr) {
+                int64_t inferTs = (sampleTsMs > _lastMulticlassInferTsMs)
+                    ? sampleTsMs
+                    : (_lastMulticlassInferTsMs + 1);
+                _lastMulticlassInferTsMs = inferTs;
+                [_multiclassSegmenter segmentVideoFrame:mppImg
+                                timestampInMilliseconds:(NSInteger)inferTs
+                                  withCompletionHandler:^(MPPImageSegmenterResult * _Nullable result,
+                                                          NSError * _Nullable segErr) {
+                    if (segErr || !result || result.confidenceMasks.count < 6) return;
+                    const float *planes[6];
+                    const int mw = static_cast<int>(result.confidenceMasks[0].width);
+                    const int mh = static_cast<int>(result.confidenceMasks[0].height);
+                    if (mw <= 0 || mh <= 0) return;
+                    for (int c = 0; c < 6; ++c) {
+                        MPPMask *m = result.confidenceMasks[static_cast<NSUInteger>(c)];
+                        const float *ptr = m.float32Data;
+                        if (!ptr || static_cast<int>(m.width) != mw || static_cast<int>(m.height) != mh) return;
+                        planes[c] = ptr;
+                    }
+                    multiclassBlock(planes, mw, mh, sampleTsMs);
+                }];
+            }
+        }
+    }
+#else
+    (void)doMulticlass;
+    (void)multiclassBlock;
+#endif
 }
 
 - (BOOL)mapBodyObservation:(VNHumanBodyPoseObservation *)obs

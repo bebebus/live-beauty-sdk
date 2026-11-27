@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.1] - 2026-11-27
+
+### Added
+- **iOS SDK Bridge Parity**: Exposes `submitMultiFaceLandmarks` and `submitMulticlass6Planar` on `FLTLiveBeautyMetalEngine` and `wantMulticlass` / `onMulticlassPlanes` with 5-second idle segmenter memory reclamation on `FLTVisionTracker`.
+
 ## [3.9.0] - 2026-11-27
 
 ### Added

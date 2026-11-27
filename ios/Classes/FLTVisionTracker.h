@@ -22,6 +22,16 @@ NS_ASSUME_NONNULL_BEGIN
               wantFaceAux:(BOOL)wantAux
           onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock;
 
+/** v3.9: Extended async submission with optional MediaPipe 6-class selfie_multiclass planar confidence masks (~10 Hz). */
+- (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer
+          sampleTimestamp:(int64_t)sampleTsMs
+         wantSegmentation:(BOOL)wantSeg
+             wantBodyPose:(BOOL)wantPose
+              wantFaceAux:(BOOL)wantAux
+           wantMulticlass:(BOOL)wantMulticlass
+          onAuxRgbaSample:(nullable void (^)(const uint8_t *rgba, int width, int height))auxBlock
+       onMulticlassPlanes:(nullable void (^)(const float * const _Nonnull * _Nonnull planes, int width, int height, int64_t sampleTsMs))multiclassBlock;
+
 /** Copy latest OneComponent8 person segmentation CVPixelBuffer (caller must CFRelease if non-null). */
 - (nullable CVPixelBufferRef)copyLatestPersonMaskBuffer:(nullable int64_t *)outSampleTsMs CF_RETURNS_RETAINED;
 

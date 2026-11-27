@@ -375,6 +375,37 @@ livebeauty::BeautyConfig parseObjcConfig(NSDictionary<NSString*, id>* d) {
     return ok ? YES : NO;
 }
 
+- (int)submitMultiFaceLandmarks:(const float*)face0
+                    face0Points:(int)face0Points
+                          face1:(nullable const float*)face1
+                    face1Points:(int)face1Points
+                          width:(int)width
+                         height:(int)height
+                     sampleTsMs:(int64_t)sampleTsMs
+                     receivedMs:(int64_t)receivedMs {
+    if (!self.isReady || !face0 || face0Points < 468) return 0;
+    std::lock_guard<std::mutex> lock(_mutex);
+    livebeauty::math::MultiFaceTracker::RawFaceInput inputs[2];
+    int count = 0;
+    inputs[count++] = {face0, face0Points};
+    if (face1 && face1Points >= 468) {
+        inputs[count++] = {face1, face1Points};
+    }
+    const int accepted = _engine->submitMultiFaceLandmarks(sampleTsMs, inputs, count, width, height, receivedMs);
+    if (accepted > 0 && !_explicitBlendshapes) {
+        _engine->submitFaceBlendshapes(distillBlendshapesFromLandmarks(face0, face0Points));
+    }
+    return accepted;
+}
+
+- (BOOL)submitMulticlass6Planar:(const float * const _Nonnull * _Nonnull)planes
+                          width:(int)width
+                         height:(int)height
+                     sampleTsMs:(int64_t)sampleTsMs {
+    if (!self.isReady || !planes || width <= 0 || height <= 0) return NO;
+    return _engine->submitMulticlass6Planar(planes, width, height, sampleTsMs) ? YES : NO;
+}
+
 - (void)submitFaceMissAtMs:(int64_t)sampleTsMs {
     std::lock_guard<std::mutex> lock(_mutex);
     if (_engine) _engine->submitFaceMiss(sampleTsMs);

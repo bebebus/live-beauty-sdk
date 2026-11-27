@@ -85,6 +85,22 @@ NS_ASSUME_NONNULL_BEGIN
                  sampleTsMs:(int64_t)sampleTsMs
                  receivedMs:(int64_t)receivedMs;
 
+/** v3.9: Submit 1..2 simultaneous 468/478-pt faces for dual-face co-streaming parity. */
+- (int)submitMultiFaceLandmarks:(const float *)face0
+                    face0Points:(int)face0Points
+                          face1:(nullable const float *)face1
+                    face1Points:(int)face1Points
+                          width:(int)width
+                         height:(int)height
+                     sampleTsMs:(int64_t)sampleTsMs
+                     receivedMs:(int64_t)receivedMs;
+
+/** v3.9: Submit 6-plane MediaPipe selfie_multiclass confidence masks `[0=bg..5=accessories]` in `[0..1]`. */
+- (BOOL)submitMulticlass6Planar:(const float * const _Nonnull * _Nonnull)planes
+                          width:(int)width
+                         height:(int)height
+                     sampleTsMs:(int64_t)sampleTsMs;
+
 - (void)submitFaceMissAtMs:(int64_t)sampleTsMs;
 
 /** v3.2: Submit 33-point top-down body pose (`33 * 3` floats: x, y, visibility). */
