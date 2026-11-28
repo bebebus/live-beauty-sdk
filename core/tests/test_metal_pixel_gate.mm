@@ -1221,7 +1221,7 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
         tb.bind(3, camTex);
         UniformBlock ub{};
         ub.push(1.0f / kW, 1.0f / kH, 0.0f, 0.0f);  // single-frame spatial snap (even before temporal damping!)
-        ub.push(0.055f, 0.022f, 0.080f, 0.0f);
+        ub.push(0.055f, 0.022f, 0.080f, 1.0f);      // uU1.w = matteSpatialFade = 1.0f (v3.9.7 segmentation-k1)
         dev.beginPass(matteRt, kW, kH, false, {});
         dev.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
         dev.endPass();
@@ -1282,7 +1282,7 @@ void testV361ColdPorcelainWhiteningAndNonDarkeningLipProbes(MetalDevice& dev) {
             tb.bind(3, prevRgb);
             UniformBlock ub{};
             ub.push(1.0f / kSz, 1.0f / kSz, 0.612f, 1.0f);  // default matteTemporal=0.60 -> 0.612
-            ub.push(0.075f, 0.020f, 0.070f, 0.0f);
+            ub.push(0.075f, 0.020f, 0.070f, 1.0f);          // uU1.w = matteSpatialFade = 1.0f (v3.9.7 segmentation-k1)
             dev.beginPass(matteRt, kSz, kSz, false, {});
             dev.drawFullScreenQuad(ShaderId::kMatteRefine, st, tb, ub);
             dev.endPass();
@@ -3414,10 +3414,10 @@ void testV397MetalAuditPixelInvariants(MetalDevice& dev) {
         TextureBindings tb{};
         tb.bind(0, srcTex); tb.bind(1, srcTex); tb.bind(2, semTex); tb.bind(3, fallback);
         UniformBlock ub{};
-        ub.push(1.0f / kW, 1.0f / kH, 1.0f, 4.50f);  // poly mode, pres = 0.50
-        ub.push(0.0f, 0.0f, 0.0f, 0.0f);             // skinOnly=0, smooth=0
-        ub.push(0.75f, 0.0f, 0.0f, 0.0f);            // whiten = 0.75
-        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(1.0f / kW, 1.0f / kH, 1.0f, 4.50f);  // [0] poly mode, pres = 0.50
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);             // [1] skinOnly=0, smooth=0, brightness=0, texture=0
+        ub.push(0.0f, 0.0f, 1.0f, 0.0f);             // [2] radiance=0, sharpness=0, saturation=1.0, filter=0
+        ub.push(0.75f, 0.0f, 0.0f, 0.0f);            // [3] whiten = 0.75, rosy=0, oil=0, relight=0
         ub.push(0.0f, 0.0f, 0.0f, 1.0f);
         ub.push(0.0f, 0.50f, 0.0f, 0.0f);            // uU5.y = bodyPriorPresence = 0.50
         ub.push(0.5f, 0.5f, 0.8f, 0.8f);             // wide oval covering test quad
