@@ -675,7 +675,10 @@ int LiveBeautyEngine::submitMultiFaceLandmarks(
         lastHeight_ = frameHeight;
     }
 
-    const int effectiveMaxFaces = std::clamp(config_.maxFaces, 1, math::MultiFaceTracker::kMaxFaces);
+    const int effLoadLevel = std::max(governor_.level(), hostLoadLevel_.load(std::memory_order_relaxed));
+    const auto tierCaps = math::DeviceTierPolicy::resolve(config_.performanceTier, hardwareTier_, effLoadLevel);
+    const int effectiveMaxFaces = std::min(
+        std::clamp(config_.maxFaces, 1, math::MultiFaceTracker::kMaxFaces), tierCaps.maxFacesCap);
     const int cappedCount = std::min(faceCount, effectiveMaxFaces);
     float cx = 0.0f, cy = 0.0f, fw = 0.0f;
     const int valid = faces_.submitFaces(
@@ -1057,10 +1060,11 @@ rhi::TextureId LiveBeautyEngine::processFrame(
     in.secondaryFace.landmarks478x2 = hasSecMesh ? secMeshView.landmarks : nullptr;
     in.secondaryFace.meta15 = hasSecMesh ? secMeshView.meta : nullptr;
     in.secondaryFace.hasIris = hasSecMesh && secMeshView.hasIris;
-    in.secondaryFace.presence = (config_.maxFaces >= 2) ? secondaryTl.presence() : 0.0f;
+    in.secondaryFace.presence = (effectiveMaxFaces >= 2) ? secondaryTl.presence() : 0.0f;
     in.secondaryFace.steadyFace = secondaryTl.steadyFace();
     in.secondaryFace.steadyEye = secondaryTl.steadyEye();
     in.secondaryFace.eyeMakeupKeep = secondaryTl.eyeMakeupKeep();
+    in.primaryPromotionCount = promoCount;
 
     in.hasBody = (bodyState != nullptr);
     in.bodyState7 = bodyState;

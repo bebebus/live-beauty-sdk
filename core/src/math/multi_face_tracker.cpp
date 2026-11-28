@@ -18,6 +18,12 @@ void MultiFaceTracker::reset() {
         lastCy_[i] = 0.5f;
         lastFw_[i] = 0.0f;
     }
+    hasPendingJump_ = false;
+    pendingJumpCx_ = 0.5f;
+    pendingJumpCy_ = 0.5f;
+    pendingJumpFw_ = 0.0f;
+    pendingJumpStreak_ = 0;
+    pendingJumpLastTsMs_ = kTimeInvalid;
 }
 
 void MultiFaceTracker::submitAllMiss(int64_t sampleTsMs) {
@@ -125,24 +131,57 @@ int MultiFaceTracker::submitFaces(
     // Slot assignment: assign[slotIdx] = parsedIdx (-1 means miss for that slot)
     int assign[kMaxFaces] = {-1, -1};
     if (validCount == 1) {
+        const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
+        const bool s1 = hasLastCenter_[1] && timelines_[1].latest() != kTimeInvalid;
+        // Distance gate starts at 0.80*fw and relaxes linearly with elapsed miss duration (+3.0*dtMissSec*fw).
+        const auto withinGate = [&](int slotIdx, const ParsedFace& p) -> bool {
+            const float refFw = std::max(std::max(lastFw_[slotIdx], p.fw), 0.08f);
+            const int64_t lastTs = timelines_[slotIdx].latest();
+            const float dtMissSec = (lastTs != kTimeInvalid && sampleTsMs > lastTs)
+                ? std::min(static_cast<float>(sampleTsMs - lastTs) * 0.001f, 0.50f)
+                : 0.0f;
+            const float maxD = (0.80f + 3.0f * dtMissSec) * refFw;
+            return distSq(p.cx, p.cy, lastCx_[slotIdx], lastCy_[slotIdx], aspect) <= maxD * maxD;
+        };
         if (effectiveMaxFaces < 2) {
-            // v3.9.6 (tone-d1/tracking-m3): In single-face mode (maxFaces=1), slot 1 is never rendered,
-            // so a lone face must always reacquire slot 0 immediately instead of being stranded for 500ms.
-            assign[0] = 0;
+            // v3.9.7 (tracking-k1 P1): Second line of defense in single-face mode — if slot 0 is active and
+            // a lone face appears outside the relaxed gate (e.g., background poster on ROI fallback), require
+            // >= 3 consecutive spatially consistent frames before rewriting slot 0 (never route to unrendered slot 1).
+            if (!s0 || withinGate(0, parsed[0])) {
+                assign[0] = 0;
+                hasPendingJump_ = false;
+                pendingJumpStreak_ = 0;
+                pendingJumpLastTsMs_ = kTimeInvalid;
+            } else {
+                const float candRefFw = std::max(std::max(pendingJumpFw_, parsed[0].fw), 0.08f);
+                const float consistentD = 0.45f * candRefFw;
+                const bool consistent = hasPendingJump_ &&
+                    pendingJumpLastTsMs_ != kTimeInvalid &&
+                    sampleTsMs > pendingJumpLastTsMs_ &&
+                    (sampleTsMs - pendingJumpLastTsMs_) <= 150 &&
+                    distSq(parsed[0].cx, parsed[0].cy, pendingJumpCx_, pendingJumpCy_, aspect) <=
+                        consistentD * consistentD;
+                if (consistent) {
+                    ++pendingJumpStreak_;
+                } else {
+                    pendingJumpStreak_ = 1;
+                    hasPendingJump_ = true;
+                }
+                pendingJumpCx_ = parsed[0].cx;
+                pendingJumpCy_ = parsed[0].cy;
+                pendingJumpFw_ = parsed[0].fw;
+                pendingJumpLastTsMs_ = sampleTsMs;
+                if (pendingJumpStreak_ >= 3) {
+                    assign[0] = 0;
+                    hasPendingJump_ = false;
+                    pendingJumpStreak_ = 0;
+                    pendingJumpLastTsMs_ = kTimeInvalid;
+                }
+            }
         } else {
-            const bool s0 = hasLastCenter_[0] && timelines_[0].latest() != kTimeInvalid;
-            const bool s1 = hasLastCenter_[1] && timelines_[1].latest() != kTimeInvalid;
-            // v3.9.6 (tracking-4/tracking-m3): Distance gate starts at 0.80*fw and relaxes linearly with
-            // elapsed miss duration (+3.0*dtMissSec*fw) so legitimate fast movement reacquires cleanly.
-            const auto withinGate = [&](int slotIdx, const ParsedFace& p) -> bool {
-                const float refFw = std::max(std::max(lastFw_[slotIdx], p.fw), 0.08f);
-                const int64_t lastTs = timelines_[slotIdx].latest();
-                const float dtMissSec = (lastTs != kTimeInvalid && sampleTsMs > lastTs)
-                    ? std::min(static_cast<float>(sampleTsMs - lastTs) * 0.001f, 0.50f)
-                    : 0.0f;
-                const float maxD = (0.80f + 3.0f * dtMissSec) * refFw;
-                return distSq(p.cx, p.cy, lastCx_[slotIdx], lastCy_[slotIdx], aspect) <= maxD * maxD;
-            };
+            hasPendingJump_ = false;
+            pendingJumpStreak_ = 0;
+            pendingJumpLastTsMs_ = kTimeInvalid;
             if (s0 && s1) {
                 const float d0 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[0], lastCy_[0], aspect);
                 const float d1 = distSq(parsed[0].cx, parsed[0].cy, lastCx_[1], lastCy_[1], aspect);

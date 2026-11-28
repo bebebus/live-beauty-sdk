@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Published release tags are immutable; any post-release fix is published as a new patch version.
 
+## [3.9.7] - 2026-11-28
+
+### Fixed
+- **Primary Face Hijack Prevention (`MultiFaceTracker`, `LiveBeautyEngine`)**:
+  - In single-face mode (`effectiveMaxFaces < 2`, also capped by `tierCaps.maxFacesCap`), rejected single-frame far jumps beyond `(0.80 + 3.0 * dtMissSec) * fw` until a consistent new candidate persists for 3 consecutive frames (`kSingleFaceJumpConfirmFrames = 3`) within `0.45 * fw`, preventing brief head-turn / occlusion misses under ROI crop from permanently hijacking slot 0 onto a background poster or passerby (`tracking-k1` / `tracking-3`).
+  - Propagated `MultiFaceTracker::promotionCount()` into `RenderPipeline::FrameInput::primaryPromotionCount` so slot 1 -> slot 0 promotions cleanly swap spatial priors (`tone-k2`).
+- **Brief Face-Loss Lip/Brow Protection, Relocation Crossfade & Face/Neck Continuity (`RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Cached the last valid primary & secondary face landmarks (`lastValidLandmarks_`, `secLastValidLandmarks_`) and rendered `kPassSkinMask` continuously throughout the `1200ms` portrait-prior hold window and `tau = 350ms` decay so lip, eyebrow, and eye exclusions (`sem.g`) stay intact during brief head turns/lookdowns (`skin-k1`, `tone-k1`).
+  - Decoupled polygon coverage (`rawPoly = sem.r * smoothstep(0.0, 0.02, pres)`) and unscaled exclusion (`exclM = sem.g * polyActive`) from ramping `pres`, and gated body skin via `(1.0 - rawPoly)` rather than `(1.0 - faceM)` so reacquire blends face and neck identically at weight `pres` (eliminating both the `2p - p²` jaw/neck seam and `> 3/255` step jumps with `risePrior` `tau = 160ms`; `skin-k1`, `tone-k1`, `tone-m1`, `tone-k3`).
+  - Fixed portrait-prior single-frame teleportation on face relocation (`> 0.45 * refRx` spins off a `tau = 350ms` decaying `ghostOval_` and resets `bodyPriorPresence_` to ramp up cleanly), primary/secondary slot promotion (swaps `lastValid* <-> secLastValid*`), and stopped storing dilated `activeFaceState` back into `lastValidOval_` (`tone-k2` / `tone-n1`).
+  - Re-tuned `evalPortraitPrior` `headHalo` to `smoothstep(1.02, 1.56)` with crown `smoothstep(0.75, 1.12)` so cheek hand-lift transitions remain wide (`~50.4px` 5–95% at `rx = 120px`) while beige wall bleed stays `~0.55/255` at `pa = 1.50` (`tone-c1`).
+- **Face Shape Shear, Steep-Yaw Smoothness & Close-Up Fold Guard (`FaceMeshDeformer`)**:
+  - Decoupled lower-face (`faceSlim`/`vFace`) `etaLower` (`chinSmooth(-0.45..-0.95)`, `xi0Lower = 0.36 -> 0.00`, `spanLower = 0.36 -> 0.50`, no `eyeBand` discontinuity) from upper-face (`faceNarrow`/`cheekboneSlim`) `etaUpper` (`eyeBand(-0.78..0.16)`, `xi0Upper = 0.26 -> xi0E`, `spanUpper = 0.34 -> 0.25`), cutting full-face max vertical shear below v3.9.1 (`14.57° / 14.52° / 18.05° / 17.27°`), raising minimum singular value above v3.9.5 (`0.729 / 0.610`), keeping nasal-alar shear `<= 8.54°`, chin-tip kink `0.87°`, and eye/iris warp `0.00%` (`shape-k1`).
+  - Replaced binary `fastSteepYaw` switching with a symmetric velocity EMA (`yawVelEma_`, `tau = 65ms`) continuous gate (`velGate = smoothstep(0.32, 0.70, |yawVelEma_|)`) and `dt`-normalized `fastGlobal`, eliminating both the 37°±7° limit-cycle jitter (`shape-k2`) and asymmetric noise rectification bias (`shape-e1`).
+  - Lowered post-safety and post-smoothing fold-guard visibility gate from `triFront > 0.35` to `> 0.05` with `fwCap = min(fw, 0.45)` area floor so close-up (`fw = 0.80`) temporal frames with 0.5px noise stay flip-free (`shape-d1`, `shape-k3`).
+- **Matting Continuity & L2 Hair-Dye Protection (`RenderPipeline`, `gles_shaders.cpp`, `metal_shaders.h`)**:
+  - Added spatial blend factor `uU1.w = smoothstep(0.05, 0.95, loadFadeBody)` to `kMatteRefineFrag` / `fs_matte_refine` (`outMask = mix(cMask, outMask, clamp(uU1.w, 0.0, 1.0))`) and gated pass skip on `matteSpatialFade > 1e-3` (`loadFadeBody <= 0.05`), eliminating the single-frame spatial edge jump on `loadFadeBody` fade-out/fade-in (`segmentation-k1`, `gpuperf-k1`).
+  - Kept `kPassHairAlpha` enabled at L2 whenever hair dye or hair shine is active (`loadFadeSmooth > 1e-4`), avoiding sudden bangs bleed on Standard-tier Mali-G57 devices under thermal L2 (`skin-e1`).
+- **Testing & Parity Gate (`tests/verify_shaders.py`, `test_math_core.cpp`, `test_rhi_pipeline.cpp`, `test_metal_pixel_gate.mm`)**:
+  - Added automated `livebeauty_shader_gate` (`core/tests/verify_shaders.py`) wired into CTest verifying GLES/Metal shader parity, lip/brow exclusion invariance during reacquire, cheek/neck continuity, `headHalo` band/wall metrics, and Prototype B `lineScore` pixel-level discrimination (`skin-k2`, `tone-k3`).
+  - Added realistic regression coverage for `tracking-k1`, full-face shear/`minSigma` (`shape-k1`), 1.0°/1.5° coherent yaw jitter (`shape-e1`/`shape-k3`), 37°±7° yaw oscillation (`shape-k2`), `fw = 0.80` noisy close-up folds (`shape-k3`), hold-window polygon exclusion (`skin-k1`), relocation/promotion prior continuity (`tone-k2`), `kMatteRefine` spatial fade (`segmentation-k1`), and Mali-G57 L2 hair alpha retention (`skin-e1`).
+
 ## [3.9.6] - 2026-11-27
 
 ### Fixed

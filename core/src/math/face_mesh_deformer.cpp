@@ -136,6 +136,8 @@ const DeformerStaticTables& tables() {
 void FaceMeshDeformer::resetTemporal() {
     temporalValid_ = false;
     dispTemporalValid_ = false;
+    rawSignedYawPrev_ = 0.0f;
+    yawVelEma_ = 0.0f;
     bisectLambdaState_ = 1.0f;
     prevEyeMod_ = 1.0f;
     prevFaceMod_ = 1.0f;
@@ -322,6 +324,8 @@ bool FaceMeshDeformer::deform(
         const float rawLeh = rawLEyeH * invRef;
         if (temporalFresh) {
             signedYawState_ = rawSignedYaw;
+            rawSignedYawPrev_ = rawSignedYaw;
+            yawVelEma_ = 0.0f;
             wLeftRatioState_ = rawL;
             wRightRatioState_ = rawR;
             eyeDuLeftRatioState_ = rawEyeDuL;
@@ -333,12 +337,17 @@ bool FaceMeshDeformer::deform(
         } else {
             yawJump = std::fabs(rawSignedYaw - signedYawState_);
             const float envTau = 150.0f - (150.0f - 26.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
-            // v3.9.6 (shape-m1): Gate fast yawTau (28ms) on genuine increasing steep turn (yawJump > 0.03),
-            // so stationary 37-44deg side profile stays at envTau=150ms without detector noise jitter.
-            const bool fastSteepYaw = (yawJump > 0.03f &&
-                                       std::fabs(rawSignedYaw) > std::fabs(signedYawState_) &&
-                                       std::fabs(rawSignedYaw) > 0.45f);
-            const float yawTau = fastSteepYaw ? std::min(envTau, 28.0f) : envTau;
+            // v3.9.7 (shape-k2/shape-e1): Symmetric continuous smoothed-velocity gate eliminates both
+            // asymmetric noise rectification at stationary 40 deg and binary tau28/tau150 limit-cycle during
+            // slow 3/4 oscillation while staying fast (~28ms) on genuine rapid turns.
+            const float dtSec = std::max(dtMs * 0.001f, 0.008f);
+            const float instYawVel = (rawSignedYaw - rawSignedYawPrev_) / dtSec;
+            rawSignedYawPrev_ = rawSignedYaw;
+            const float velAlpha = 1.0f - std::exp(-dtMs / 65.0f);
+            yawVelEma_ += velAlpha * (instYawVel - yawVelEma_);
+            const float turnSpeed = detail::smoothstep(0.65f, 1.50f, std::fabs(yawVelEma_)) *
+                                    detail::smoothstep(0.35f, 0.52f, std::fabs(signedYawState_));
+            const float yawTau = std::min(envTau, 150.0f - (150.0f - 28.0f) * turnSpeed);
             const float eyeEnvTau = 45.0f - (45.0f - 20.0f) * detail::smoothstep(0.05f, 0.10f, yawJump);
             envAlpha = 1.0f - std::exp(-dtMs / envTau);
             const float yawAlpha = 1.0f - std::exp(-dtMs / yawTau);
@@ -438,37 +447,45 @@ bool FaceMeshDeformer::deform(
         const float denomEye = std::max(wSide, 0.065f * fw);
         const float xiE = std::fabs(du) / denomEye;
         const float xi0E = detail::clampf(eyeDuSide / denomEye + 0.05f, 0.60f, 0.85f);
-        const float eyeBand = detail::smoothstep(-0.72f, 0.12f, dv) * (1.0f - detail::smoothstep(0.70f, 0.95f, dv));
-        const float chinSmooth = detail::smoothstep(-0.62f, -0.95f, dv);
-        const float xi0Base = 0.32f - 0.20f * chinSmooth;
-        const float spanBase = 0.24f + 0.08f * chinSmooth;
-        const float xi0Eff = xi0Base + eyeBand * (xi0E - xi0Base);
-        const float spanEff = spanBase + eyeBand * (0.25f - spanBase);
-        const float xiEff = xi + eyeBand * (xiE - xi);
-        const float innerGate = detail::smoothstep(xi0Eff, xi0Eff + spanEff, xiEff);
         const float outerGate = 1.0f - detail::smoothstep(1.35f, 2.10f, xi);
         const float vertGuard = 1.0f - detail::smoothstep(0.95f, 1.32f, -dv);
-        const float eta = innerGate * outerGate;
+
+        // v3.9.7 (shape-k1): Decouple lower-face (faceSlim/vFace) and upper-face (faceNarrow/cheekboneSlim)
+        // lateral inner gates. Only faceNarrow/cheekboneSlim act at eye height (dv > 0.15), so giving them
+        // a dedicated eyeBand-excluded etaUpper preserves 0% eye/iris horizontal warp and <= 8.6 deg nasal-alar
+        // shear, while giving faceSlim/vFace a smooth chin-only etaLower (no eyeBand discontinuity) eliminates
+        // the mouth-corner/chin vertical shear spike (beating v3.9.1 full-face shear & v3.9.5 min singular value)
+        // and keeps jaw-contour chin-tip kink < 1 deg.
+        const float chinSmooth = detail::smoothstep(-0.45f, -0.95f, dv);
+        const float xi0Lower = 0.36f - 0.36f * chinSmooth;
+        const float spanLower = 0.36f + 0.14f * chinSmooth;
+        const float etaLower = detail::smoothstep(xi0Lower, xi0Lower + spanLower, xi) * outerGate;
+
+        const float eyeBand = detail::smoothstep(-0.78f, 0.16f, dv) * (1.0f - detail::smoothstep(0.70f, 0.95f, dv));
+        const float xi0Upper = 0.26f + eyeBand * (xi0E - 0.26f);
+        const float spanUpper = 0.34f + eyeBand * (0.25f - 0.34f);
+        const float xiUpper = xi + eyeBand * (xiE - xi);
+        const float etaUpper = detail::smoothstep(xi0Upper, xi0Upper + spanUpper, xiUpper) * outerGate;
 
         float frac = 0.0f;
         float liftV = 0.0f;
-        if (eta > 1e-5f) {
-            if (sFaceSlim > 0.0f) {
+        if (etaLower > 1e-5f || etaUpper > 1e-5f) {
+            if (sFaceSlim > 0.0f && etaLower > 1e-5f) {
                 const float slimVert = detail::smoothstep(-1.18f, -0.76f, dv) * (1.0f - detail::smoothstep(0.15f, 0.42f, dv));
-                frac += sFaceSlim * 0.068f * slimVert;
+                frac += sFaceSlim * 0.068f * slimVert * etaLower;
             }
-            if (sVFace > 0.0f) {
+            if (sVFace > 0.0f && etaLower > 1e-5f) {
                 const float vVert = gaussian(dv, -0.58f, 0.48f) * vertGuard;
-                frac += sVFace * 0.068f * vVert;
-                liftV += sVFace * 0.012f * fh * sideW * eta * vVert;
+                frac += sVFace * 0.068f * vVert * etaLower;
+                liftV += sVFace * 0.012f * fh * sideW * etaLower * vVert;
             }
-            if (sFaceNarrow > 0.0f) {
-                frac += sFaceNarrow * 0.065f * gaussian(dv, -0.05f, 0.68f);
+            if (sFaceNarrow > 0.0f && etaUpper > 1e-5f) {
+                frac += sFaceNarrow * 0.065f * gaussian(dv, -0.05f, 0.68f) * etaUpper;
             }
-            if (sCheekbone > 0.0f) {
-                frac += sCheekbone * 0.070f * gaussian(dv, 0.06f, 0.36f) * detail::smoothstep(-0.55f, -0.20f, dv) * vertGuard;
+            if (sCheekbone > 0.0f && etaUpper > 1e-5f) {
+                frac += sCheekbone * 0.070f * gaussian(dv, 0.06f, 0.36f) * detail::smoothstep(-0.55f, -0.20f, dv) * vertGuard * etaUpper;
             }
-            frac *= symW * sideW * eta;
+            frac *= symW * sideW;
             const float maxFrac = 0.115f * symW;
             if (frac > 0.0f && maxFrac > 1e-5f) {
                 frac = (frac * maxFrac) / std::hypot(frac, maxFrac);
@@ -804,15 +821,14 @@ bool FaceMeshDeformer::deform(
     }
     applyDisplacement();
 
-    // v3.9.6 (shape-n2/shape-d1): Restrict post-safety flip verification & global lambda bisection to
-    // visible front-facing triangles (triFront_ > 0.35 AND source area >= ~4px^2), capping fw at 0.45
-    // so close-up big faces never lose flip protection on visible 4-15px^2 front triangles.
+    // v3.9.7 (shape-d1/shape-k3): Protect all visible front-facing triangles (>= ~3.9px^2, triFront > 0.05)
+    // including slender mouth-corner/lip-seam triangles on close-up big faces (fw capped at 0.45).
     const float fwCap = std::min(fw, 0.45f);
-    const float minVerifyTriArea2 = 8.8e-5f * fwCap * fwCap;
+    const float minVerifyTriArea2 = 7.2e-5f * fwCap * fwCap;
     for (int k = 0; k < 4; ++k) {
         bool anyBad = false;
         for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-            if (triFront_[t] <= 0.35f || std::fabs(triOrig_[t]) < minVerifyTriArea2) continue;
+            if (triFront_[t] <= 0.05f || std::fabs(triOrig_[t]) < minVerifyTriArea2) continue;
             if (areaRatio(t) < 0.05f) {
                 const int a = indices[t * 3];
                 const int b = indices[t * 3 + 1];
@@ -834,7 +850,7 @@ bool FaceMeshDeformer::deform(
     {
         bool stillBad = false;
         for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-            if (triFront_[t] > 0.35f && std::fabs(triOrig_[t]) >= minVerifyTriArea2 && areaRatio(t) < 0.05f) {
+            if (triFront_[t] > 0.05f && std::fabs(triOrig_[t]) >= minVerifyTriArea2 && areaRatio(t) < 0.05f) {
                 stillBad = true;
                 break;
             }
@@ -849,7 +865,7 @@ bool FaceMeshDeformer::deform(
                 applyDisplacement();
                 bool ok = true;
                 for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-                    if (triFront_[t] > 0.35f && std::fabs(triOrig_[t]) >= minVerifyTriArea2 && areaRatio(t) < 0.05f) {
+                    if (triFront_[t] > 0.05f && std::fabs(triOrig_[t]) >= minVerifyTriArea2 && areaRatio(t) < 0.05f) {
                         ok = false;
                         break;
                     }
@@ -897,10 +913,11 @@ bool FaceMeshDeformer::deform(
             std::fabs(params.mouthSmile - prevParams_.mouthSmile) > 0.004f ||
             std::fabs(params.cranialTop - prevParams_.cranialTop) > 0.004f;
         const bool initDisp = temporalFresh || !dispTemporalValid_;
-        const bool yawWeightChanging = !initDisp && (std::fabs(effYawW - prevEffYawW_) > 0.03f);
+        const float dtRef = std::max(dtMs, 16.0f);
+        const bool yawWeightChanging = !initDisp && (std::fabs(effYawW - prevEffYawW_) > 0.0014f * dtRef);
         const bool modChanging = !initDisp &&
-            (std::fabs(eyeMod - prevEyeMod_) > 0.025f || std::fabs(faceMod - prevFaceMod_) > 0.025f);
-        const bool fastGlobal = (paramsChanged || yawJump > 0.08f || yawWeightChanging || modChanging);
+            (std::fabs(eyeMod - prevEyeMod_) > 0.0011f * dtRef || std::fabs(faceMod - prevFaceMod_) > 0.0011f * dtRef);
+        const bool fastGlobal = (paramsChanged || yawJump > 0.10f || yawWeightChanging || modChanging);
         const float outerDispAlpha = initDisp ? 1.0f : (1.0f - std::exp(-dtMs / (fastGlobal ? kDispTauFastMs : kDispTauSteadyMs)));
         const float innerDispAlpha = initDisp ? 1.0f : (1.0f - std::exp(-dtMs / (fastGlobal ? kDispTauFastMs : kDispTauInnerMs)));
 
@@ -938,7 +955,7 @@ bool FaceMeshDeformer::deform(
         for (int pass = 0; pass < 2; ++pass) {
             bool fixedAny = false;
             for (int t = 0; t < FaceMeshTopology::kDeformableTriangleCount; ++t) {
-                if (triFront_[t] <= 0.35f || std::fabs(triOrig_[t]) < minVerifyTriArea2) continue;
+                if (triFront_[t] <= 0.05f || std::fabs(triOrig_[t]) < minVerifyTriArea2) continue;
                 const float r = areaRatio(t);
                 if (r >= 0.04f) continue;
                 const float backToSafe = (pass == 0) ? (1.0f - detail::smoothstep(0.0f, 0.04f, r)) : 1.0f;

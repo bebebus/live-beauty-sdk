@@ -147,6 +147,7 @@ struct FrameInputs {
     float guidedSpread = 1.25f;
     float lightLuma = 0.30f;
     float bitratePressure = 0.0f;
+    uint64_t primaryPromotionCount = 0;
 };
 
 /**
@@ -197,7 +198,7 @@ private:
                          const float* ovalState41, float aspect, bool clearRgbToZero,
                          bool meshWarped, bool frontFaceCw);
     TextureId renderTemporalMatte(TextureId rawMaskTex, TextureId currentRgbTex, int srcW, int srcH,
-                                  float matteTemporal);
+                                  float matteTemporal, float matteSpatial);
     void renderMakeup(
         RenderTargetId targetRt, TextureId baseTex, TextureId semanticTex, int width, int height,
         const BeautyConfig& cfg, const Vec3& ambientRgb, bool enableAmbient,
@@ -259,17 +260,28 @@ private:
     uint32_t lastActivePassesMask_ = 0;
     bool lastWroteOutputRt_ = false;
 
-    // v3.9.5/v3.9.6 (skin-n1/tone-n1/skin-n4/tone-m1/tone-m2): Smoothly decaying portrait spatial prior state
-    // (primary + secondary) with 1200ms brief-miss hold so brief head turns never breathe beauty while long
-    // absences (> 1200ms) decay smoothly to 0 instead of snapping portraitPrior back to 1.0.
+    // v3.9.5/v3.9.6/v3.9.7 (skin-k1/tone-k1/tone-k2/tone-m1): Smoothly decaying portrait spatial prior +
+    // cached polygon landmarks for brief-miss lip/brow exclM retention + ghost cross-fade slot on relocation/promotion.
     std::array<float, 4> lastValidOval_{0.0f, 0.0f, 0.0f, 0.0f};
     std::array<float, 2> lastValidAxis_{1.0f, 0.0f};
     float bodyPriorPresence_ = 0.0f;
     int64_t lastFaceSeenMs_ = kTimeInvalid;
+    std::array<float, math::FaceMeshFrame::kCoordCount> lastValidLandmarks_{};
+    std::array<float, math::FaceMeshFrame::kMetaSize> lastValidMeta_{};
+    bool hasLastValidLandmarks_ = false;
+    bool lastValidFrontCw_ = false;
     std::array<float, 4> secLastValidOval_{0.0f, 0.0f, 0.0f, 0.0f};
     std::array<float, 2> secLastValidAxis_{1.0f, 0.0f};
     float secBodyPriorPresence_ = 0.0f;
     int64_t secLastFaceSeenMs_ = kTimeInvalid;
+    std::array<float, math::FaceMeshFrame::kCoordCount> secLastValidLandmarks_{};
+    std::array<float, math::FaceMeshFrame::kMetaSize> secLastValidMeta_{};
+    bool hasSecLastValidLandmarks_ = false;
+    bool secLastValidFrontCw_ = false;
+    std::array<float, 4> ghostOval_{0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 2> ghostAxis_{1.0f, 0.0f};
+    float ghostPresence_ = 0.0f;
+    uint64_t lastPriorPromotionCount_ = 0;
     int64_t priorLastNowMs_ = kTimeInvalid;
     bool priorInitialized_ = false;
 

@@ -3383,6 +3383,70 @@ void testV394MetalAuditPixelInvariants(MetalDevice& dev) {
     }
 }
 
+void testV397MetalAuditPixelInvariants(MetalDevice& dev) {
+    // 1. skin-k1 / tone-k1 & tone-m1/k3: During reacquire ramp (pres = 0.25..0.50),
+    //    excluded lip/brow pixels (sem.g = 255) stay 100% protected from whitening (drift <= 1/255),
+    //    and cheek vs neck (rawPoly = 1 vs 0) match at identical weight pres (no 2p-p^2 seam!).
+    {
+        constexpr int kW = 32, kH = 32;
+        const TextureId srcTex = makeSolidTex(dev, kW, kH, 185, 145, 125, 255);
+        std::vector<uint8_t> semPx(kW * kH * 4, 0);
+        for (int y = 0; y < kH; ++y) {
+            for (int x = 0; x < kW; ++x) {
+                const int o = (y * kW + x) * 4;
+                if (x < 10) {
+                    // Lip/brow exclusion inside face polygon (sem.r=255, sem.g=255)
+                    semPx[o] = 255; semPx[o + 1] = 255; semPx[o + 2] = 0; semPx[o + 3] = 255;
+                } else if (x < 22) {
+                    // Cheek face polygon (sem.r=255, sem.g=0)
+                    semPx[o] = 255; semPx[o + 1] = 0; semPx[o + 2] = 0; semPx[o + 3] = 255;
+                } else {
+                    // Neck outside face polygon (sem.r=0, sem.g=0)
+                    semPx[o] = 0; semPx[o + 1] = 0; semPx[o + 2] = 0; semPx[o + 3] = 255;
+                }
+            }
+        }
+        const TextureId semTex = dev.createTexture2D(kW, kH, TextureFormat::kRgba8, semPx.data());
+        const TextureId fallback = makeSolidTex(dev, 1, 1, 0, 0, 0, 255);
+        const RenderTargetId rt = dev.createRenderTarget(kW, kH, TextureFormat::kRgba8);
+
+        RenderState st{};
+        TextureBindings tb{};
+        tb.bind(0, srcTex); tb.bind(1, srcTex); tb.bind(2, semTex); tb.bind(3, fallback);
+        UniformBlock ub{};
+        ub.push(1.0f / kW, 1.0f / kH, 1.0f, 4.50f);  // poly mode, pres = 0.50
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);             // skinOnly=0, smooth=0
+        ub.push(0.75f, 0.0f, 0.0f, 0.0f);            // whiten = 0.75
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 1.0f);
+        ub.push(0.0f, 0.50f, 0.0f, 0.0f);            // uU5.y = bodyPriorPresence = 0.50
+        ub.push(0.5f, 0.5f, 0.8f, 0.8f);             // wide oval covering test quad
+        ub.push(1.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.025f, 0.09f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        ub.push(0.0f, 0.0f, 0.0f, 0.0f);
+        dev.beginPass(rt, kW, kH, LoadOp::kDontCare);
+        dev.drawFullScreenQuad(ShaderId::kCompositePro, st, tb, ub);
+        dev.endPass();
+
+        std::vector<uint8_t> out(kW * kH * 4, 0);
+        EXPECT_TRUE(dev.readbackTextureRgba8(dev.textureOf(rt), out.data(), kW, kH));
+        const int lipIdx = (16 * kW + 5) * 4;
+        const int cheekIdx = (16 * kW + 16) * 4;
+        const int neckIdx = (16 * kW + 27) * 4;
+        EXPECT_TRUE(std::abs(int(out[lipIdx]) - 185) <= 1);
+        EXPECT_TRUE(out[cheekIdx] > 192);
+        EXPECT_TRUE(std::abs(int(out[cheekIdx]) - int(out[neckIdx])) <= 2);
+
+        dev.destroyTexture(srcTex);
+        dev.destroyTexture(semTex);
+        dev.destroyTexture(fallback);
+        dev.destroyRenderTarget(rt);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -3417,6 +3481,7 @@ int main() {
         testV392MulticlassChestNoDarkShadowPatch(dev);
         testV393NoDarkShadowPatchesBodyFaceHairGuided(dev);
         testV394MetalAuditPixelInvariants(dev);
+        testV397MetalAuditPixelInvariants(dev);
 
         if (gFailures == 0) {
             std::cout << "PASS  all Apple Metal GPU pixel gates (L1/L2/L6, E1-E4, R1, V1/H1, H2, S1, M1, P1-P4, E2E) passed!\n";

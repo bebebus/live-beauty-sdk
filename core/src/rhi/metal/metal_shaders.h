@@ -740,7 +740,7 @@ static inline float evalPortraitPrior(float2 uv, float aspect, float4 oval, floa
     float bodyRx = max(oval.z, oval.w * 0.77f);
     float ba = dot(dp, fuBody) / max(bodyRx, 0.0001f);
     float bb = dot(dp, float2(-fuBody.y, fuBody.x)) / max(oval.w, 0.0001f);
-    float headHalo = (1.0f - smoothstep(1.12f, 1.52f, length(float2(pa, pb)))) * (1.0f - smoothstep(0.78f, 1.10f, pb));
+    float headHalo = (1.0f - smoothstep(1.02f, 1.56f, length(float2(pa, pb)))) * (1.0f - smoothstep(0.75f, 1.12f, pb));
     float down = -bb;
     float sideReach = mix(1.35f, 2.55f, smoothstep(0.55f, 1.35f, down));
     float neckChest = smoothstep(0.28f, 0.92f, down) * (1.0f - smoothstep(3.60f, 5.00f, down)) *
@@ -786,14 +786,18 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     }
     float4 sem = tex2.sample(kLinearClamp, toMtlUv(uv));
     float nonHair = clamp(sem.a * 1.04f - 0.02f, 0.0f, 1.0f);
-    float faceM = 0.0f, exclM = 0.0f, hiM = 0.0f;
+    float faceM = 0.0f, rawPoly = 0.0f, exclM = 0.0f, hiM = 0.0f, pres = 0.0f;
     if (uFrame.w >= 3.5f) {
-        float pres = clamp(uFrame.w - 4.0f, 0.0f, 1.0f);
-        float3 poly = sem.rgb * pres;
-        faceM = poly.r; exclM = poly.g; hiM = poly.b;
+        pres = clamp(uFrame.w - 4.0f, 0.0f, 1.0f);
+        float polyActive = smoothstep(0.0f, 0.02f, pres);
+        faceM = sem.r * pres;
+        rawPoly = sem.r * polyActive;
+        exclM = sem.g * polyActive;
+        hiM = sem.b * pres;
     } else if (uFrame.w > 0.0f) {
-        float2 em = faceMasks(uv, uFrame.z, uFrame.w, uOval, float2(uEye0.w, uEye1.w), uMouth, uEyeMask0, uEyeMask1);
-        faceM = em.x; exclM = em.y; hiM = em.x * 0.3f;
+        pres = clamp(uFrame.w, 0.0f, 1.0f);
+        float2 em = faceMasks(uv, uFrame.z, pres, uOval, float2(uEye0.w, uEye1.w), uMouth, uEyeMask0, uEyeMask1);
+        faceM = em.x; rawPoly = em.x; exclM = em.y; hiM = em.x * 0.3f;
     }
     float skinOnly = step(15.5f, uParams.x);
     float style = uParams.x - skinOnly * 16.0f;
@@ -805,7 +809,7 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     float warmPoly = smoothstep(0.065f, 0.165f, relRB) *
         smoothstep(0.010f, 0.065f, relRG + 0.015f);
     float polyGate = smoothstep(0.05f, 0.14f, yFine) *
-        mix(0.90f * smoothstep(0.04f, 0.22f, faceM) * warmPoly, 1.0f, smoothstep(0.0f, 0.25f, gate));
+        mix(0.90f * smoothstep(0.04f, 0.22f, rawPoly) * warmPoly, 1.0f, smoothstep(0.0f, 0.25f, gate));
     // v3.9.3: Luminance-normalized body/neck skin gate eliminates dark un-whitened shadow cliffs on
     // shaded or cool-LED collarbones, necks, chests, and arms while keeping neutral walls & dark hair at 0 bleed.
     float normScale = clamp(0.68f / max(yFine, 0.14f), 1.0f, 3.0f);
@@ -817,14 +821,13 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     // (nonHair ~ 0) are never re-whitened as skin (v3.9.5 skin-n3).
     float hairSkinGuard = faceM * smoothstep(0.22f, 0.36f, yFine) * warmPoly;
     float effNonHair = max(nonHair, hairSkinGuard * smoothstep(0.05f, 0.35f, nonHair));
-    // v3.9.6 (skin-m3/skin-m5/tone-m3/tone-m5): Secondary portrait prior gated by explicit flag uEye1.z > 0.5
-    // so single-face poly mode never misreads eye ellipses (+30 ALU/px saved) and dual-loss decays smoothly.
+    // v3.9.6/v3.9.7 (skin-m3/skin-m5/tone-m3/tone-m5/tone-k2): Secondary/ghost portrait prior gated by explicit uEye1.z > 0.5.
     float bodyPriorScale = clamp(1.0f - uEye1.y, 0.0f, 1.0f);
     float portraitPrior = evalPortraitPrior(uv, uFrame.z, uOval, float2(uEye0.w, uEye1.w), bodyPriorScale);
     if (uEye1.z > 0.5f) {
         portraitPrior = max(portraitPrior, evalPortraitPrior(uv, uFrame.z, uEyeMask0, uEyeMask1.xy, uEyeMask1.z));
     }
-    float skin = clamp(faceM * polyGate + (1.0f - faceM) * bodyGate * portraitPrior * (1.0f - 0.70f * exclM), 0.0f, 1.0f) * effNonHair;
+    float skin = clamp(faceM * polyGate + (1.0f - rawPoly) * bodyGate * portraitPrior * (1.0f - 0.70f * exclM), 0.0f, 1.0f) * effNonHair;
     float3 guided = clamp(original.rgb * guidedA + guidedB, 0.0f, 1.0f);
     float yOrig = luma709(original.rgb);
     float core = max(uGrade.y, 0.005f);
@@ -894,7 +897,7 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
     float mouthZone = 0.0f;
     if (uMouth.z > 0.001f && exclM > 0.25f) {
         mouthZone = (1.0f - smoothstep(0.85f, 1.45f, ellipseE(uv, uMouth, float2(uEye0.w, uEye1.w), max(uFrame.z, 0.0001f)))) *
-                    smoothstep(0.55f, 0.88f, exclM) * nonHair;
+                    smoothstep(0.55f, 0.88f, exclM) * nonHair * pres;
     }
     if (uDetails.y > 0.0f) {
         // v3.7.0 Log-compressed halo-free clarity: green-dominant band-pass boosts micro-detail without ringing halos
@@ -903,7 +906,7 @@ fragment float4 fs_composite_pro(QuadOut in [[stage_in]],
         float logGrad = sign(gBand) * log(1.0f + 42.0f * absBand) / 42.0f;
         float noiseGate = smoothstep(0.35f * core, 0.90f * core, absBand);
         float activity = noiseGate * mix(0.28f, 1.0f, smoothstep(1.1f * core, 3.2f * core, absBand));
-        float region = mix(0.65f, 1.0f, exclM) * (1.0f - 0.62f * skin * featureKeep * faceM);
+        float region = mix(0.65f, 1.0f, exclM * pres) * (1.0f - 0.62f * skin * featureKeep * faceM);
         float negCap = mix(-0.045f, -0.012f, max(mouthZone, smoothstep(0.10f, 0.45f, faceM)));
         float sharpDelta = clamp(logGrad * 2.15f, negCap, 0.068f);
         color += float3(sharpDelta * activity * uDetails.y * region);
@@ -1285,6 +1288,7 @@ fragment float4 fs_matte_refine(QuadOut in [[stage_in]],
         float keep = uni.u[0].z * (1.0f - smoothstep(uni.u[1].y, uni.u[1].z, motion)) * (1.0f - lowContrastRelease);
         outMask = mix(guidedMask, pMask, keep);
     }
+    outMask = mix(cMask, outMask, clamp(uni.u[1].w, 0.0f, 1.0f));
     return float4(outMask, outMask, outMask, 1.0f);
 }
 

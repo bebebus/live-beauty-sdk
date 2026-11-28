@@ -142,6 +142,8 @@ private:
     float rEyeHRatioState_ = 0.0f;
     float lEyeHRatioState_ = 0.0f;
     float signedYawState_ = 0.0f;
+    float rawSignedYawPrev_ = 0.0f;
+    float yawVelEma_ = 0.0f;
     float bisectLambdaState_ = 1.0f;
     float prevEffYawW_ = 1.0f;
     float prevEyeMod_ = 1.0f;

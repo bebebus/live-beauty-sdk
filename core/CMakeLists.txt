@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(livebeauty_core VERSION 3.9.6 LANGUAGES CXX)
+project(livebeauty_core VERSION 3.9.7 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -130,6 +130,12 @@ if(LIVEBEAUTY_BUILD_TESTS)
 
     add_executable(livebeauty_bench tests/bench_math_core.cpp)
     target_link_libraries(livebeauty_bench PRIVATE livebeauty_math)
+
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(NAME livebeauty_shader_gate
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_shaders.py)
+    endif()
 
     if(LIVEBEAUTY_ENABLE_METAL AND APPLE)
         add_executable(livebeauty_metal_pixel_gate tests/test_metal_pixel_gate.mm)

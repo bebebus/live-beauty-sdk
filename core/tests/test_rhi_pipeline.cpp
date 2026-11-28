@@ -2279,7 +2279,7 @@ void testV396AuditFixesPipeline() {
                 if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 10) {
                     const float flag = c.uniforms.v[5].z;
                     const float sp = (flag > 0.5f) ? c.uniforms.v[9].z : 0.0f;
-                    if (c.uniforms.v[0].w <= 0.001f && flag > 0.5f) sawDualLossSecFlag = true;
+                    if (f >= 20 && flag > 0.5f && sp > 0.05f) sawDualLossSecFlag = true;
                     maxSecDelta = std::max(maxSecDelta, std::fabs(sp - prevSecP));
                     prevSecP = sp;
                 }
@@ -2416,6 +2416,305 @@ void testV396AuditFixesPipeline() {
     engine.releaseGpuResources();
 }
 
+void testV397AuditFixesPipeline() {
+    MockRhiDevice dev;
+    LiveBeautyEngine engine(dev);
+    const TextureId camTex = dev.createTexture2D(720, 1280, TextureFormat::kRgba8, nullptr);
+    const TextureId personTex = dev.createTexture2D(256, 256, TextureFormat::kR8, nullptr);
+    const TextureId hairTex = dev.createTexture2D(128, 128, TextureFormat::kR8, nullptr);
+    engine.setHardwareProfile("Adreno (TM) 740", 8, 12288);
+
+    auto makeFaceMp = [](float cx, float cyTopDown, float fw) {
+        std::array<float, math::FaceMeshFrame::kCoordCount> mpXy{};
+        const auto& xyz = math::FaceMeshTopology::kCanonicalXyz;
+        const float aspect = 720.0f / 1280.0f;
+        const float scale = fw / math::FaceMeshFilter::canonicalFaceWidth();
+        const float cyGl = 1.0f - cyTopDown;
+        for (int i = 0; i < math::FaceMeshTopology::kFaceVertexCount; ++i) {
+            mpXy[i * 2] = cx + xyz[i * 3] * scale;
+            mpXy[i * 2 + 1] = 1.0f - (((cyGl / aspect) + xyz[i * 3 + 1] * scale) * aspect);
+        }
+        for (int i = 468; i < 478; ++i) {
+            mpXy[i * 2] = cx + ((i >= 473) ? 0.06f : -0.06f);
+            mpXy[i * 2 + 1] = cyTopDown - 0.06f;
+        }
+        return mpXy;
+    };
+
+    auto evalPrior = [](float ux, float uy, float aspect, const Vec4& oval, float ax, float ay, float pres) -> float {
+        if (oval.z <= 0.001f || oval.w <= 0.001f || pres <= 0.001f) return 0.0f;
+        const float fLen = std::hypot(ax, ay);
+        const float fux = fLen > 0.001f ? (ax / fLen) : 1.0f;
+        const float fuy = fLen > 0.001f ? (ay / fLen) : 0.0f;
+        float bx = 0.70f + 0.30f * fux, by = 0.30f * fuy;
+        const float bLen = std::max(std::hypot(bx, by), 1e-4f);
+        bx /= bLen; by /= bLen;
+        const float dpx = ux - oval.x, dpy = (uy - oval.y) / std::max(aspect, 0.0001f);
+        const float pa = (dpx * fux + dpy * fuy) / std::max(oval.z, 0.0001f);
+        const float pb = (-dpx * fuy + dpy * fux) / std::max(oval.w, 0.0001f);
+        const float bodyRx = std::max(oval.z, oval.w * 0.77f);
+        const float ba = (dpx * bx + dpy * by) / std::max(bodyRx, 0.0001f);
+        const float bb = (-dpx * by + dpy * bx) / std::max(oval.w, 0.0001f);
+        const float headHalo = (1.0f - detail::smoothstep(1.02f, 1.56f, std::hypot(pa, pb))) *
+                               (1.0f - detail::smoothstep(0.75f, 1.12f, pb));
+        const float down = -bb;
+        const float sideReach = 1.35f + (2.55f - 1.35f) * detail::smoothstep(0.55f, 1.35f, down);
+        const float neckChest = detail::smoothstep(0.28f, 0.92f, down) * (1.0f - detail::smoothstep(3.60f, 5.00f, down)) *
+                                (1.0f - detail::smoothstep(sideReach - 0.45f, sideReach + 0.55f, std::fabs(ba)));
+        return detail::clampf(std::max(headHalo, neckChest) * detail::clampf(pres, 0.0f, 1.0f), 0.0f, 1.0f);
+    };
+
+    auto evalPriorGrid = [&](const UniformBlock& u, std::vector<float>& outGrid) {
+        constexpr int kGx = 24, kGy = 32;
+        outGrid.resize(kGx * kGy);
+        const float aspect = u.v[0].z;
+        const float pPres = detail::clampf(1.0f - u.v[5].y, 0.0f, 1.0f);
+        const bool hasSec = u.v[5].z > 0.5f;
+        for (int gy = 0; gy < kGy; ++gy) {
+            const float vy = (gy + 0.5f) / kGy;
+            for (int gx = 0; gx < kGx; ++gx) {
+                const float vx = (gx + 0.5f) / kGx;
+                float p = evalPrior(vx, vy, aspect, u.v[6], u.v[4].w, u.v[5].w, pPres);
+                if (hasSec) {
+                    p = std::max(p, evalPrior(vx, vy, aspect, u.v[8], u.v[9].x, u.v[9].y, u.v[9].z));
+                }
+                outGrid[gy * kGx + gx] = p;
+            }
+        }
+    };
+
+    // 1. skin-k1 / tone-k1 (P2): During brief 600ms face miss (hold window), polygon skin mask MUST remain active
+    //    (kPassSkinMask + uU0.w >= 4.5) so lips/eyes/brows retain exclM and are NOT whitened/smoothed!
+    {
+        auto cfg = BeautyConfig::naturalStudio();
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.50f, 0.30f);
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 1000 + f * 33;
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+        }
+        float minFramePresInHold = 10.0f;
+        bool allHoldFramesHadSkinMask = true;
+        for (int f = 0; f < 18; ++f) {  // ~600ms miss
+            const int64_t ts = 1350 + f * 33;
+            dev.calls.clear();
+            engine.submitFaceMiss(ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            if ((engine.stats().activePassesMask & kPassSkinMask) == 0) {
+                allHoldFramesHadSkinMask = false;
+            }
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 6) {
+                    minFramePresInHold = std::min(minFramePresInHold, c.uniforms.v[0].w);
+                }
+            }
+        }
+        EXPECT_TRUE(allHoldFramesHadSkinMask);
+        EXPECT_TRUE(minFramePresInHold >= 4.50f);
+    }
+
+    // 2. tone-k2 (P2 - tone-n1 regression): Relocation after 600ms miss, A->B swap after 400ms,
+    //    and dual-face primary promotion MUST NOT single-frame teleport portraitPrior (max |dPrior| <= 0.25)!
+    {
+        auto runPriorMaxJump = [&](auto&& feedSeq) -> float {
+            engine.resetTracking();
+            std::vector<float> prevGrid, curGrid;
+            float maxJump = 0.0f;
+            bool havePrev = false;
+            feedSeq([&](int64_t ts, bool recordJump) {
+                dev.calls.clear();
+                engine.processFrame(camTex, 720, 1280, ts, ts);
+                for (const auto& c : dev.calls) {
+                    if (c.shader == ShaderId::kCompositePro && c.uniforms.count >= 10) {
+                        evalPriorGrid(c.uniforms, curGrid);
+                        if (havePrev && recordJump) {
+                            for (size_t i = 0; i < curGrid.size(); ++i) {
+                                maxJump = std::max(maxJump, std::fabs(curGrid[i] - prevGrid[i]));
+                            }
+                        }
+                        prevGrid = curGrid;
+                        havePrev = true;
+                    }
+                }
+            });
+            return maxJump;
+        };
+
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.maxFaces = 1;
+        engine.setConfig(cfg);
+        const auto mpA = makeFaceMp(0.30f, 0.50f, 0.26f);
+        const auto mpB = makeFaceMp(0.72f, 0.50f, 0.26f);
+
+        // (a) Single-face miss 600ms then reappear 0.42 away (relocation)
+        const float jumpReloc = runPriorMaxJump([&](auto step) {
+            for (int f = 0; f < 8; ++f) {
+                const int64_t ts = 4000 + f * 33;
+                engine.submitFaceLandmarks(ts, mpA.data(), 478, 720, 1280, ts);
+                step(ts, f > 0);
+            }
+            for (int f = 0; f < 18; ++f) {
+                const int64_t ts = 4270 + f * 33;
+                engine.submitFaceMiss(ts);
+                step(ts, true);
+            }
+            for (int f = 0; f < 12; ++f) {
+                const int64_t ts = 4870 + f * 33;
+                engine.submitFaceLandmarks(ts, mpB.data(), 478, 720, 1280, ts);
+                step(ts, true);
+            }
+        });
+        EXPECT_TRUE(jumpReloc <= 0.25f);
+
+        // (b) Dual-face primary leaves -> secondary promotes cleanly with smooth prior!
+        cfg.maxFaces = 2;
+        engine.setConfig(cfg);
+        math::MultiFaceTracker::RawFaceInput pair[2] = {{mpA.data(), 478}, {mpB.data(), 478}};
+        math::MultiFaceTracker::RawFaceInput onlyB[1] = {{mpB.data(), 478}};
+        const float jumpPromo = runPriorMaxJump([&](auto step) {
+            for (int f = 0; f < 10; ++f) {
+                const int64_t ts = 7000 + f * 33;
+                engine.submitMultiFaceLandmarks(ts, pair, 2, 720, 1280, ts);
+                step(ts, f > 0);
+            }
+            for (int f = 0; f < 30; ++f) {
+                const int64_t ts = 7350 + f * 33;
+                engine.submitMultiFaceLandmarks(ts, onlyB, 1, 720, 1280, ts);
+                step(ts, true);
+            }
+        });
+        EXPECT_TRUE(jumpPromo <= 0.25f);
+        cfg.maxFaces = 1;
+        engine.setConfig(cfg);
+    }
+
+    // 3. segmentation-k1 / gpuperf-k1 (P2/P3): kMatteRefine spatial weight uU1.w fades smoothly during L0 -> L1
+    //    (maxFrameDelta <= 0.20, drops < 0.15 before kPassMatteRefine skips!).
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.backgroundBlur = 0.6f;
+        engine.setConfig(cfg);
+        engine.setHostLoadLevel(0);
+        dev.calls.clear();
+        engine.processFrame(camTex, 720, 1280, 10000, 10000, personTex);
+        float prevSpatial = -1.0f;
+        for (const auto& c : dev.calls) {
+            if (c.shader == ShaderId::kMatteRefine && c.uniforms.count >= 2) {
+                prevSpatial = c.uniforms.v[1].w;
+            }
+        }
+        EXPECT_TRUE(prevSpatial >= 0.95f);  // Full spatial weight at L0 (v3.9.6 passed 0.0f!)
+
+        engine.setHostLoadLevel(1);
+        float maxDelta = 0.0f;
+        float lastSpatialBeforeSkip = prevSpatial;
+        bool skipped = false;
+        for (int f = 1; f <= 40; ++f) {
+            const int64_t ts = 10000 + f * 33;
+            dev.calls.clear();
+            engine.processFrame(camTex, 720, 1280, ts, ts, personTex);
+            bool ran = false;
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kMatteRefine && c.uniforms.count >= 2) {
+                    const float cur = c.uniforms.v[1].w;
+                    maxDelta = std::max(maxDelta, std::fabs(cur - prevSpatial));
+                    prevSpatial = cur;
+                    lastSpatialBeforeSkip = cur;
+                    ran = true;
+                }
+            }
+            if (!ran) {
+                skipped = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(skipped);
+        EXPECT_TRUE(maxDelta <= 0.20f);
+        EXPECT_TRUE(lastSpatialBeforeSkip <= 0.15f);
+        engine.setHostLoadLevel(0);
+    }
+
+    // 4. skin-e1 (P2): Mali-G57 (Standard) + hairDye=0.4 + hairMask keeps kPassHairAlpha active on L1 -> L2!
+    {
+        engine.resetTracking();
+        engine.setHardwareProfile("Mali-G57 MC2", 8, 6144);
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.hairDye = 0.4f;
+        engine.setConfig(cfg);
+        const auto mp = makeFaceMp(0.50f, 0.50f, 0.30f);
+        engine.setHostLoadLevel(1);
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 13000 + f * 33;
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts, kInvalidTexture, 0.30f, 1.0f, hairTex, ts);
+        }
+        EXPECT_TRUE((engine.stats().activePassesMask & kPassHairAlpha) != 0);
+        engine.setHostLoadLevel(2);
+        bool allL2HadHairAlpha = true;
+        for (int f = 0; f < 15; ++f) {
+            const int64_t ts = 13350 + f * 33;
+            engine.submitFaceLandmarks(ts, mp.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts, kInvalidTexture, 0.30f, 1.0f, hairTex, ts);
+            if ((engine.stats().activePassesMask & kPassHairAlpha) == 0) {
+                allL2HadHairAlpha = false;
+            }
+        }
+        EXPECT_TRUE(allL2HadHairAlpha);
+        engine.setHostLoadLevel(0);
+        engine.setHardwareProfile("Adreno (TM) 740", 8, 12288);
+    }
+
+    // 5. shape-k3 (m4 strengthened): >=25 consecutive face miss frames (>800ms, past FaceTimeline 500ms clear!)
+    //    must keep chin-nod attenuated neck strength smooth with maxNeckDelta < 0.02!
+    {
+        engine.resetTracking();
+        auto cfg = BeautyConfig::naturalStudio();
+        cfg.neckLengthen = 1.0f;
+        engine.setConfig(cfg);
+        std::array<math::PoseLandmark, 33> pose{};
+        for (auto& pt : pose) { pt.x = 0.50f; pt.y = 0.60f; pt.visibility = 0.95f; }
+        pose[11] = {0.38f, 0.52f, 0.98f};
+        pose[12] = {0.62f, 0.52f, 0.98f};
+        pose[23] = {0.42f, 0.80f, 0.98f};
+        pose[24] = {0.58f, 0.80f, 0.98f};
+        auto mpNod = makeFaceMp(0.50f, 0.50f, 0.30f);
+        const float dyShift = 0.51f - mpNod[152 * 2 + 1];
+        for (int i = 0; i < 478; ++i) mpNod[i * 2 + 1] += dyShift;
+
+        float prevNeck = -1.0f;
+        for (int f = 0; f < 10; ++f) {
+            const int64_t ts = 16000 + f * 33;
+            dev.calls.clear();
+            engine.submitBodyPose(ts, pose.data(), 33, 720, 1280);
+            engine.submitFaceLandmarks(ts, mpNod.data(), 478, 720, 1280, ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kBodyWarp && c.uniforms.count >= 3) prevNeck = c.uniforms.v[2].y;
+            }
+        }
+        EXPECT_TRUE(prevNeck > 0.0f && prevNeck < 0.14f);
+        float maxNeckDelta = 0.0f;
+        for (int f = 0; f < 25; ++f) {  // 825ms miss: crosses FaceTimeline 500ms mesh clear around f=15!
+            const int64_t ts = 16350 + f * 33;
+            dev.calls.clear();
+            engine.submitBodyPose(ts, pose.data(), 33, 720, 1280);
+            engine.submitFaceMiss(ts);
+            engine.processFrame(camTex, 720, 1280, ts, ts);
+            for (const auto& c : dev.calls) {
+                if (c.shader == ShaderId::kBodyWarp && c.uniforms.count >= 3) {
+                    maxNeckDelta = std::max(maxNeckDelta, std::fabs(c.uniforms.v[2].y - prevNeck));
+                    prevNeck = c.uniforms.v[2].y;
+                }
+            }
+        }
+        EXPECT_TRUE(maxNeckDelta < 0.02f);
+    }
+
+    engine.releaseGpuResources();
+}
+
 }  // namespace
 
 int main() {
@@ -2438,6 +2737,7 @@ int main() {
     testV394AuditFixesPipelineAndGpuPerf();
     testV395ReverificationFixesPipeline();
     testV396AuditFixesPipeline();
+    testV397AuditFixesPipeline();
     if (gFailures == 0) {
         std::cout << "PASS  all livebeauty RHI & RenderPipeline tests passed!\n";
         return 0;

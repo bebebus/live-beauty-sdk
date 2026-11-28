@@ -60,6 +60,12 @@ private:
     std::array<float, kMaxFaces> lastCy_{0.5f, 0.5f};
     std::array<float, kMaxFaces> lastFw_{0.0f, 0.0f};
     std::array<bool, kMaxFaces> hasLastCenter_{false, false};
+    bool hasPendingJump_ = false;
+    float pendingJumpCx_ = 0.5f;
+    float pendingJumpCy_ = 0.5f;
+    float pendingJumpFw_ = 0.0f;
+    int pendingJumpStreak_ = 0;
+    int64_t pendingJumpLastTsMs_ = kTimeInvalid;
     uint64_t promotionCount_ = 0;
     float aspect_ = 1.0f;
 };

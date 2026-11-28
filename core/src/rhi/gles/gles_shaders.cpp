@@ -733,7 +733,7 @@ float evalPortraitPrior(vec2 uv, float aspect, vec4 oval, vec2 axis, float prese
     float bodyRx = max(oval.z, oval.w * 0.77);
     float ba = dot(dp, fuBody) / max(bodyRx, 0.0001);
     float bb = dot(dp, vec2(-fuBody.y, fuBody.x)) / max(oval.w, 0.0001);
-    float headHalo = (1.0 - smoothstep(1.12, 1.52, length(vec2(pa, pb)))) * (1.0 - smoothstep(0.78, 1.10, pb));
+    float headHalo = (1.0 - smoothstep(1.02, 1.56, length(vec2(pa, pb)))) * (1.0 - smoothstep(0.75, 1.12, pb));
     float down = -bb;
     float sideReach = mix(1.35, 2.55, smoothstep(0.55, 1.35, down));
     float neckChest = smoothstep(0.28, 0.92, down) * (1.0 - smoothstep(3.60, 5.00, down)) *
@@ -759,14 +759,20 @@ void main() {
     }
     vec4 sem = texture2D(uTex2, uv);
     float nonHair = clamp(sem.a * 1.04 - 0.02, 0.0, 1.0);
-    float faceM = 0.0; float exclM = 0.0; float hiM = 0.0;
+    float faceM = 0.0; float rawPoly = 0.0; float exclM = 0.0; float hiM = 0.0; float pres = 0.0;
     if (uU0.w >= 3.5) {
-        float pres = clamp(uU0.w - 4.0, 0.0, 1.0);
-        vec3 poly = sem.rgb * pres;
-        faceM = poly.r; exclM = poly.g; hiM = poly.b;
+        pres = clamp(uU0.w - 4.0, 0.0, 1.0);
+        // v3.9.7 (skin-k1/tone-k1/tone-m1): Keep exclM & rawPoly unscaled by ramping pres so lips/eyes/brows
+        // retain full exclusion during reacquire and face/neck share identical linear weight pres (no 2p-p^2 seam).
+        float polyActive = smoothstep(0.0, 0.02, pres);
+        faceM = sem.r * pres;
+        rawPoly = sem.r * polyActive;
+        exclM = sem.g * polyActive;
+        hiM = sem.b * pres;
     } else if (uU0.w > 0.0) {
-        vec2 em = faceMasks(uv, uU0.z, uU0.w, uU6, vec2(uU4.w, uU5.w), uU7, uU8, uU9);
-        faceM = em.x; exclM = em.y; hiM = em.x * 0.3;
+        pres = clamp(uU0.w, 0.0, 1.0);
+        vec2 em = faceMasks(uv, uU0.z, pres, uU6, vec2(uU4.w, uU5.w), uU7, uU8, uU9);
+        faceM = em.x; rawPoly = em.x; exclM = em.y; hiM = em.x * 0.3;
     }
     float skinOnly = step(15.5, uU1.x);
     float style = uU1.x - skinOnly * 16.0;
@@ -778,7 +784,7 @@ void main() {
     float warmPoly = smoothstep(0.065, 0.165, relRB) *
         smoothstep(0.010, 0.065, relRG + 0.015);
     float polyGate = smoothstep(0.05, 0.14, yFine) *
-        mix(0.90 * smoothstep(0.04, 0.22, faceM) * warmPoly, 1.0, smoothstep(0.0, 0.25, gate));
+        mix(0.90 * smoothstep(0.04, 0.22, rawPoly) * warmPoly, 1.0, smoothstep(0.0, 0.25, gate));
     // v3.9.3: Luminance-normalized body/neck skin gate eliminates dark un-whitened shadow cliffs on
     // shaded or cool-LED collarbones, necks, chests, and arms while keeping neutral walls & dark hair at 0 bleed.
     float normScale = clamp(0.68 / max(yFine, 0.14), 1.0, 3.0);
@@ -790,14 +796,13 @@ void main() {
     // (nonHair ~ 0) are never re-whitened as skin (v3.9.5 skin-n3).
     float hairSkinGuard = faceM * smoothstep(0.22, 0.36, yFine) * warmPoly;
     float effNonHair = max(nonHair, hairSkinGuard * smoothstep(0.05, 0.35, nonHair));
-    // v3.9.6 (skin-m3/skin-m5/tone-m3/tone-m5): Secondary portrait prior gated by explicit flag uU5.z > 0.5
-    // so single-face poly mode never misreads eye ellipses (+30 ALU/px saved) and dual-loss decays smoothly.
+    // v3.9.6/v3.9.7 (skin-m3/skin-m5/tone-m3/tone-m5/tone-k2): Secondary/ghost portrait prior gated by explicit uU5.z > 0.5.
     float bodyPriorScale = clamp(1.0 - uU5.y, 0.0, 1.0);
     float portraitPrior = evalPortraitPrior(uv, uU0.z, uU6, vec2(uU4.w, uU5.w), bodyPriorScale);
     if (uU5.z > 0.5) {
         portraitPrior = max(portraitPrior, evalPortraitPrior(uv, uU0.z, uU8, uU9.xy, uU9.z));
     }
-    float skin = clamp(faceM * polyGate + (1.0 - faceM) * bodyGate * portraitPrior * (1.0 - 0.70 * exclM), 0.0, 1.0) * effNonHair;
+    float skin = clamp(faceM * polyGate + (1.0 - rawPoly) * bodyGate * portraitPrior * (1.0 - 0.70 * exclM), 0.0, 1.0) * effNonHair;
     vec3 guided = clamp(original.rgb * guidedA + guidedB, 0.0, 1.0);
     float yOrig = luma(original.rgb);
     float core = max(uU10.y, 0.005);
@@ -870,7 +875,7 @@ void main() {
     float mouthZone = 0.0;
     if (uU7.z > 0.001 && exclM > 0.25) {
         mouthZone = (1.0 - smoothstep(0.85, 1.45, ellipseE(uv, uU7, vec2(uU4.w, uU5.w), max(uU0.z, 0.0001)))) *
-                    smoothstep(0.55, 0.88, exclM) * nonHair;
+                    smoothstep(0.55, 0.88, exclM) * nonHair * pres;
     }
     if (uU2.y > 0.0) {
         // v3.7.0 Log-compressed halo-free clarity: green-dominant band-pass boosts micro-detail without ringing halos
@@ -879,7 +884,7 @@ void main() {
         float logGrad = sign(gBand) * log(1.0 + 42.0 * absBand) / 42.0;
         float noiseGate = smoothstep(0.35 * core, 0.90 * core, absBand);
         float activity = noiseGate * mix(0.28, 1.0, smoothstep(1.1 * core, 3.2 * core, absBand));
-        float region = mix(0.65, 1.0, exclM) * (1.0 - 0.62 * skin * featureKeep * faceM);
+        float region = mix(0.65, 1.0, exclM * pres) * (1.0 - 0.62 * skin * featureKeep * faceM);
         float negCap = mix(-0.045, -0.012, max(mouthZone, smoothstep(0.10, 0.45, faceM)));
         float sharpDelta = clamp(logGrad * 2.15, negCap, 0.068);
         color += vec3(sharpDelta * activity * uU2.y * region);
@@ -1392,6 +1397,8 @@ void main() {
         float keep = uU0.z * (1.0 - smoothstep(uU1.y, uU1.z, motion)) * (1.0 - lowContrastRelease);
         outMask = mix(guidedMask, pMask, keep);
     }
+    // v3.9.7 (segmentation-k1/gpuperf-k1): Smooth spatial blend to raw cMask via uU1.w before pass skip.
+    outMask = mix(cMask, outMask, clamp(uU1.w, 0.0, 1.0));
     gl_FragColor = vec4(outMask, outMask, outMask, 1.0);
 }
 )";
